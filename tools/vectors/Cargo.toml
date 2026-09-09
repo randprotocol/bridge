@@ -1,0 +1,11 @@
+[package]
+name = "vectors"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+shrugg-core = { path = "../../../fullnode/crates/shrugg-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
