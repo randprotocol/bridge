@@ -35,7 +35,20 @@ impl Ctx {
         let addrs = secrets.map(|s| b::guardian_address(&s));
         let addr7 = b::guardian_address(&secret7);
 
-        let emitters = [2u16, 3, 4, 5].map(|chain| b::keccak256(format!("emitter-{chain}").as_bytes()));
+        // Source-chain emitters: EVM chains (2 Ethereum, 3 BSC, 4 Tron) are
+        // contract addresses, so left-pad to the same 12-zero ++ 20-byte
+        // convention as `evm_token_addr`/`evm_to`; Solana (5) keeps the
+        // full 32-byte hash.
+        let emitters = [2u16, 3, 4, 5].map(|chain| {
+            let hash = b::keccak256(format!("emitter-{chain}").as_bytes());
+            if chain == 5 {
+                hash
+            } else {
+                let mut out = [0u8; 32];
+                out[12..32].copy_from_slice(&hash[12..32]);
+                out
+            }
+        });
         let rand_emitter = b::keccak256(b"rand-bridge-emitter-test");
         let governance_emitter = b::GOVERNANCE_EMITTER;
 
@@ -75,8 +88,24 @@ fn hex20(x: &[u8; 20]) -> String {
     hex::encode(x)
 }
 
+/// A 32-byte "native" token identifier (used only for Solana, chain 5,
+/// where the token address really is a 32-byte mint pubkey).
 fn token_addr(label: &str) -> [u8; 32] {
     b::keccak256(label.as_bytes())
+}
+
+/// A left-padded 20-byte EVM address (12 zero bytes ++ 20 address bytes),
+/// per spec 3.5: `token_address`/`emitter_address` for the EVM-family
+/// chains (2 Ethereum, 3 BSC, 4 Tron) are real 20-byte contract addresses
+/// widened into the wire format's 32-byte field, the same left-padding
+/// convention already used for the `to` field on EVM releases (see
+/// `evm_to`). Solana (chain 5) keeps the full 32-byte value via
+/// `token_addr` instead, since its addresses/mints are natively 32 bytes.
+fn evm_token_addr(label: &str) -> [u8; 32] {
+    let hash = b::keccak256(label.as_bytes());
+    let mut out = [0u8; 32];
+    out[12..32].copy_from_slice(&hash[12..32]);
+    out
 }
 
 /// Decimal string of a big-endian u256 (`amount`/`fee` on the wire), via
@@ -251,7 +280,7 @@ pub fn build() -> VectorsFile {
     // -- transfer_eth_usdt_6dp_ok ------------------------------------
     let eth_amount = u256(100_000_000);
     let eth_fee = u256(1_000);
-    let eth_token = token_addr("usdt-2");
+    let eth_token = evm_token_addr("usdt-2");
     let eth_body = b::Body {
         timestamp: TIMESTAMP,
         nonce: 7,
@@ -293,7 +322,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(250_000_000_000);
         let fee = u256(0);
-        let token = token_addr("usdt-3");
+        let token = evm_token_addr("usdt-3");
         let body = b::Body {
             timestamp: TIMESTAMP,
             nonce: 7,
@@ -332,7 +361,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(500_000_000);
         let fee = u256(5);
-        let token = token_addr("usdt-4");
+        let token = evm_token_addr("usdt-4");
         let body = b::Body {
             timestamp: TIMESTAMP,
             nonce: 7,
@@ -417,7 +446,7 @@ pub fn build() -> VectorsFile {
     .into_iter()
     .enumerate()
     {
-        let token = token_addr(&format!("usdt-{chain}"));
+        let token = evm_token_addr(&format!("usdt-{chain}"));
         let to = evm_to();
         let sequence = i as u64;
         let body = b::Body {
@@ -540,7 +569,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 100u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
@@ -591,7 +620,7 @@ pub fn build() -> VectorsFile {
     ] {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = if name == "transfer_old_set_in_grace_ok" {
             101u64
         } else {
@@ -643,7 +672,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 103u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
@@ -687,7 +716,7 @@ pub fn build() -> VectorsFile {
     ] {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let body = b::Body {
             timestamp: TIMESTAMP,
             nonce: 7,
@@ -728,7 +757,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
 
         // dup_index: indices [0,1,2,3,3]
         {
@@ -865,7 +894,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
 
         // high_s
         {
@@ -986,12 +1015,12 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
 
         // wrong_emitter_address: right chain (2), address doesn't match it.
         {
             let sequence = 113u64;
-            let wrong_emitter = b::keccak256(b"emitter-999");
+            let wrong_emitter = evm_token_addr("emitter-999");
             let body = b::Body {
                 timestamp: TIMESTAMP,
                 nonce: 7,
@@ -1069,7 +1098,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 115u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
@@ -1109,7 +1138,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-3");
+        let token = evm_token_addr("usdt-3");
         let to = evm_to();
         let sequence = 4u64;
         let body = b::Body {
@@ -1150,7 +1179,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(1_000);
         let fee = u256(2_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 116u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
@@ -1191,7 +1220,7 @@ pub fn build() -> VectorsFile {
         let mut amount = [0u8; 32];
         amount[15] = 1;
         let fee = u256(0);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 117u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
@@ -1231,7 +1260,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 118u64;
         let mut payload_bytes = b::Payload::Transfer(b::Transfer {
             amount,
@@ -1273,7 +1302,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 119u64;
         let mut payload_bytes = b::Payload::Transfer(b::Transfer {
             amount,
@@ -1323,7 +1352,7 @@ pub fn build() -> VectorsFile {
     {
         let amount = u256(100_000_000);
         let fee = u256(1_000);
-        let token = token_addr("usdt-2");
+        let token = evm_token_addr("usdt-2");
         let sequence = 120u64;
         let body = b::Body {
             timestamp: TIMESTAMP,
