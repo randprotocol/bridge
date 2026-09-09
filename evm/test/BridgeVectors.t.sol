@@ -17,10 +17,10 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 /// in the file is verified by `Vectors.t.sol` (signature-level rules) or
 /// by the fullnode/Solana verifiers.
 ///
-/// Note the fixture's `payload.token_address` values are full 32-byte
-/// asset labels rather than left-padded EVM addresses; the low 20 bytes
-/// are the token, and the bridge's token whitelist is what actually gates
-/// which address may be released (see `RandBridgeBase._releaseToken`).
+/// The fixture's `payload.token_address` values for chains 2..4 are
+/// left-padded 20-byte contract addresses (Section 3.5), which is exactly
+/// what `RandBridgeBase._releaseToken` requires; a `MockERC20` is etched
+/// at each one so the release has something real to pay out.
 contract BridgeVectorsTest is Test {
     uint256 constant MAX_VECTORS = 64;
 

@@ -271,13 +271,13 @@ abstract contract RandBridgeBase is IRandBridge {
         token.safeTransfer(to, amount - fee);
     }
 
-    /// The token a release payload names. Only the low 20 bytes are the
-    /// EVM/TVM address (Section 3.5); the upper bytes are *not* required
-    /// to be zero because Rand's asset ids are keyed on a full 32-byte
-    /// `token_address` and the shared attestation fixture exercises that.
-    /// The whitelist below is what decides whether an address may be
-    /// released at all, and custody bounds it further.
+    /// The token a release payload names. On an EVM/TVM chain a
+    /// `token_address` is a left-padded 20-byte contract address
+    /// (Section 3.5), so anything in the upper 12 bytes means the payload
+    /// names an asset from a different address space and two distinct
+    /// 32-byte asset ids could otherwise collapse onto one local token.
     function _releaseToken(bytes32 tokenAddress) internal pure returns (address) {
+        if (uint256(tokenAddress) >> 160 != 0) revert BadTokenAddress();
         return address(uint160(uint256(tokenAddress)));
     }
 

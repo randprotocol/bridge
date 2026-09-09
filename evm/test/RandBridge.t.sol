@@ -358,6 +358,22 @@ contract RandBridgeTest is Test {
         bridge.release(att);
     }
 
+    function test_release_rejects_bad_token_address() public {
+        _lock8(1000);
+
+        // A `token_address` with anything above its low 20 bytes is not
+        // an address on this chain, even though the low 20 bytes name a
+        // whitelisted, funded token.
+        bytes32 dirty = bytes32(uint256(uint160(address(t8))) | (uint256(1) << 248));
+        bytes memory att = _fromRand(_transferPayload(1000, dirty, 2, _word(recipient), 2, 0));
+
+        vm.expectRevert(IRandBridge.BadTokenAddress.selector);
+        bridge.release(att);
+
+        assertEq(bridge.custody(address(t8)), 1000, "custody untouched");
+        assertEq(t8.balanceOf(recipient), 0, "nothing paid out");
+    }
+
     function test_release_custody_counter_bounds_loss() public {
         _lock8(1000);
 

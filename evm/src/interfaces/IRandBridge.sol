@@ -72,6 +72,9 @@ interface IRandBridge {
     error PerTransferCap();
     error DailyCap();
     error BadRecipient();
+    /// A release payload's `token_address` is not a left-padded 20-byte
+    /// address on this chain.
+    error BadTokenAddress();
     error UnknownGuardianSet();
     error GuardianSetExpired();
     error BadUpgradeIndex();
