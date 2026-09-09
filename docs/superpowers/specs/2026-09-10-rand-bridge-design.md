@@ -334,11 +334,15 @@ BridgeBurn { asset: AssetId, amount: u128, to_chain: u16, to: [u8; 32], fee: u12
 
 `BridgeAttest` is submitted by anyone (a relayer). Payload id 1 credits `amount - fee` to `to`
 and `fee` to the submitter for the asset derived from `(token_chain, token_address)`, after the
-checks of Section 3 with `to_chain == 1`. Payload id 2 rotates the guardian set. Minimum fee for
+checks of Section 3 with `to_chain == 1` and `token_chain == emitter_chain` (a source contract
+only ever custodies its own chain's tokens, so a registered emitter on one chain must not be able
+to mint an asset whose home is another chain). Genesis validation rejects a `bridge` section
+whose `emitters` map has an entry for chain 1 or any value equal to `GOVERNANCE_EMITTER`, and
+whose guardian list has duplicate or zero keys. Payload id 2 rotates the guardian set. Minimum fee for
 `BridgeAttest` is 0 like `Transfer`; the SHRUGG fee still goes to the proposer.
 
 `BridgeBurn` requires the asset to be registered, `to_chain` to equal the asset's home chain,
-`fee <= amount`, and balance `>= amount`. It debits the balance, increments the burn sequence,
+`amount > 0`, `fee <= amount`, and balance `>= amount`. It debits the balance, increments the burn sequence,
 and records a `BridgeBurnRecord { sequence, body, digest, tx, height }` whose body is the
 Section 3.2 body with `emitter_chain = 1`, `emitter_address = genesis emitter`,
 `timestamp = block timestamp_ms / 1000`, `nonce = 0`, `consistency_level = 0`. Guardians read
@@ -367,7 +371,7 @@ When `bridge` is `Some`, the state root becomes
 
 ```
 bridge_root = blake3("shrugg-bridge-state"
-    || bincode(current_set, guardian_sets)
+    || bincode(emitter, emitters, current_set, guardian_sets)
     || merkle(blake3("shrugg-asset-balance" || asset || addr || balance BE))
     || merkle(blake3("shrugg-asset-registry" || asset || chain BE || token))
     || merkle(sorted spent digests)
