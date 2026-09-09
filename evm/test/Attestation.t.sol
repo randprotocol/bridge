@@ -139,6 +139,41 @@ contract AttestationTest is Test {
         assertEq(decoded.fee, t.fee, "fee");
     }
 
+    function test_guardian_upgrade_round_trips() public view {
+        address key0 = address(0x1111111111111111111111111111111111111A);
+        address key1 = address(0x2222222222222222222222222222222222222B);
+        bytes memory payload = abi.encodePacked(uint8(2), uint32(7), uint8(2), key0, key1);
+        assertEq(payload.length, 46, "id(1)+newIndex(4)+n(1)+2*key(20) = 46");
+
+        Attestation.GuardianUpgrade memory g = harness.parseGuardianUpgrade(payload);
+        assertEq(g.newIndex, 7, "newIndex");
+        assertEq(g.keys.length, 2, "keys length");
+        assertEq(g.keys[0], key0, "keys[0]");
+        assertEq(g.keys[1], key1, "keys[1]");
+    }
+
+    function test_guardian_upgrade_zero_guardians_reverts() public {
+        // id(1) + newIndex(4) + n(1) = 0, no keys.
+        bytes memory payload = abi.encodePacked(uint8(2), uint32(7), uint8(0));
+        vm.expectRevert(Attestation.ZeroGuardians.selector);
+        harness.parseGuardianUpgrade(payload);
+    }
+
+    function test_guardian_upgrade_trailing_byte_reverts() public {
+        address key0 = address(0x1111111111111111111111111111111111111A);
+        // n = 1 but one extra trailing byte beyond the single 20-byte key.
+        bytes memory payload = abi.encodePacked(uint8(2), uint32(7), uint8(1), key0, uint8(0xFF));
+        vm.expectRevert(Attestation.BadPayloadLength.selector);
+        harness.parseGuardianUpgrade(payload);
+    }
+
+    function test_guardian_upgrade_bad_id_reverts() public {
+        address key0 = address(0x1111111111111111111111111111111111111A);
+        bytes memory payload = abi.encodePacked(uint8(9), uint32(7), uint8(1), key0); // not the upgrade id (2)
+        vm.expectRevert(Attestation.BadPayloadId.selector);
+        harness.parseGuardianUpgrade(payload);
+    }
+
     /// Signs `digest` with private key `pk`, tags the signature with
     /// guardian `index`, and normalizes it to low-s (flipping `v`
     /// accordingly) so the fixture matches the wire format's requirement

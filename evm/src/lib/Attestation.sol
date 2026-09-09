@@ -60,6 +60,14 @@ library Attestation {
     /// Length, in bytes, of the attestation envelope header: version (1) +
     /// guardian_set_index (4) + n_sigs (1).
     uint256 constant ENVELOPE_HEADER_LEN = 6;
+    /// Length, in bytes, of a [GuardianUpgrade] payload header: id (1) +
+    /// new_index (4) + guardian count (1). Numerically equal to
+    /// [ENVELOPE_HEADER_LEN] but kept as its own named constant since the
+    /// two headers are unrelated on the wire.
+    uint256 constant GUARDIAN_UPGRADE_HEADER_LEN = 6;
+    /// Length, in bytes, of one encoded guardian key in a [GuardianUpgrade]
+    /// payload.
+    uint256 constant GUARDIAN_KEY_LEN = 20;
 
     struct Signature {
         uint8 index;
@@ -105,6 +113,7 @@ library Attestation {
     error HighS(uint8 index);
     error BadSignature(uint8 index);
     error WrongGuardian(uint8 index);
+    error ZeroGuardians();
 
     /// Decodes the attestation envelope, computing `digest = mu =
     /// keccak256(keccak256(body))` over the body bytes as they appear on
@@ -218,20 +227,29 @@ library Attestation {
     }
 
     /// Decodes a [GuardianUpgrade] payload: `id (1) = 2 || new_index (4)
-    /// || n (1) || keys (20 * n)`.
+    /// || n (1) || keys (20 * n)`, `n >= 1`.
+    ///
+    /// Checks in the same order as the Rust reference
+    /// (`Payload::decode` peeking the id byte before ever dispatching to
+    /// `GuardianSetUpgrade::decode`, which then reads `new_index`/`n`
+    /// before checking the overall length against them): id first (once
+    /// there's at least one byte to look at), then `n == 0` ->
+    /// `ZeroGuardians`, then the exact overall length implied by `n`.
     function parseGuardianUpgrade(bytes memory payload) internal pure returns (GuardianUpgrade memory g) {
-        if (payload.length < ENVELOPE_HEADER_LEN) revert Truncated();
+        if (payload.length == 0) revert Truncated();
         if (uint8(payload[0]) != GUARDIAN_SET_UPGRADE_ID) revert BadPayloadId();
+        if (payload.length < GUARDIAN_UPGRADE_HEADER_LEN) revert Truncated();
 
         g.newIndex = uint32(_readBeMem(payload, 1, 4));
         uint8 n = uint8(_readBeMem(payload, 5, 1));
+        if (n == 0) revert ZeroGuardians();
 
-        uint256 expectedLen = ENVELOPE_HEADER_LEN + uint256(n) * 20;
+        uint256 expectedLen = GUARDIAN_UPGRADE_HEADER_LEN + uint256(n) * GUARDIAN_KEY_LEN;
         if (payload.length != expectedLen) revert BadPayloadLength();
 
         address[] memory keys = new address[](n);
         for (uint256 i = 0; i < n; i++) {
-            keys[i] = address(uint160(_readBeMem(payload, ENVELOPE_HEADER_LEN + i * 20, 20)));
+            keys[i] = address(uint160(_readBeMem(payload, GUARDIAN_UPGRADE_HEADER_LEN + i * GUARDIAN_KEY_LEN, GUARDIAN_KEY_LEN)));
         }
         g.keys = keys;
     }
