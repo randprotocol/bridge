@@ -18,6 +18,7 @@ struct Ctx {
     secrets: [[u8; 32]; 6],
     addrs: [[u8; 20]; 6],
     addr7: [u8; 20],
+    addr8: [u8; 20],
     emitters: [[u8; 32]; 4], // index 0 => chain 2, .. index 3 => chain 5
     rand_emitter: [u8; 32],
     governance_emitter: [u8; 32],
@@ -31,9 +32,12 @@ impl Ctx {
         }
         let mut secret7 = [0u8; 32];
         secret7[31] = 7;
+        let mut secret8 = [0u8; 32];
+        secret8[31] = 8;
 
         let addrs = secrets.map(|s| b::guardian_address(&s));
         let addr7 = b::guardian_address(&secret7);
+        let addr8 = b::guardian_address(&secret8);
 
         // Source-chain emitters: EVM chains (2 Ethereum, 3 BSC, 4 Tron) are
         // contract addresses, so left-pad to the same 12-zero ++ 20-byte
@@ -56,6 +60,7 @@ impl Ctx {
             secrets,
             addrs,
             addr7,
+            addr8,
             emitters,
             rand_emitter,
             governance_emitter,
@@ -205,13 +210,26 @@ fn transfer_payload_json(
 }
 
 fn body_json(nonce: u32, emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> BodyJson {
+    body_json_at(nonce, emitter_chain, emitter_address, sequence, 1)
+}
+
+/// [`body_json`] with an explicit `consistency_level`. Governance
+/// (payload id 2) messages carry 0 per spec 3.6, everything else here
+/// carries 1.
+fn body_json_at(
+    nonce: u32,
+    emitter_chain: u16,
+    emitter_address: &[u8; 32],
+    sequence: u64,
+    consistency_level: u8,
+) -> BodyJson {
     BodyJson {
         timestamp: TIMESTAMP,
         nonce,
         emitter_chain,
         emitter_address: hex32(emitter_address),
         sequence,
-        consistency_level: 1,
+        consistency_level,
     }
 }
 
@@ -521,6 +539,7 @@ pub fn build() -> VectorsFile {
     }
 
     // -- upgrade_set1_ok --------------------------------------------------
+    // Governance messages carry `consistency_level = 0` (spec 3.6).
     {
         let new_keys = ctx.set1_addrs();
         let body = b::Body {
@@ -529,7 +548,7 @@ pub fn build() -> VectorsFile {
             emitter_chain: 1,
             emitter_address: ctx.governance_emitter,
             sequence: 1,
-            consistency_level: 1,
+            consistency_level: 0,
             payload: b::Payload::GuardianSetUpgrade(b::GuardianSetUpgrade {
                 new_index: 1,
                 keys: new_keys.to_vec(),
@@ -546,10 +565,71 @@ pub fn build() -> VectorsFile {
             0,
             "ok",
             body,
-            body_json(0, 1, &ctx.governance_emitter, 1),
+            body_json_at(0, 1, &ctx.governance_emitter, 1, 0),
             PayloadJson::Upgrade {
                 id: 2,
                 new_index: 1,
+                keys: new_keys.iter().map(hex20).collect(),
+            },
+            sigs,
+            None,
+        ));
+    }
+
+    // -- upgrade_signed_by_superseded_set ---------------------------------
+    // Set 1 is current; set 0 has been superseded but is still inside its
+    // 86400 s grace window, which spec 3.4/3.6 scopes to transfer payloads.
+    // A payload-2 rotation additionally requires
+    // `guardian_set_index == current`, so this one must be refused even
+    // though the very same signatures would still mint a transfer.
+    {
+        let new_keys: [[u8; 20]; 6] = [
+            ctx.addrs[2],
+            ctx.addrs[3],
+            ctx.addrs[4],
+            ctx.addrs[5],
+            ctx.addr7,
+            ctx.addr8,
+        ];
+        let body = b::Body {
+            timestamp: TIMESTAMP,
+            nonce: 0,
+            emitter_chain: 1,
+            emitter_address: ctx.governance_emitter,
+            sequence: 2,
+            consistency_level: 0,
+            payload: b::Payload::GuardianSetUpgrade(b::GuardianSetUpgrade {
+                new_index: 2,
+                keys: new_keys.to_vec(),
+            })
+            .encode(),
+        };
+        let digest = b::digest(&body.encode());
+        let sigs = sign_std(&ctx, &digest);
+        let sets = vec![
+            SetEntry {
+                index: 0,
+                keys: ctx.addrs.iter().map(hex20).collect(),
+                expires_at: NOW + 100,
+            },
+            SetEntry {
+                index: 1,
+                keys: ctx.set1_addrs().iter().map(hex20).collect(),
+                expires_at: 0,
+            },
+        ];
+        vectors.push(finish(
+            "upgrade_signed_by_superseded_set",
+            1,
+            0,
+            sets,
+            1,
+            "stale_governance_set",
+            body,
+            body_json_at(0, 1, &ctx.governance_emitter, 2, 0),
+            PayloadJson::Upgrade {
+                id: 2,
+                new_index: 2,
                 keys: new_keys.iter().map(hex20).collect(),
             },
             sigs,
@@ -1403,6 +1483,247 @@ pub fn build() -> VectorsFile {
             payload: transfer_payload_json(&eth_amount, &eth_token, 2, &RECIPIENT, 1, &eth_fee),
             replay_of: Some("transfer_eth_usdt_6dp_ok".to_string()),
         });
+    }
+
+    // -- transfer_token_chain_mismatch --------------------------------------
+    // A source transfer from chain 2's registered emitter naming an asset
+    // whose home is chain 3. A source contract only ever custodies its own
+    // chain's tokens, so `token_chain == emitter_chain` (spec 6.2); this is
+    // the Rand-side twin of the `wrong_token_chain` release below.
+    {
+        let amount = u256(100_000_000);
+        let fee = u256(1_000);
+        let token = evm_token_addr("usdt-3");
+        let sequence = 121u64;
+        let body = b::Body {
+            timestamp: TIMESTAMP,
+            nonce: 7,
+            emitter_chain: 2,
+            emitter_address: ctx.emitter(2),
+            sequence,
+            consistency_level: 1,
+            payload: b::Payload::Transfer(b::Transfer {
+                amount,
+                token_address: token,
+                token_chain: 3,
+                to: RECIPIENT,
+                to_chain: 1,
+                fee,
+            })
+            .encode(),
+        };
+        let digest = b::digest(&body.encode());
+        let sigs = sign_std(&ctx, &digest);
+        vectors.push(finish(
+            "transfer_token_chain_mismatch",
+            1,
+            0,
+            default_set(&ctx),
+            0,
+            "wrong_token_chain",
+            body,
+            body_json(7, 2, &ctx.emitter(2), sequence),
+            transfer_payload_json(&amount, &token, 3, &RECIPIENT, 1, &fee),
+            sigs,
+            None,
+        ));
+    }
+
+    // -- release_wrong_emitter_eth / release_wrong_to_chain_eth /
+    //    release_fee_gt_amount_eth ------------------------------------------
+    // Rejected releases addressed to the Ethereum endpoint (verifier 2),
+    // one per rule `RandBridgeBase.release` owns after `_verify`.
+    {
+        let to = evm_to();
+        let token = evm_token_addr("usdt-2");
+
+        // Not the Rand burn emitter.
+        {
+            let amount = u256(100_000_000);
+            let fee = u256(1_000);
+            let wrong_emitter = evm_token_addr("rand-emitter-impostor");
+            let sequence = 5u64;
+            let body = b::Body {
+                timestamp: TIMESTAMP,
+                nonce: 0,
+                emitter_chain: 1,
+                emitter_address: wrong_emitter,
+                sequence,
+                consistency_level: 1,
+                payload: b::Payload::Transfer(b::Transfer {
+                    amount,
+                    token_address: token,
+                    token_chain: 2,
+                    to,
+                    to_chain: 2,
+                    fee,
+                })
+                .encode(),
+            };
+            let digest = b::digest(&body.encode());
+            let sigs = sign_std(&ctx, &digest);
+            vectors.push(finish(
+                "release_wrong_emitter_eth",
+                2,
+                0,
+                default_set(&ctx),
+                0,
+                "wrong_emitter",
+                body,
+                body_json(0, 1, &wrong_emitter, sequence),
+                transfer_payload_json(&amount, &token, 2, &to, 2, &fee),
+                sigs,
+                None,
+            ));
+        }
+
+        // Addressed to chain 3, submitted to the chain-2 endpoint.
+        {
+            let amount = u256(100_000_000);
+            let fee = u256(1_000);
+            let sequence = 6u64;
+            let body = b::Body {
+                timestamp: TIMESTAMP,
+                nonce: 0,
+                emitter_chain: 1,
+                emitter_address: ctx.rand_emitter,
+                sequence,
+                consistency_level: 1,
+                payload: b::Payload::Transfer(b::Transfer {
+                    amount,
+                    token_address: token,
+                    token_chain: 2,
+                    to,
+                    to_chain: 3,
+                    fee,
+                })
+                .encode(),
+            };
+            let digest = b::digest(&body.encode());
+            let sigs = sign_std(&ctx, &digest);
+            vectors.push(finish(
+                "release_wrong_to_chain_eth",
+                2,
+                0,
+                default_set(&ctx),
+                0,
+                "wrong_to_chain",
+                body,
+                body_json(0, 1, &ctx.rand_emitter, sequence),
+                transfer_payload_json(&amount, &token, 2, &to, 3, &fee),
+                sigs,
+                None,
+            ));
+        }
+
+        // `fee > amount`, the spec 3.6 rule on the payload itself.
+        {
+            let amount = u256(1_000);
+            let fee = u256(2_000);
+            let sequence = 7u64;
+            let body = b::Body {
+                timestamp: TIMESTAMP,
+                nonce: 0,
+                emitter_chain: 1,
+                emitter_address: ctx.rand_emitter,
+                sequence,
+                consistency_level: 1,
+                payload: b::Payload::Transfer(b::Transfer {
+                    amount,
+                    token_address: token,
+                    token_chain: 2,
+                    to,
+                    to_chain: 2,
+                    fee,
+                })
+                .encode(),
+            };
+            let digest = b::digest(&body.encode());
+            let sigs = sign_std(&ctx, &digest);
+            vectors.push(finish(
+                "release_fee_gt_amount_eth",
+                2,
+                0,
+                default_set(&ctx),
+                0,
+                "fee_exceeds_amount",
+                body,
+                body_json(0, 1, &ctx.rand_emitter, sequence),
+                transfer_payload_json(&amount, &token, 2, &to, 2, &fee),
+                sigs,
+                None,
+            ));
+        }
+    }
+
+    // -- replay_release_eth: the exact bytes of release_to_eth_ok ----------
+    {
+        let original = vectors
+            .iter()
+            .find(|v| v.name == "release_to_eth_ok")
+            .expect("release_to_eth_ok is generated above");
+        let attestation = original.attestation.clone();
+        let digest = original.digest.clone();
+        let token = evm_token_addr("usdt-2");
+        let to = evm_to();
+        vectors.push(Vector {
+            name: "replay_release_eth".to_string(),
+            attestation,
+            digest,
+            verifier_chain: 2,
+            guardian_set_index: 0,
+            sets: default_set(&ctx),
+            current_set: 0,
+            expect: "replay".to_string(),
+            body: body_json(0, 1, &ctx.rand_emitter, 0),
+            payload: transfer_payload_json(&release_amount, &token, 2, &to, 2, &release_fee),
+            replay_of: Some("release_to_eth_ok".to_string()),
+        });
+    }
+
+    // -- bad_signature: signature 0's `r` zeroed -----------------------------
+    // A structurally valid envelope whose first signature cannot recover to
+    // anything: `r = 0` is off-curve for every recovery id. All three
+    // verifiers must reject it with their own BadSignature code, and must
+    // do so *before* mistaking `ecrecover`'s zero return for a guardian.
+    {
+        let amount = u256(100_000_000);
+        let fee = u256(1_000);
+        let token = evm_token_addr("usdt-2");
+        let sequence = 122u64;
+        let body = b::Body {
+            timestamp: TIMESTAMP,
+            nonce: 7,
+            emitter_chain: 2,
+            emitter_address: ctx.emitter(2),
+            sequence,
+            consistency_level: 1,
+            payload: b::Payload::Transfer(b::Transfer {
+                amount,
+                token_address: token,
+                token_chain: 2,
+                to: RECIPIENT,
+                to_chain: 1,
+                fee,
+            })
+            .encode(),
+        };
+        let digest = b::digest(&body.encode());
+        let mut sigs = sign_std(&ctx, &digest);
+        sigs[0].r = [0u8; 32];
+        vectors.push(finish(
+            "bad_signature",
+            1,
+            0,
+            default_set(&ctx),
+            0,
+            "bad_signature",
+            body,
+            body_json(7, 2, &ctx.emitter(2), sequence),
+            transfer_payload_json(&amount, &token, 2, &RECIPIENT, 1, &fee),
+            sigs,
+            None,
+        ));
     }
 
     let guardians = (0..6)

@@ -51,27 +51,32 @@ fn main() {
     }
 
     if check {
-        let bridge_path = bridge_repo_out();
-        let fullnode_path = fullnode_out();
-        let a = fs::read_to_string(&bridge_path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", bridge_path.display()));
-        let b = fs::read_to_string(&fullnode_path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", fullnode_path.display()));
-        if a == b {
+        // Compare both files against a *freshly rendered* copy, not just
+        // against each other: two identical files can still both be stale,
+        // which is exactly the failure `--check` exists to catch (a case
+        // added to the generator without re-running it).
+        let expected = render();
+        let mut drifted = Vec::new();
+        for path in [bridge_repo_out(), fullnode_out()] {
+            match fs::read_to_string(&path) {
+                Ok(found) if found == expected => {}
+                Ok(_) => drifted.push(format!("{}: differs from the generator's output", path.display())),
+                Err(e) => drifted.push(format!("{}: {e}", path.display())),
+            }
+        }
+        if drifted.is_empty() {
             println!(
-                "OK: {} and {} are byte-identical",
-                bridge_path.display(),
-                fullnode_path.display()
+                "OK: {} and {} both match the generator's output",
+                bridge_repo_out().display(),
+                fullnode_out().display()
             );
             return;
-        } else {
-            eprintln!(
-                "MISMATCH: {} and {} differ",
-                bridge_path.display(),
-                fullnode_path.display()
-            );
-            std::process::exit(1);
         }
+        eprintln!("MISMATCH: re-run `cargo run --release` in tools/vectors");
+        for line in &drifted {
+            eprintln!("  {line}");
+        }
+        std::process::exit(1);
     }
 
     let json = render();
@@ -117,6 +122,7 @@ mod tests {
             "no_quorum",
             "index_order",
             "index_out_of_range",
+            "bad_signature",
             "high_s",
             "wrong_guardian",
             "set_expired",
