@@ -47,6 +47,32 @@ with no known secret. A real deployment generates its own keypair and
 re-declares it before `cargo build-sbf`, because every PDA in the program
 is derived from the program id.
 
+### `Initialize` must be signed by the upgrade authority
+
+`Initialize` installs the admin, the pauser, the Rand emitter and
+guardian set 0. It is the one instruction with no config to check a role
+against, so it authenticates against the program's own ProgramData
+account under the upgradeable loader: the payer must be the address the
+loader records as `upgrade_authority_address`, or the instruction fails
+with `NotAdmin`. Without that, anyone watching the mempool could run it
+first on a freshly deployed program and own the bridge.
+
+The upgrade authority could replace the program wholesale in any case, so
+binding deployment to it grants no new power. It does mean the ordering
+matters:
+
+```
+solana program deploy target/deploy/rand_bridge.so     # you are the authority
+# ... send the Initialize transaction, signed by that same key ...
+solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTISIG>
+```
+
+If the authority is handed to a multisig **before** `Initialize`, then the
+multisig — not the original deployer — is the only signer the program will
+accept, and the initialization transaction has to go through it. A program
+whose upgrade authority has been removed entirely (made immutable) can
+never be initialized at all, so freeze it only after the bridge is live.
+
 ## Compute budget
 
 A release recovers one secp256k1 signature per guardian (about 25k

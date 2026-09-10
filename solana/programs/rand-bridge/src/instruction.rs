@@ -16,7 +16,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::instruction::{AccountMeta, Instruction};
 use solana_program::pubkey::Pubkey;
 use solana_program::sysvar;
-use solana_sdk_ids::system_program;
+use solana_sdk_ids::{bpf_loader_upgradeable, system_program};
 
 use crate::state::{
     authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, spent_pda, token_pda,
@@ -84,12 +84,19 @@ pub enum BridgeInstruction {
 
 /// `Initialize`.
 ///
+/// The payer must be the program's **upgrade authority**: this is the one
+/// instruction with no config to check a role against, so it is bound to
+/// the only identity that exists before the bridge does.
+///
 /// Accounts:
-/// 0. `[signer, writable]` payer — funds the two accounts created here.
+/// 0. `[signer, writable]` payer — the upgrade authority; funds the two
+///    accounts created here.
 /// 1. `[writable]` config PDA `["config"]` — created; must not exist.
 /// 2. `[writable]` guardian set 0 PDA `["guardian", 0u32 LE]` — created.
 /// 3. `[]` custody authority PDA `["authority"]` — address checked only.
-/// 4. `[]` system program.
+/// 4. `[]` the program's ProgramData account under the upgradeable
+///    loader, `[program_id]` — read for the upgrade authority.
+/// 5. `[]` system program.
 pub fn initialize(
     program: &Pubkey,
     payer: &Pubkey,
@@ -111,9 +118,17 @@ pub fn initialize(
             AccountMeta::new(config_pda(program).0, false),
             AccountMeta::new(guardian_pda(program, 0).0, false),
             AccountMeta::new_readonly(authority_pda(program).0, false),
+            AccountMeta::new_readonly(program_data_address(program), false),
             AccountMeta::new_readonly(system_program::id(), false),
         ],
     )
+}
+
+/// The ProgramData account of an upgradeable program: the PDA
+/// `[program_id]` under the upgradeable loader, where the loader stores
+/// the upgrade authority.
+pub fn program_data_address(program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[program.as_ref()], &bpf_loader_upgradeable::id()).0
 }
 
 /// `SetToken`.
@@ -422,10 +437,11 @@ mod tests {
             vec![[2u8; 20]],
         );
         assert_eq!(ix.program_id, program);
-        assert_eq!(ix.accounts.len(), 5);
+        assert_eq!(ix.accounts.len(), 6);
         assert!(ix.accounts[0].is_signer && ix.accounts[0].is_writable);
         assert_eq!(ix.accounts[1].pubkey, config_pda(&program).0);
         assert_eq!(ix.accounts[2].pubkey, guardian_pda(&program, 0).0);
+        assert_eq!(ix.accounts[4].pubkey, program_data_address(&program));
 
         let ix = set_token(&program, &signer, &mint, true, 0, 0);
         assert_eq!(ix.accounts.len(), 9);

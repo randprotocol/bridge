@@ -19,6 +19,7 @@
 
 use borsh::BorshDeserialize;
 use bridge_codec::{Body, Payload, Transfer, CHAIN_RAND, GOVERNANCE_EMITTER, GUARDIAN_GRACE_SECS};
+use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_program::account_info::{next_account_info, AccountInfo};
 use solana_program::clock::Clock;
 use solana_program::entrypoint::ProgramResult;
@@ -29,12 +30,12 @@ use solana_program::pubkey::Pubkey;
 use solana_program::rent::Rent;
 use solana_program::sysvar::Sysvar;
 use solana_program::{msg, sysvar};
-use solana_sdk_ids::system_program;
+use solana_sdk_ids::{bpf_loader_upgradeable, system_program};
 use solana_system_interface::instruction as system_instruction;
 
 use crate::attestation;
 use crate::error::BridgeError;
-use crate::instruction::{associated_token_address, BridgeInstruction};
+use crate::instruction::{associated_token_address, program_data_address, BridgeInstruction};
 use crate::state::{
     authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, seeds, spent_pda, token_pda,
     BridgeAccount, Config, Consumed, GuardianSetAccount, PostedMessage, TokenRegistry, CHAIN_ID,
@@ -155,6 +156,27 @@ fn store<T: BridgeAccount>(value: &T, account: &AccountInfo) -> Result<(), Bridg
 ///
 /// `seeds` must end with the bump, since the system program requires the
 /// PDA itself to sign its own creation.
+///
+/// # Griefing
+///
+/// Every address this program creates is derived from public data — an
+/// attestation digest, the next sequence number, the next guardian set
+/// index, a mint — so anyone can compute it before the program gets
+/// there and send it a lamport. `CreateAccount` refuses to act on an
+/// account that already holds lamports, so a single lamport sent to
+/// `["spent", digest]` would make a fully signed release permanently
+/// unredeemable, one sent to `["msg", sequence]` would brick every
+/// subsequent lock, and one sent to `["guardian", current + 1]` would
+/// block guardian rotation.
+///
+/// So the pre-funded case is handled rather than refused: top the
+/// account up to rent exemption if it is short, then `Allocate` and
+/// `Assign` it with the PDA's own signature, which is exactly what
+/// `CreateAccount` does internally and reaches the same end state. Any
+/// lamports the griefer donated simply stay in the account.
+///
+/// The account must still be empty and system-owned, so this can never
+/// re-target an account that is already in use.
 fn create_pda_account<'a>(
     payer: &AccountInfo<'a>,
     account: &AccountInfo<'a>,
@@ -163,14 +185,45 @@ fn create_pda_account<'a>(
     space: usize,
     seeds: &[&[u8]],
 ) -> ProgramResult {
-    let lamports = Rent::get()?.minimum_balance(space).max(1);
+    if !account.data_is_empty() || account.owner != &system_program::id() {
+        return Err(BridgeError::InvalidPda.into());
+    }
+    let required = Rent::get()?.minimum_balance(space).max(1);
+    let held = account.lamports();
+    let infos = [
+        payer.clone(),
+        account.clone(),
+        system_program_account.clone(),
+    ];
+
+    if held == 0 {
+        return invoke_signed(
+            &system_instruction::create_account(
+                payer.key,
+                account.key,
+                required,
+                space as u64,
+                owner,
+            ),
+            &infos,
+            &[seeds],
+        );
+    }
+
+    if let Some(shortfall) = required.checked_sub(held).filter(|missing| *missing > 0) {
+        invoke(
+            &system_instruction::transfer(payer.key, account.key, shortfall),
+            &infos,
+        )?;
+    }
     invoke_signed(
-        &system_instruction::create_account(payer.key, account.key, lamports, space as u64, owner),
-        &[
-            payer.clone(),
-            account.clone(),
-            system_program_account.clone(),
-        ],
+        &system_instruction::allocate(account.key, space as u64),
+        &infos,
+        &[seeds],
+    )?;
+    invoke_signed(
+        &system_instruction::assign(account.key, owner),
+        &infos,
         &[seeds],
     )
 }
@@ -288,10 +341,63 @@ fn now_from(clock: &AccountInfo) -> Result<u64, ProgramError> {
     u64::try_from(clock.unix_timestamp).map_err(|_| BridgeError::AmountOverflow.into())
 }
 
-/// The SPL token balance of an initialized token account.
-fn token_balance(account: &AccountInfo) -> Result<u64, ProgramError> {
+/// The custody token account for `mint`, with everything about it
+/// re-checked rather than inferred from the PDA derivation alone: the SPL
+/// token program owns the account, its SPL authority is this program's
+/// custody authority PDA, and it holds the mint the caller named.
+///
+/// Defence in depth. The address is already derived from
+/// `["custody", mint]`, so none of these can differ unless `SetToken`
+/// initialized the account wrongly — but custody is the one balance the
+/// whole bridge's soundness rests on, so it is verified on every path
+/// that reads or moves it.
+fn custody_state(
+    account: &AccountInfo,
+    program_id: &Pubkey,
+    mint: &Pubkey,
+) -> Result<spl_token::state::Account, ProgramError> {
+    if account.owner != &spl_token::id() {
+        return Err(BridgeError::InvalidPda.into());
+    }
     let data = account.data.borrow();
-    Ok(spl_token::state::Account::unpack(&data)?.amount)
+    let token = spl_token::state::Account::unpack(&data)?;
+    if token.owner != authority_pda(program_id).0 || token.mint != *mint {
+        return Err(BridgeError::InvalidPda.into());
+    }
+    Ok(token)
+}
+
+/// Requires `payer` to be the signer named as this program's upgrade
+/// authority.
+///
+/// `Initialize` installs the admin, the pauser, the Rand emitter and
+/// guardian set 0, so without this anyone watching the mempool could run
+/// it first on a freshly deployed program and own the bridge. The upgrade
+/// authority is the only identity that exists before the config does, and
+/// whoever holds it could replace the program wholesale anyway, so
+/// binding deployment to it grants nothing new.
+fn check_upgrade_authority(
+    program_data: &AccountInfo,
+    program_id: &Pubkey,
+    payer: &AccountInfo,
+) -> ProgramResult {
+    check_key(program_data.key, &program_data_address(program_id))?;
+    if program_data.owner != &bpf_loader_upgradeable::id() {
+        return Err(BridgeError::NotAdmin.into());
+    }
+    let data = program_data.data.borrow();
+    // The ProgramData metadata is followed by the raw ELF; bincode 1's
+    // `deserialize` allows the trailing bytes.
+    let state: UpgradeableLoaderState =
+        bincode::deserialize(&data).map_err(|_| BridgeError::NotAdmin)?;
+    match state {
+        UpgradeableLoaderState::ProgramData {
+            upgrade_authority_address: Some(authority),
+            ..
+        } if authority == *payer.key => Ok(()),
+        // No authority (the program is frozen) or a different one.
+        _ => Err(BridgeError::NotAdmin.into()),
+    }
 }
 
 /// Moves `amount` out of custody, signed by the custody authority PDA.
@@ -359,6 +465,7 @@ fn process_initialize(
     let config_account = next_account_info(iter)?;
     let set_account = next_account_info(iter)?;
     let authority_account = next_account_info(iter)?;
+    let program_data_account = next_account_info(iter)?;
     let system_account = next_account_info(iter)?;
 
     check_signer(payer)?;
@@ -368,6 +475,11 @@ fn process_initialize(
     let (set_key, set_bump) = guardian_pda(program_id, 0);
     check_key(set_account.key, &set_key)?;
     check_key(authority_account.key, &authority_pda(program_id).0)?;
+
+    // Authenticate before doing anything else: `Initialize` is the one
+    // instruction with no config to check a role against, so without this
+    // anyone could front-run the deployer and take the bridge.
+    check_upgrade_authority(program_data_account, program_id, payer)?;
 
     // Deployment is one-shot: a second `Initialize` would otherwise
     // install a new admin and guardian set over live custody.
@@ -590,9 +702,7 @@ fn process_lock(
     // normalised the same way, so it rounds down with it and stays
     // `<= attested`.
     let (_, attested_fee) = normalize(relayer_fee, registry.decimals)?;
-    if attested_fee > attested {
-        return Err(BridgeError::FeeExceedsAmount.into());
-    }
+    debug_assert!(attested_fee <= attested, "normalisation is monotonic");
 
     let (custody_key, _) = custody_pda(program_id, mint_account.key);
     check_key(custody_account.key, &custody_key)?;
@@ -603,7 +713,7 @@ fn process_lock(
     // The balance delta is measured rather than trusted: a mint that
     // credits custody less than the attestation is about to promise is
     // rejected outright rather than mis-accounted.
-    let before = token_balance(custody_account)?;
+    let before = custody_state(custody_account, program_id, mint_account.key)?.amount;
     invoke(
         &spl_token::instruction::transfer(
             &spl_token::id(),
@@ -620,7 +730,7 @@ fn process_lock(
             token_program.clone(),
         ],
     )?;
-    let after = token_balance(custody_account)?;
+    let after = custody_state(custody_account, program_id, mint_account.key)?.amount;
     if after.checked_sub(before) != Some(locked) {
         return Err(BridgeError::TransferAmountMismatch.into());
     }

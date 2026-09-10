@@ -3307,12 +3307,14 @@ dependencies = [
 name = "rand-bridge"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "borsh 1.8.1",
  "bridge-codec",
  "hex",
  "k256",
  "serde_json",
  "sha3",
+ "solana-loader-v3-interface",
  "solana-program",
  "solana-program-test",
  "solana-sdk",

@@ -23,6 +23,7 @@ use rand_bridge::state::{
 };
 use serde_json::Value;
 use sha3::{Digest as _, Keccak256};
+use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_program_test::{processor, BanksClientError, ProgramTest, ProgramTestContext};
 use solana_sdk::account::{Account, AccountSharedData};
 use solana_sdk::clock::Clock;
@@ -223,6 +224,24 @@ fn token_account(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Account {
     }
 }
 
+/// A synthetic ProgramData account naming `authority` as the program's
+/// upgrade authority. `solana-program-test` registers the program as a
+/// builtin rather than through the upgradeable loader, so the account
+/// `Initialize` authenticates against is seeded by hand.
+fn program_data_account(authority: &Pubkey) -> Account {
+    let state = UpgradeableLoaderState::ProgramData {
+        slot: 0,
+        upgrade_authority_address: Some(*authority),
+    };
+    Account {
+        lamports: FUNDED,
+        data: bincode::serialize(&state).expect("serializes"),
+        owner: solana_sdk_ids::bpf_loader_upgradeable::id(),
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
 fn wallet_account() -> Account {
     Account {
         lamports: FUNDED,
@@ -260,6 +279,9 @@ struct Bridge {
     program: Pubkey,
     admin: Keypair,
     pauser: Keypair,
+    /// The program's upgrade authority, the only account `Initialize`
+    /// accepts.
+    deployer: Keypair,
     mint: Pubkey,
     /// Signatures already submitted, so a repeat is not served from
     /// the bank's status cache.
@@ -279,11 +301,17 @@ impl Bridge {
         let program = rand_bridge::id();
         let admin = Keypair::new();
         let pauser = Keypair::new();
+        let deployer = Keypair::new();
 
         let mut test = ProgramTest::new("rand_bridge", program, processor!(process_instruction));
         test.add_account(mint, mint_account(decimals));
         test.add_account(admin.pubkey(), wallet_account());
         test.add_account(pauser.pubkey(), wallet_account());
+        test.add_account(deployer.pubkey(), wallet_account());
+        test.add_account(
+            bridge_ix::program_data_address(&program),
+            program_data_account(&deployer.pubkey()),
+        );
         for (key, account) in extra {
             test.add_account(key, account);
         }
@@ -294,18 +322,20 @@ impl Bridge {
             program,
             admin,
             pauser,
+            deployer,
             mint,
             sent: HashSet::new(),
         };
         let ix = bridge_ix::initialize(
             &program,
-            &bridge.ctx.payer.pubkey(),
+            &bridge.deployer.pubkey(),
             &bridge.admin.pubkey(),
             &bridge.pauser.pubkey(),
             rand_emitter,
             guardians,
         );
-        bridge.send(ix, &[]).await.expect("initialize");
+        let deployer = bridge.deployer.insecure_clone();
+        bridge.send(ix, &[&deployer]).await.expect("initialize");
         bridge
     }
 
@@ -405,6 +435,20 @@ impl Bridge {
         self.token(custody_pda(&self.program, &self.mint).0)
             .await
             .amount
+    }
+
+    /// Sends a lamport to an address the program is about to create an
+    /// account at, the way a griefer would.
+    fn grief(&mut self, address: &Pubkey) {
+        let account = Account {
+            lamports: 1,
+            data: Vec::new(),
+            owner: solana_sdk_ids::system_program::id(),
+            executable: false,
+            rent_epoch: 0,
+        };
+        self.ctx
+            .set_account(address, &AccountSharedData::from(account));
     }
 
     /// Gives `wallet` lamports so it can sign and pay rent.
@@ -554,21 +598,33 @@ async fn initialize_and_set_token() {
     assert_eq!(set.keys, vector_guardians());
     assert_eq!(set.expiration_time, 0, "the current set never expires");
 
-    // Deployment is one-shot.
-    let payer = b.ctx.payer.pubkey();
+    // Only the upgrade authority may initialize, and authentication
+    // comes before the one-shot check.
+    let stranger = Keypair::new();
+    b.fund(&stranger.pubkey());
+    let front_run = bridge_ix::initialize(
+        &program,
+        &stranger.pubkey(),
+        &stranger.pubkey(),
+        &stranger.pubkey(),
+        RAND_EMITTER,
+        vector_guardians(),
+    );
+    assert_bridge_error(b.send(front_run, &[&stranger]).await, BridgeError::NotAdmin);
+
+    // Deployment is one-shot, even for the authority.
+    let deployer = b.deployer.insecure_clone();
     let again = bridge_ix::initialize(
         &program,
-        &payer,
+        &deployer.pubkey(),
         &admin,
         &pauser,
         RAND_EMITTER,
         vector_guardians(),
     );
-    assert_bridge_error(b.send(again, &[]).await, BridgeError::InvalidPda);
+    assert_bridge_error(b.send(again, &[&deployer]).await, BridgeError::InvalidPda);
 
     // Only the admin configures tokens.
-    let stranger = Keypair::new();
-    b.fund(&stranger.pubkey());
     let ix = bridge_ix::set_token(&program, &stranger.pubkey(), &mint, true, 0, 0);
     assert_bridge_error(b.send(ix, &[&stranger]).await, BridgeError::NotAdmin);
 
@@ -1287,6 +1343,79 @@ async fn admin_two_step_and_pause_roles() {
     // The pauser is unchanged by an admin handover.
     let ix = bridge_ix::pause(&program, &pauser);
     b.pauser_send(ix).await.expect("pauser still pauses");
+}
+
+/// Every account this program creates sits at an address anyone can
+/// compute in advance. A lamport sent there first must not be able to
+/// strand a signed release, brick the lock sequence, or block a guardian
+/// rotation.
+#[tokio::test]
+async fn prefunded_pdas_do_not_brick_release_lock_or_upgrade() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    let mint = b.mint;
+    b.set_token(true, 0, 0).await.expect("set token");
+
+    // --- Lock: someone owns the next message PDA's address. ---
+    let owner = Keypair::new();
+    b.fund(&owner.pubkey());
+    let owner_ata = b.put_ata(&owner.pubkey(), 5_000_000);
+    let next_sequence = b.config().await.sequence;
+    b.grief(&msg_pda(&program, next_sequence).0);
+    b.lock(&owner, owner_ata, 3_000_000, [0x44; 32], 0, 0)
+        .await
+        .expect("a pre-funded message PDA must not brick locking");
+    assert_eq!(b.custody_balance().await, 3_000_000);
+    let posted: PostedMessage = b.state(msg_pda(&program, next_sequence).0).await;
+    assert_eq!(posted.sequence, next_sequence);
+    assert_eq!(b.config().await.sequence, next_sequence + 1);
+
+    // --- Release: someone owns the consumed marker's address. ---
+    let relayer = Keypair::new();
+    b.fund(&relayer.pubkey());
+    let relayer_ata = b.put_ata(&relayer.pubkey(), 0);
+    let recipient = Pubkey::new_unique();
+    let recipient_ata = b.put_ata(&recipient, 0);
+
+    let (bytes, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            1,
+            transfer_payload(100_000_000, &mint, 5, &recipient, 5, 5_000_000),
+        ),
+        QUORUM,
+    );
+    b.grief(&spent_pda(&program, &digest).0);
+    b.release(&relayer, 0, &recipient, &digest, bytes)
+        .await
+        .expect("a pre-funded consumed PDA must not strand a signed release");
+    assert_eq!(b.token(recipient_ata).await.amount, 950_000);
+    assert_eq!(b.token(relayer_ata).await.amount, 50_000);
+    let consumed = b
+        .account(spent_pda(&program, &digest).0)
+        .await
+        .expect("consumed marker exists");
+    assert_eq!(consumed.owner, program);
+
+    // --- GuardianSetUpgrade: someone owns the next set's address. ---
+    let new_keys: Vec<[u8; 20]> = (6..12u8).map(guardian_address).collect();
+    let upgrade = Payload::GuardianSetUpgrade(GuardianSetUpgrade {
+        new_index: 1,
+        keys: new_keys.clone(),
+    })
+    .encode();
+    let (bytes, digest) = signed(0, body(CHAIN_RAND, GOVERNANCE_EMITTER, 2, upgrade), QUORUM);
+    b.grief(&guardian_pda(&program, 1).0);
+    let ix = bridge_ix::guardian_set_upgrade(&program, &relayer.pubkey(), 0, 1, &digest, bytes);
+    b.send(ix, &[&relayer])
+        .await
+        .expect("a pre-funded guardian set PDA must not block rotation");
+    assert_eq!(b.config().await.current_guardian_set, 1);
+    let set: GuardianSetAccount = b.state(guardian_pda(&program, 1).0).await;
+    assert_eq!(set.keys, new_keys);
+    assert_eq!(set.expiration_time, 0);
 }
 
 /// Every shared vector whose verifier is Solana, replayed against a bank
