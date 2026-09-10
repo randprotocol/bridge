@@ -368,7 +368,9 @@ A `BridgeAttest` transaction is additionally capped at `MAX_ATTESTATION_BYTES` (
 rejected as `AttestationTooLarge` before anything is decoded, so an oversized blob cannot buy
 decode and signature-recovery work at the zero minimum fee. A transfer payload with
 `amount == 0` is rejected as `ZeroAmount`, symmetrically with burns: it would consume a digest
-and move nothing. Genesis validation additionally rejects a zero value in the `emitters` map. It debits the balance, increments the burn sequence,
+and move nothing. Genesis validation additionally rejects a zero value in the `emitters` map.
+
+A valid `BridgeBurn` debits the balance, increments the burn sequence,
 and records a `BridgeBurnRecord { sequence, body, digest, tx, height }` whose body is the
 Section 3.2 body with `emitter_chain = 1`, `emitter_address = genesis emitter`,
 `timestamp = block timestamp_ms / 1000`, `nonce = 0`, `consistency_level = 0`. Guardians read
