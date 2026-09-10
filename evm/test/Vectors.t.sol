@@ -11,11 +11,12 @@ import {VectorLoader} from "./utils/VectorLoader.sol";
 /// Rust fullnode and the Solana program) against the `Attestation` library.
 ///
 /// Only the `expect` codes that are this library's concern are asserted
-/// here: `ok`, `no_quorum`, `index_order`, `index_out_of_range`, `high_s`,
-/// `wrong_guardian`, `bad_version`, `bad_payload`. `set_expired` and
-/// `unknown_set` are guardian-set *resolution* concerns that belong to the
-/// bridge contract (Task D2), not this pure library, so they're skipped
-/// here (mirrors the fullnode's own `shrugg-core::bridge` vector test).
+/// here: `ok`, `no_quorum`, `index_order`, `index_out_of_range`,
+/// `bad_signature`, `high_s`, `wrong_guardian`, `bad_version`,
+/// `bad_payload`. `set_expired`, `unknown_set` and `stale_governance_set`
+/// are guardian-set *resolution* concerns that belong to the bridge
+/// contract (Task D2), not this pure library, so they're skipped here
+/// (mirrors the fullnode's own `shrugg-core::bridge` vector test).
 /// Ledger-level checks (`wrong_emitter`, `wrong_to_chain`,
 /// `wrong_token_chain`, `fee_exceeds_amount`, `amount_overflow`, `replay`)
 /// are also out of scope for this library.
@@ -32,6 +33,7 @@ contract VectorsTest is Test {
     uint256 noQuorumCount;
     uint256 indexOrderCount;
     uint256 indexOutOfRangeCount;
+    uint256 badSignatureCount;
     uint256 highSCount;
     uint256 wrongGuardianCount;
     uint256 badVersionCount;
@@ -51,13 +53,14 @@ contract VectorsTest is Test {
             _checkVector(v);
         }
 
-        uint256 total = okCount + noQuorumCount + indexOrderCount + indexOutOfRangeCount + highSCount
-            + wrongGuardianCount + badVersionCount + badPayloadCount;
+        uint256 total = okCount + noQuorumCount + indexOrderCount + indexOutOfRangeCount + badSignatureCount
+            + highSCount + wrongGuardianCount + badVersionCount + badPayloadCount;
         assertGe(total, 20, "expected at least 20 signature-level vectors checked");
         assertGt(okCount, 0, "expected at least one ok vector");
         assertGt(noQuorumCount, 0, "expected at least one no_quorum vector");
         assertGt(indexOrderCount, 0, "expected at least one index_order vector");
         assertGt(indexOutOfRangeCount, 0, "expected at least one index_out_of_range vector");
+        assertGt(badSignatureCount, 0, "expected at least one bad_signature vector");
         assertGt(highSCount, 0, "expected at least one high_s vector");
         assertGt(wrongGuardianCount, 0, "expected at least one wrong_guardian vector");
         assertGt(badVersionCount, 0, "expected at least one bad_version vector");
@@ -128,6 +131,16 @@ contract VectorsTest is Test {
             _expectVerifyRevertSelector(p, set.keys, Attestation.IndexOutOfRange.selector, v.name);
             return;
         }
+        if (VectorLoader.stringEq(v.expect, "bad_signature")) {
+            badSignatureCount++;
+            // The vector zeroes signature 0's `r`, so `ecrecover` returns
+            // address(0) and the library must reject it as BadSignature
+            // rather than compare that zero against a guardian key.
+            _expectVerifyRevert(
+                p, set.keys, abi.encodeWithSelector(Attestation.BadSignature.selector, uint8(0)), v.name
+            );
+            return;
+        }
         if (VectorLoader.stringEq(v.expect, "high_s")) {
             highSCount++;
             _expectVerifyRevertSelector(p, set.keys, Attestation.HighS.selector, v.name);
@@ -143,8 +156,24 @@ contract VectorsTest is Test {
     function _isSignatureLevel(string memory expect) internal pure returns (bool) {
         return VectorLoader.stringEq(expect, "ok") || VectorLoader.stringEq(expect, "no_quorum")
             || VectorLoader.stringEq(expect, "index_order") || VectorLoader.stringEq(expect, "index_out_of_range")
-            || VectorLoader.stringEq(expect, "high_s") || VectorLoader.stringEq(expect, "wrong_guardian")
-            || VectorLoader.stringEq(expect, "bad_payload");
+            || VectorLoader.stringEq(expect, "bad_signature") || VectorLoader.stringEq(expect, "high_s")
+            || VectorLoader.stringEq(expect, "wrong_guardian") || VectorLoader.stringEq(expect, "bad_payload");
+    }
+
+    /// Like `_expectVerifyRevertSelector`, but compares the whole revert
+    /// payload, so an error carrying arguments (`BadSignature(uint8)`) is
+    /// checked down to the offending signature index.
+    function _expectVerifyRevert(
+        Attestation.Parsed memory p,
+        address[] memory keys,
+        bytes memory expected,
+        string memory name
+    ) internal {
+        (bool ok, bytes memory ret) = address(harness).call(
+            abi.encodeWithSelector(AttestationHarness.verifySignatures.selector, p.digest, p.signatures, keys)
+        );
+        assertFalse(ok, string.concat(name, ": expected verifySignatures() to revert"));
+        assertEq(ret, expected, string.concat(name, ": wrong revert payload"));
     }
 
     function _expectVerifyRevertSelector(

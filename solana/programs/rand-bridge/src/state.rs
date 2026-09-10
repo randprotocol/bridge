@@ -105,7 +105,9 @@ pub struct TokenRegistry {
     pub per_transfer_cap: u64,
     /// Largest total allowed within one rolling window.
     pub daily_cap: u64,
-    /// Unix time at which the current rate-limit window opened.
+    /// The rate-limit window this counter belongs to: the *window index*
+    /// `unix_timestamp / 86400`, not a unix timestamp. A release resets
+    /// `window_used` whenever the current index differs from this one.
     pub window_start: u64,
     /// Amount already moved within the current window.
     pub window_used: u64,

@@ -178,9 +178,19 @@ contract RandBridgeTest is Test {
     }
 
     function _governance(uint32 newIndex, address[] memory keys) internal returns (bytes memory) {
+        return _governanceBy(0, guardianKeys, newIndex, keys);
+    }
+
+    /// A governance upgrade claiming guardian set `setIndex` and signed by
+    /// a quorum of `signers`, so a test can present a rotation signed by a
+    /// set other than the current one.
+    function _governanceBy(uint32 setIndex, uint256[] memory signers, uint32 newIndex, address[] memory keys)
+        internal
+        returns (bytes memory)
+    {
         return _attestWith(
-            0,
-            _quorumOf(guardianKeys),
+            setIndex,
+            _quorumOf(signers),
             _bodyBytes(1, Attestation.GOVERNANCE_EMITTER, nextSeq++, 0, _upgradePayload(newIndex, keys))
         );
     }
@@ -531,6 +541,38 @@ contract RandBridgeTest is Test {
         );
         vm.expectRevert(IRandBridge.UnknownGuardianSet.selector);
         bridge.release(unknownSet);
+    }
+
+    /// Design Section 3.4/3.6: the grace window covers transfer payloads
+    /// only. A rotation must be signed by the *current* set, so a
+    /// superseded set — the one a rotation may be running away from —
+    /// cannot rotate the bridge again while its grace period runs.
+    function test_guardian_upgrade_must_be_signed_by_the_current_set() public {
+        bridge.submitGuardianSetUpgrade(_governance(1, newGuardians));
+        assertEq(bridge.currentGuardianSetIndex(), 1, "rotated to set 1");
+        assertGt(bridge.guardianSet(0).expirationTime, block.timestamp, "set 0 is still inside its grace window");
+
+        address[] memory thirdSet = new address[](6);
+        for (uint256 i = 0; i < 6; i++) {
+            thirdSet[i] = vm.addr(200 + i + 1);
+        }
+
+        // Signed by the superseded set 0: refused even though set 0 would
+        // still be accepted for a release.
+        vm.expectRevert(IRandBridge.GuardianSetExpired.selector);
+        bridge.submitGuardianSetUpgrade(_governanceBy(0, guardianKeys, 2, thirdSet));
+        assertEq(bridge.currentGuardianSetIndex(), 1, "no rotation happened");
+
+        // Set 0 really is still good for value movement in the same block.
+        _lock8(5000);
+        bytes memory byOld = _fromRand(_releasePayload(address(t8), 100, 0));
+        bridge.release(byOld);
+        assertEq(t8.balanceOf(recipient), 100, "the superseded set still releases inside grace");
+
+        // The same upgrade signed by the current set 1 goes through.
+        bridge.submitGuardianSetUpgrade(_governanceBy(1, newGuardianKeys, 2, thirdSet));
+        assertEq(bridge.currentGuardianSetIndex(), 2, "rotated to set 2");
+        assertEq(bridge.guardianSet(2).keys, thirdSet, "set 2 keys stored");
     }
 
     function test_guardian_upgrade_works_while_paused() public {

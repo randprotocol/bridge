@@ -95,6 +95,11 @@ With `n` guardians in the set, `q = floor(2n / 3) + 1`. The verifier requires:
 - the set at `guardian_set_index` exists and is either current or within its 86400 s grace
   period after being superseded
 
+The grace period applies to **transfer payloads (id 1) only**. A guardian set upgrade
+(payload id 2) additionally requires `guardian_set_index == current`, so a set that has been
+superseded — possibly the very set the rotation is running away from — cannot rotate the bridge
+again while its grace window runs. See Section 3.6.
+
 Launch parameters: `n = 6`, `q = 5`.
 
 ### 3.5 Chain-id registry
@@ -147,6 +152,14 @@ A guardian set upgrade is signed by the current set, carries `emitter_chain = 1`
 `emitter_address = GOVERNANCE_EMITTER`, `sequence = new_index`, `nonce = 0`,
 `consistency_level = 0`. It is submitted to every chain independently; each chain checks
 `new_index == current + 1` so the same message cannot be applied twice and sets cannot be skipped.
+
+"Signed by the current set" is a rule the verifier enforces, not a convention: a payload-2
+message additionally requires `guardian_set_index == current`, checked in addition to the
+quorum rule of Section 3.4. The grace window of Section 3.4 covers transfer payloads only, so a
+superseded set inside its grace window can still have an in-flight transfer minted but cannot
+rotate the guardian set. Every verifier rejects such a message (the Rand ledger as
+`Verify(SetExpired)`, the EVM contracts as `GuardianSetExpired`, the Solana program as
+`GuardianSetExpired`); the shared vector is `upgrade_signed_by_superseded_set`.
 
 ### 3.7 Amounts and decimals
 
@@ -225,7 +238,9 @@ Release (`release(attestation)`):
 10. pay `fee` to the submitter, `amount - fee` to `to`
 
 Guardian upgrade (`submitGuardianSetUpgrade(attestation)`): verify as above but require
-`emitter_chain == 1`, `emitter_address == GOVERNANCE_EMITTER`, `payload_id == 2`,
+`guardian_set_index == current` (the grace window of Section 3.4 buys a superseded set nothing
+here — it covers transfer payloads only), `emitter_chain == 1`,
+`emitter_address == GOVERNANCE_EMITTER`, `payload_id == 2`,
 `new_index == current + 1`, `n >= 1`, no zero address, no duplicates. Store the new set, mark
 the old one as expiring at `now + 86400`, mark the digest consumed.
 
@@ -342,7 +357,18 @@ whose guardian list has duplicate or zero keys. Payload id 2 rotates the guardia
 `BridgeAttest` is 0 like `Transfer`; the SHRUGG fee still goes to the proposer.
 
 `BridgeBurn` requires the asset to be registered, `to_chain` to equal the asset's home chain,
-`amount > 0`, `fee <= amount`, and balance `>= amount`. It debits the balance, increments the burn sequence,
+`amount > 0`, `fee <= amount`, balance `>= amount`, and a usable recipient: `to != 0` on every
+chain, and — for the EVM-family chains 2, 3 and 4, whose `to` is a 20-byte address left-padded
+to 32 bytes (Section 3.5) — the upper 12 bytes of `to` must be zero. Both are rejected as
+`BadRecipient`. A burn is irreversible once guardians sign it, so an unspendable destination is
+refused before the message exists rather than left for the source contract to reject on release;
+the wallet CLI applies the same two checks before it signs.
+
+A `BridgeAttest` transaction is additionally capped at `MAX_ATTESTATION_BYTES` (16384) and
+rejected as `AttestationTooLarge` before anything is decoded, so an oversized blob cannot buy
+decode and signature-recovery work at the zero minimum fee. A transfer payload with
+`amount == 0` is rejected as `ZeroAmount`, symmetrically with burns: it would consume a digest
+and move nothing. Genesis validation additionally rejects a zero value in the `emitters` map. It debits the balance, increments the burn sequence,
 and records a `BridgeBurnRecord { sequence, body, digest, tx, height }` whose body is the
 Section 3.2 body with `emitter_chain = 1`, `emitter_address = genesis emitter`,
 `timestamp = block timestamp_ms / 1000`, `nonce = 0`, `consistency_level = 0`. Guardians read
@@ -365,6 +391,16 @@ struct BridgeState {
     burns: BTreeMap<u64, BridgeBurnRecord>,       // not part of the state root; derivable
 }
 ```
+
+**Deferral — `burns` growth.** `BridgeState::burns` is kept fully in memory and, because the
+ledger is cloned for speculative block execution, cloned with it on every block. Each record is
+a few hundred bytes, so the cost is linear in the number of burns the chain has ever produced
+and is paid again per speculative execution. This is a known, accepted bound for launch
+volumes, not a permanent design: before any chain approaches roughly 100k burns, `burns` must
+move out of the cloned ledger — drained into the `bridge_burns` column family per block, with
+the ledger holding at most the records of the block in flight. Nothing else depends on it: the
+map is excluded from the state root and is derivable from transaction history, so the change is
+not a fork.
 
 When `bridge` is `Some`, the state root becomes
 `blake3("shrugg-state" || accounts_root || programs_root || bridge_root)` where
@@ -428,10 +464,19 @@ the parsed fields, and the expected verdict. Cases:
 - wrong emitter address, wrong emitter chain with a right address (cross-chain confusion)
 - wrong `to_chain`, wrong `token_chain`
 - `fee > amount`, amount above `u128::MAX`, bad payload length, unknown payload id, bad version
+- an unrecoverable signature (`r = 0`), which every verifier must reject as its own
+  BadSignature rather than compare `ecrecover`'s zero return against a guardian key
+- a guardian set upgrade signed by a superseded set that is still inside its grace window
+  (`upgrade_signed_by_superseded_set`, `expect: "stale_governance_set"`)
+- a transfer whose `token_chain` is not its `emitter_chain`
+- rejected releases addressed to the Ethereum endpoint: wrong emitter, wrong `to_chain`,
+  `fee > amount`, and a replay of a consumed release
 - replay of a consumed digest
 
 The fullnode keeps a copy at `crates/shrugg-core/src/bridge/vectors.json` (`include_str!`);
-`tools/vectors --check` fails if the two copies differ.
+`tools/vectors --check` re-renders the file from the generator and fails if *either* copy
+differs from that output, naming the one that drifted — comparing the two copies to each other
+alone would pass on two equally stale files.
 
 ### 7.2 Per component
 
@@ -455,6 +500,18 @@ The fullnode keeps a copy at `crates/shrugg-core/src/bridge/vectors.json` (`incl
   which a leaked old key set matters.
 - The Rand recipient field has no checksum (base58 of 32 raw bytes). Wallets must verify the
   32-byte round trip before calling lock; the contracts can only reject zero.
+- **Residual: a 2/3 leader coalition can stop the bridge's clock.** On a bridged chain the block
+  `timestamp_ms` is consensus input, but it is only bounded from below by "not earlier than the
+  parent" — equal timestamps are legal (Section 6.3), because two blocks can honestly land in
+  the same millisecond and a proposer sets `max(now, parent)`. A colluding two thirds of leaders
+  can therefore hold `timestamp_ms` constant indefinitely: outbound burn messages all carry the
+  frozen timestamp, and a superseded guardian set never leaves its 86400 s grace window, so a
+  set the guardians have rotated away from keeps minting transfers for as long as the coalition
+  holds. Making equal timestamps invalid would not fix this (a coalition can advance the clock
+  by one millisecond per block just as easily) and would stall an honest chain whose clock has
+  not ticked. The exposure is bounded by what the guardian quorum can do in the first place, and
+  a chain whose leaders are 2/3 dishonest has lost more than its bridge; it is recorded here as
+  a known consequence of the timestamp rule, not as a defended property.
 - Attestations are ECDSA and therefore not post-quantum, as the paper states (`thm:bridgepq`).
   The Rand-side verifier is the natural place to add ML-DSA later since Rand already verifies
   Dilithium.

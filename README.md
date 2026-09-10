@@ -4,8 +4,8 @@ The Rand bridge lets a user lock USDT or USDC on Ethereum, BNB Smart Chain, Tron
 receive the same amount, 1:1, as a bridged asset on the Rand fullnode. A holder of a bridged
 asset on Rand burns it and receives the locked tokens back on the asset's home chain. Every
 chain — the four source chains and Rand itself — verifies the same attestation format
-(`spec/ATTESTATION.md`) against the same guardian set: a 6-of-6 secp256k1 key set with a quorum
-of 5. Guardians observe a lock or burn event, sign a digest over it once it clears the emitting
+(`spec/ATTESTATION.md`) against the same guardian set: a 6-key secp256k1 guardian set with a
+5-of-6 quorum. Guardians observe a lock or burn event, sign a digest over it once it clears the emitting
 chain's consistency level, and any relayer can submit the resulting attestation to the
 destination chain's verifier; the guardians are not the Rand validator set (which signs with
 Dilithium2, unusable on-chain elsewhere) and are neither bonded nor slashable — a valid quorum
@@ -38,7 +38,7 @@ RPC, wallet CLI) lives in the separate `../fullnode` repository, branch `feat/br
 
 ```sh
 # EVM contracts (Ethereum + BSC; Tron shares the same source, see tron/README.md)
-cd evm && forge install foundry-rs/forge-std --no-commit && forge test -vv
+cd evm && forge install foundry-rs/forge-std && forge test -vv
 
 # Solana program
 cd solana && cargo test

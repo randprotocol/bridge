@@ -61,6 +61,42 @@ contract BridgeVectorsTest is Test {
         emit log_named_uint("ethereum vectors rejected", errorsChecked);
     }
 
+    /// The fixture's governance pair, run through a real contract: apply
+    /// `upgrade_set1_ok` (signed by set 0, which is current), then present
+    /// `upgrade_signed_by_superseded_set` — the same shape of message, from
+    /// the same governance emitter, signed by set 0 while set 0 is still
+    /// inside its grace window but no longer current.
+    ///
+    /// Both are `verifier_chain` 1 vectors, so the release loop above skips
+    /// them; `submitGuardianSetUpgrade` is chain-agnostic (it binds on the
+    /// governance emitter, not on `to_chain`), so the rule is checkable
+    /// here against the shared fixture rather than only against the
+    /// locally-built attestations of `RandBridge.t.sol`.
+    function test_shared_vectors_reject_an_upgrade_from_a_superseded_set() public {
+        (bool foundFirst, uint256 first) = _findVector("upgrade_set1_ok");
+        (bool foundStale, uint256 stale) = _findVector("upgrade_signed_by_superseded_set");
+        assertTrue(foundFirst, "upgrade_set1_ok missing from the fixture");
+        assertTrue(foundStale, "upgrade_signed_by_superseded_set missing from the fixture");
+
+        bridge.submitGuardianSetUpgrade(VectorLoader.loadVector(vm, json, first).attestation);
+        assertEq(bridge.currentGuardianSetIndex(), 1, "fixture upgrade rotated the set");
+        assertGt(bridge.guardianSet(0).expirationTime, block.timestamp, "set 0 is still inside its grace window");
+
+        VectorLoader.Vector memory v = VectorLoader.loadVector(vm, json, stale);
+        assertEq(v.guardianSetIndex, 0, "the stale vector must claim the superseded set");
+        (bool ok, bytes memory ret) = address(bridge).call(
+            abi.encodeWithSelector(IRandBridge.submitGuardianSetUpgrade.selector, v.attestation)
+        );
+        assertFalse(ok, string.concat(v.name, ": expected submitGuardianSetUpgrade() to revert"));
+        require(ret.length >= 4, "BridgeVectorsTest: revert data too short to contain a selector");
+        bytes4 got;
+        assembly {
+            got := mload(add(ret, 32))
+        }
+        assertTrue(got == IRandBridge.GuardianSetExpired.selector, string.concat(v.name, ": wrong revert selector"));
+        assertEq(bridge.currentGuardianSetIndex(), 1, "no rotation happened");
+    }
+
     function _checkVector(uint256 i) internal {
         VectorLoader.Vector memory v = VectorLoader.loadVector(vm, json, i);
 
@@ -87,15 +123,20 @@ contract BridgeVectorsTest is Test {
         }
 
         if (VectorLoader.stringEq(v.expect, "replay")) {
-            // Submit the vector this one replays first, then expect the
-            // second submission of the same digest to be refused.
+            // The vector this one replays is itself an `ok` vector on this
+            // chain, so the loop has usually released it already. Submit it
+            // only if it has not been: releasing it twice here would revert
+            // with the very error the assertion below is meant to prove.
             (bool found, uint256 j) = _findVector(vm.parseJsonString(json, string.concat(_base(i), ".replay_of")));
             assertTrue(found, string.concat(v.name, ": replay_of vector not found"));
             VectorLoader.Vector memory original = VectorLoader.loadVector(vm, json, j);
-            address originalToken = _prepareToken(j);
-            _fundCustody(originalToken, _denorm(_payloadUint(j, "amount")));
-            vm.prank(relayer);
-            bridge.release(original.attestation);
+            if (!bridge.consumed(original.digest)) {
+                address originalToken = _prepareToken(j);
+                _fundCustody(originalToken, _denorm(_payloadUint(j, "amount")));
+                vm.prank(relayer);
+                bridge.release(original.attestation);
+            }
+            assertTrue(bridge.consumed(original.digest), string.concat(v.name, ": original was never released"));
 
             _expectRevert(v, IRandBridge.AlreadyConsumed.selector);
             return;
@@ -200,6 +241,10 @@ contract BridgeVectorsTest is Test {
     }
 
     /// Custody is only ever created by a lock, so fund it the honest way.
+    ///
+    /// Tops up only the shortfall, and does nothing when custody already
+    /// covers `units`, so a token is funded once across the whole pass
+    /// however many vectors name it.
     function _fundCustody(address token, uint256 units) internal {
         if (units == 0 || bridge.custody(token) >= units) return;
         uint256 missing = units - bridge.custody(token);

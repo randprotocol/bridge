@@ -12,7 +12,7 @@ excluded from version control via `.gitignore`. After cloning this repo, run:
 
 ```sh
 cd evm
-forge install foundry-rs/forge-std --no-commit
+forge install foundry-rs/forge-std
 ```
 
 (or simply re-run `forge build` / `forge test`, which will report a missing

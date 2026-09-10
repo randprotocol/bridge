@@ -5,6 +5,12 @@ verbatim, followed by a worked example decoded from the shared test vectors
 (`vectors/attestations.json`). It is the format all five verifiers (Ethereum, BSC, Tron, Solana,
 and the Rand fullnode) parse and check identically.
 
+Only the accept/reject decision is normative across verifiers: for any given attestation all
+five must agree on whether it is valid. The *error code* a verifier reports for a rejection is
+not — each names its own (`GuardianSetExpired` on the EVM and Solana endpoints is
+`Verify(SetExpired)` on the Rand fullnode, for instance), and the shared vectors' `expect`
+field names the rule, not any one verifier's code.
+
 ## 3. Attestation format
 
 Shared by all five verifiers (three Solidity, one Solana, one Rust in the fullnode). It is the
@@ -56,6 +62,11 @@ With `n` guardians in the set, `q = floor(2n / 3) + 1`. The verifier requires:
 - each recovered address equals `guardians[guardian_index]`
 - the set at `guardian_set_index` exists and is either current or within its 86400 s grace
   period after being superseded
+
+The grace period applies to **transfer payloads (id 1) only**. A guardian set upgrade
+(payload id 2) additionally requires `guardian_set_index == current`, so a set that has been
+superseded — possibly the very set the rotation is running away from — cannot rotate the bridge
+again while its grace window runs. See Section 3.6.
 
 Launch parameters: `n = 6`, `q = 5`.
 
@@ -109,6 +120,14 @@ A guardian set upgrade is signed by the current set, carries `emitter_chain = 1`
 `emitter_address = GOVERNANCE_EMITTER`, `sequence = new_index`, `nonce = 0`,
 `consistency_level = 0`. It is submitted to every chain independently; each chain checks
 `new_index == current + 1` so the same message cannot be applied twice and sets cannot be skipped.
+
+"Signed by the current set" is a rule the verifier enforces, not a convention: a payload-2
+message additionally requires `guardian_set_index == current`, checked in addition to the
+quorum rule of Section 3.4. The grace window of Section 3.4 covers transfer payloads only, so a
+superseded set inside its grace window can still have an in-flight transfer minted but cannot
+rotate the guardian set. Every verifier rejects such a message (the Rand ledger as
+`Verify(SetExpired)`, the EVM contracts as `GuardianSetExpired`, the Solana program as
+`GuardianSetExpired`); the shared vector is `upgrade_signed_by_superseded_set`.
 
 ### 3.7 Amounts and decimals
 

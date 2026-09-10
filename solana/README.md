@@ -73,6 +73,20 @@ accept, and the initialization transaction has to go through it. A program
 whose upgrade authority has been removed entirely (made immutable) can
 never be initialized at all, so freeze it only after the bridge is live.
 
+## Two locks in the same slot
+
+`Lock` publishes its message into a PDA derived from the config's current
+`sequence`, and the client has to pass that account in. Two locks built
+against the same config therefore name the same message PDA: the first to
+land consumes that sequence, and the second fails with `InvalidPda`
+because the account it passed no longer matches `msg_pda(program_id,
+config.sequence)`.
+
+This is a race, not a rejection of the transfer — nothing was locked and
+nothing was lost. Clients should treat `InvalidPda` on a `Lock` as
+retryable: re-read the config account, re-derive the message PDA from the
+new `sequence`, and resubmit.
+
 ## Compute budget
 
 A release recovers one secp256k1 signature per guardian (about 25k

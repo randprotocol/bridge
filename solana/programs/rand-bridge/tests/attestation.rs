@@ -56,6 +56,7 @@ fn shared_vectors_match_verify() {
         "no_quorum",
         "index_order",
         "index_out_of_range",
+        "bad_signature",
         "high_s",
         "wrong_guardian",
         "bad_version",
@@ -108,6 +109,9 @@ fn shared_vectors_match_verify() {
             "index_out_of_range" => {
                 assert_eq!(result.unwrap_err(), BridgeError::IndexOutOfRange, "{name}")
             }
+            "bad_signature" => {
+                assert_eq!(result.unwrap_err(), BridgeError::BadSignature, "{name}")
+            }
             "high_s" => assert_eq!(result.unwrap_err(), BridgeError::HighS, "{name}"),
             "wrong_guardian" => {
                 assert_eq!(result.unwrap_err(), BridgeError::WrongGuardian, "{name}")
@@ -128,8 +132,8 @@ fn shared_vectors_match_verify() {
     // signature-level vector, this test must be looked at rather than
     // quietly covering less than it did.
     assert_eq!(
-        checked, 23,
-        "expected 23 signature-level vectors, checked {checked}"
+        checked, 24,
+        "expected 24 signature-level vectors, checked {checked}"
     );
 }
 

@@ -332,6 +332,13 @@ abstract contract RandBridgeBase is IRandBridge {
     /// compromised set.
     function submitGuardianSetUpgrade(bytes calldata attestation) external override {
         Attestation.Parsed memory p = _verify(attestation);
+        // The grace window `_verify` allows exists so in-flight *transfers*
+        // signed by a just-superseded set are not stranded. A rotation gets
+        // no such latitude: it must be signed by the set it replaces, or a
+        // set the guardians have already rotated away from — possibly
+        // because it was compromised — could rotate the bridge again for a
+        // whole day. Parity with the fullnode and the Solana program.
+        if (p.guardianSetIndex != currentGuardianSetIndex) revert GuardianSetExpired();
         if (p.emitterChain != Attestation.CHAIN_RAND || p.emitterAddress != Attestation.GOVERNANCE_EMITTER) {
             revert WrongEmitter();
         }
