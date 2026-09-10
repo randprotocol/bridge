@@ -379,7 +379,13 @@ bridge_root = blake3("shrugg-bridge-state"
 ```
 
 The ledger also learns the block timestamp (`set_timestamp_ms`, set by `apply_block`) for burn
-message timestamps and guardian set grace periods.
+message timestamps and guardian set grace periods. Because that field now decides whether a
+retired guardian set is still inside its grace period, chains with a `bridge` section bound it:
+a block whose `timestamp_ms` is lower than its parent's is invalid (`TimestampRewind`), and a
+validator rejects a proposal whose `timestamp_ms` exceeds its own clock by more than
+30 seconds (`MAX_CLOCK_SKEW_MS`). Equal timestamps are allowed. Proposers always set
+`max(now, parent timestamp)`. Chains without a `bridge` section keep their existing validity
+rules unchanged.
 
 ### 6.4 Storage, RPC, CLI
 
