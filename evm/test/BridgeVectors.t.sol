@@ -140,7 +140,7 @@ contract BridgeVectorsTest is Test {
     // fixture plumbing
     // ------------------------------------------------------------------
 
-    function _base(uint256 i) internal view returns (string memory) {
+    function _base(uint256 i) internal pure returns (string memory) {
         return string.concat(".vectors[", vm.toString(i), "]");
     }
 

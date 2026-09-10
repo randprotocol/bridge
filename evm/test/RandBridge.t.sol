@@ -3,6 +3,7 @@ pragma solidity 0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Attestation} from "../src/lib/Attestation.sol";
+import {SafeTransfer} from "../src/lib/SafeTransfer.sol";
 import {IRandBridge} from "../src/interfaces/IRandBridge.sol";
 import {EthereumRandBridge} from "../src/EthereumRandBridge.sol";
 import {BscRandBridge} from "../src/BscRandBridge.sol";
@@ -374,6 +375,41 @@ contract RandBridgeTest is Test {
         assertEq(t8.balanceOf(recipient), 0, "nothing paid out");
     }
 
+    function test_release_rejects_codeless_token() public {
+        _lock8(1000);
+        bytes memory att = _fromRand(_releasePayload(address(t8), 1000, 10));
+        bytes32 digest = _digestOf(att);
+
+        // The token loses its code after being whitelisted (SELFDESTRUCT
+        // is still live on Tron). A call to a codeless address succeeds
+        // and returns nothing, so without an explicit check `release`
+        // would burn the digest and decrement custody while paying
+        // nobody.
+        vm.etch(address(t8), "");
+
+        vm.expectRevert(SafeTransfer.TransferFailed.selector);
+        vm.prank(relayer);
+        bridge.release(att);
+
+        assertFalse(bridge.consumed(digest), "digest must not be consumed");
+        assertEq(bridge.custody(address(t8)), 1000, "custody untouched");
+    }
+
+    function test_release_rejects_dust_below_one_token_unit() public {
+        vm.prank(user);
+        bridge.lock(address(t6), 1_000_000, keccak256("rand-recipient"), 0, 0);
+
+        // 99 attested units is less than one unit of a 6-decimal token,
+        // so denormalising it yields zero: refuse rather than consume the
+        // digest for a payout of nothing.
+        bytes memory att = _fromRand(_transferPayload(99, _word(address(t6)), 2, _word(recipient), 2, 0));
+        bytes32 digest = _digestOf(att);
+
+        vm.expectRevert(IRandBridge.ZeroAmount.selector);
+        bridge.release(att);
+        assertFalse(bridge.consumed(digest), "digest must not be consumed");
+    }
+
     function test_release_custody_counter_bounds_loss() public {
         _lock8(1000);
 
@@ -497,6 +533,18 @@ contract RandBridgeTest is Test {
         bridge.release(unknownSet);
     }
 
+    function test_guardian_upgrade_works_while_paused() public {
+        vm.prank(pauser);
+        bridge.pause();
+
+        // Pausing stops value movement, not the ability to rotate away
+        // from a compromised guardian set.
+        bridge.submitGuardianSetUpgrade(_governance(1, newGuardians));
+
+        assertEq(bridge.currentGuardianSetIndex(), 1, "rotated while paused");
+        assertTrue(bridge.paused(), "still paused");
+    }
+
     // ------------------------------------------------------------------
     // roles
     // ------------------------------------------------------------------
@@ -556,9 +604,19 @@ contract RandBridgeTest is Test {
         // Two-step admin transfer.
         vm.expectRevert(IRandBridge.NotAdmin.selector);
         bridge.transferAdmin(user);
-        vm.expectRevert(IRandBridge.ZeroAddress.selector);
+
+        // Handing the transfer to the zero address cancels it.
+        vm.prank(admin);
+        bridge.transferAdmin(user);
+        assertEq(bridge.pendingAdmin(), user, "transfer pending");
+        vm.expectEmit(true, false, false, false, address(bridge));
+        emit AdminTransferStarted(address(0));
         vm.prank(admin);
         bridge.transferAdmin(address(0));
+        assertEq(bridge.pendingAdmin(), address(0), "transfer cancelled");
+        vm.expectRevert(IRandBridge.NotAdmin.selector);
+        vm.prank(user);
+        bridge.acceptAdmin();
 
         vm.expectEmit(true, false, false, false, address(bridge));
         emit AdminTransferStarted(relayer);
@@ -602,6 +660,22 @@ contract RandBridgeTest is Test {
         vm.expectRevert(IRandBridge.ZeroAddress.selector);
         vm.prank(admin);
         bridge.setToken(address(0), true, 0, 0);
+    }
+
+    function test_setToken_can_disable_a_token_that_stopped_answering() public {
+        vm.etch(address(t6), "");
+
+        // Disabling must never depend on the token answering: that is
+        // precisely when the admin needs the switch.
+        vm.prank(admin);
+        bridge.setToken(address(t6), false, 0, 0);
+        assertFalse(bridge.tokenConfig(address(t6)).enabled, "disabled");
+        assertEq(bridge.tokenConfig(address(t6)).decimals, 6, "stored decimals kept");
+
+        // Re-enabling still requires a live `decimals()`.
+        vm.expectRevert(IRandBridge.DecimalsUnavailable.selector);
+        vm.prank(admin);
+        bridge.setToken(address(t6), true, 0, 0);
     }
 
     // ------------------------------------------------------------------

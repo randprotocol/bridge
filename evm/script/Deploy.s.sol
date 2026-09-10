@@ -36,13 +36,24 @@ contract Deploy is Script {
         console2.log("pauser       ", pauser);
         console2.log("guardians    ", guardians.length);
 
+        // `DEPLOY_CHAIN_ID` is baked in at construction and guards every
+        // lock and release afterwards, so deploying the wrong contract for
+        // the connected network would produce a bridge that can never
+        // move value. Mainnet ids are the default; set `EXPECTED_CHAIN_ID`
+        // for a testnet (Sepolia 11155111, BSC testnet 97, ...).
+        uint256 expected = vm.envOr("EXPECTED_CHAIN_ID", uint256(0));
+
         vm.startBroadcast();
         bytes32 which = keccak256(bytes(chain));
         if (which == keccak256("ethereum")) {
+            _requireChainId(expected == 0 ? 1 : expected);
             bridge = address(new EthereumRandBridge(admin, pauser, randEmitter, guardians));
         } else if (which == keccak256("bsc")) {
+            _requireChainId(expected == 0 ? 56 : expected);
             bridge = address(new BscRandBridge(admin, pauser, randEmitter, guardians));
         } else if (which == keccak256("tron")) {
+            // The TVM has no chain id this script can rely on, which is
+            // why `TronRandBridge` drops the fork guard too.
             bridge = address(new TronRandBridge(admin, pauser, randEmitter, guardians));
         } else {
             revert("Deploy: CHAIN must be one of ethereum, bsc, tron");
@@ -51,5 +62,19 @@ contract Deploy is Script {
 
         console2.log("bridge       ", bridge);
         console2.log("bridge chain ", IRandBridge(bridge).chainId());
+    }
+
+    function _requireChainId(uint256 expected) internal view {
+        if (block.chainid != expected) {
+            revert(
+                string.concat(
+                    "Deploy: connected to chain id ",
+                    vm.toString(block.chainid),
+                    " but CHAIN expects ",
+                    vm.toString(expected),
+                    " (set EXPECTED_CHAIN_ID for a testnet)"
+                )
+            );
+        }
     }
 }

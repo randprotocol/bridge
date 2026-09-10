@@ -31,6 +31,15 @@ library SafeTransfer {
     }
 
     function _call(address token, bytes memory data) private {
+        // A call to an address with no code succeeds and returns nothing,
+        // which the empty-return rule below would read as a successful
+        // transfer. A whitelisted token can lose its code after the fact
+        // (SELFDESTRUCT still applies on Tron), and `release` has no
+        // balance-delta guard to catch it, so a codeless target must be a
+        // hard failure or a release would consume its digest and
+        // decrement custody while paying nobody.
+        if (token.code.length == 0) revert TransferFailed();
+
         (bool success, bytes memory ret) = token.call(data);
         if (!success) revert TransferFailed();
         if (ret.length == 0) return; // USDT-style: no return value

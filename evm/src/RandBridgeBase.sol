@@ -249,6 +249,11 @@ abstract contract RandBridgeBase is IRandBridge {
 
         uint256 amount = _denormalize(t.amount, cfg.decimals);
         uint256 fee = _denormalize(t.fee, cfg.decimals);
+        // Attested dust below one unit of this token: paying it out would
+        // move nothing while burning the digest, so refuse it instead and
+        // leave the burn re-submittable if the token is ever
+        // re-configured.
+        if (amount == 0) revert ZeroAmount();
 
         if (custody[token] < amount) revert InsufficientCustody();
         if (cfg.perTransferCap != 0 && amount > cfg.perTransferCap) revert PerTransferCap();
@@ -268,7 +273,9 @@ abstract contract RandBridgeBase is IRandBridge {
         if (fee != 0) {
             token.safeTransfer(msg.sender, fee);
         }
-        token.safeTransfer(to, amount - fee);
+        if (amount - fee != 0) {
+            token.safeTransfer(to, amount - fee);
+        }
     }
 
     /// The token a release payload names. On an EVM/TVM chain a
@@ -382,7 +389,14 @@ abstract contract RandBridgeBase is IRandBridge {
 
         TokenConfig storage cfg = _tokenConfigs[token];
         cfg.enabled = enabled;
-        cfg.decimals = _decimalsOf(token);
+        // Only read `decimals()` when whitelisting. Disabling a token
+        // must always be possible, including for a token that has stopped
+        // answering (or lost its code entirely) — that is exactly when
+        // the admin most needs to switch it off. The stored decimals stay
+        // as they were, so re-enabling refreshes them.
+        if (enabled) {
+            cfg.decimals = _decimalsOf(token);
+        }
         cfg.perTransferCap = perTransferCap;
         cfg.dailyCap = dailyCap;
 
@@ -423,8 +437,9 @@ abstract contract RandBridgeBase is IRandBridge {
         emit Unpaused(msg.sender);
     }
 
+    /// Starts a transfer, or — with `to == address(0)` — cancels the one
+    /// in flight.
     function transferAdmin(address to) external override onlyAdmin {
-        if (to == address(0)) revert ZeroAddress();
         pendingAdmin = to;
         emit AdminTransferStarted(to);
     }
@@ -432,7 +447,9 @@ abstract contract RandBridgeBase is IRandBridge {
     /// Second half of the two-step transfer: the new admin proves it can
     /// transact before it owns anything.
     function acceptAdmin() external override {
-        if (msg.sender != pendingAdmin) revert NotAdmin();
+        // The zero check matters here rather than in `transferAdmin`: with
+        // no transfer in flight there is nothing to accept.
+        if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotAdmin();
         admin = msg.sender;
         pendingAdmin = address(0);
         emit AdminTransferred(msg.sender);
