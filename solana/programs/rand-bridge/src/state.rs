@@ -150,7 +150,7 @@ pub trait BridgeAccount: BorshDeserialize + BorshSerialize {
     /// Writes the discriminator and the Borsh body into raw account data,
     /// which must be large enough to hold both.
     fn store(&self, data: &mut [u8]) -> Result<(), BridgeError> {
-        let body = borsh::to_vec(self).map_err(|_| BridgeError::AmountOverflow)?;
+        let body = borsh::to_vec(self).map_err(|_| BridgeError::SerializationFailed)?;
         if data.len() < 1 + body.len() {
             return Err(BridgeError::Truncated);
         }

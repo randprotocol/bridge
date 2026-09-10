@@ -113,9 +113,12 @@ fn shared_vectors_match_verify() {
         }
     }
 
-    assert!(
-        checked >= 10,
-        "expected at least 10 signature-level vectors, checked {checked}"
+    // Exact, not a lower bound: if the shared generator gains or loses a
+    // signature-level vector, this test must be looked at rather than
+    // quietly covering less than it did.
+    assert_eq!(
+        checked, 23,
+        "expected 23 signature-level vectors, checked {checked}"
     );
 }
 
