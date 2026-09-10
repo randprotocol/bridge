@@ -24,12 +24,22 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 bridge-codec = { path = "../../../../fullnode/crates/bridge-codec" }
 borsh = "1"
 solana-program = "2"
+# `solana-program` 2.3 deprecates its own re-exports of the system
+# program id and instruction builders in favour of these two crates.
+solana-sdk-ids = "2"
+solana-system-interface = { version = "1", features = ["bincode"] }
 spl-token = { version = "7", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
 thiserror = "1"
 
 [dev-dependencies]
 hex = "0.4"
+# Signing test attestations with the shared vectors' guardian secrets;
+# `sign_digest` in the integration test mirrors `shrugg-core`'s, rather
+# than depending on the fullnode workspace from here.
+k256 = { version = "0.13", features = ["ecdsa"] }
 serde_json = "1"
+sha3 = "0.10"
 solana-program-test = "2"
 solana-sdk = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

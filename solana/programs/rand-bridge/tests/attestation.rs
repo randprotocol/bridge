@@ -13,8 +13,10 @@ use serde_json::Value;
 
 /// The shared vectors, baked in at compile time so the test needs no
 /// working-directory assumptions.
-const VECTORS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../vectors/attestations.json"));
+const VECTORS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../vectors/attestations.json"
+));
 
 /// Decodes hex that may or may not carry a `0x` prefix.
 fn unhex(s: &str) -> Vec<u8> {
@@ -71,7 +73,9 @@ fn shared_vectors_match_verify() {
         checked += 1;
 
         let bytes = unhex(v["attestation"].as_str().expect("attestation"));
-        let index = v["guardian_set_index"].as_u64().expect("guardian_set_index") as u32;
+        let index = v["guardian_set_index"]
+            .as_u64()
+            .expect("guardian_set_index") as u32;
         let sets = v["sets"].as_array().expect("sets array");
 
         if expect == "unknown_set" {
@@ -92,7 +96,10 @@ fn shared_vectors_match_verify() {
                     result.unwrap_or_else(|e| panic!("{name}: expected ok, got {e:?}"));
                 assert_eq!(
                     hex::encode(digest),
-                    v["digest"].as_str().expect("digest").trim_start_matches("0x"),
+                    v["digest"]
+                        .as_str()
+                        .expect("digest")
+                        .trim_start_matches("0x"),
                     "{name}: digest mismatch"
                 );
             }
@@ -107,7 +114,11 @@ fn shared_vectors_match_verify() {
             }
             "bad_version" => assert_eq!(result.unwrap_err(), BridgeError::BadVersion, "{name}"),
             "set_expired" => {
-                assert_eq!(result.unwrap_err(), BridgeError::GuardianSetExpired, "{name}")
+                assert_eq!(
+                    result.unwrap_err(),
+                    BridgeError::GuardianSetExpired,
+                    "{name}"
+                )
             }
             other => panic!("{name}: unhandled expect {other}"),
         }
@@ -133,7 +144,9 @@ fn tampered_guardian_set_rejects_good_attestations() {
         if v["expect"].as_str() != Some("ok") {
             continue;
         }
-        let index = v["guardian_set_index"].as_u64().expect("guardian_set_index") as u32;
+        let index = v["guardian_set_index"]
+            .as_u64()
+            .expect("guardian_set_index") as u32;
         let mut set = match resolve_set(v["sets"].as_array().expect("sets"), index) {
             Some(s) => s,
             None => continue,
