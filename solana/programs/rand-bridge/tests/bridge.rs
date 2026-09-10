@@ -1089,6 +1089,56 @@ async fn release_rejects_bad_ata_and_wrong_pda() {
     assert_eq!(b.custody_balance().await, 2_000_000);
     b.send(base, &[&relayer]).await.expect("release");
     assert_eq!(b.custody_balance().await, 1_000_000);
+
+    // The custody *address* being right is not enough: the account it
+    // names must be an SPL token account for this mint, held by this
+    // program's custody authority. Both of these keep the derived
+    // address and corrupt what lives at it, which is the only way to
+    // reach the checks past `check_key`.
+    let custody = custody_pda(&program, &mint).0;
+    let authority = authority_pda(&program).0;
+
+    let (bytes, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            2,
+            transfer_payload(10_000_000, &mint, 5, &recipient, 5, 0),
+        ),
+        QUORUM,
+    );
+    // Right mint, but someone else's SPL authority.
+    let impostor = Pubkey::new_unique();
+    b.ctx.set_account(
+        &custody,
+        &AccountSharedData::from(token_account(&mint, &impostor, 1_000_000)),
+    );
+    assert_bridge_error(
+        b.release(&relayer, 0, &recipient, &digest, bytes.clone())
+            .await,
+        BridgeError::InvalidPda,
+    );
+
+    // Right SPL authority, but the wrong mint.
+    let other_mint = Pubkey::new_unique();
+    b.ctx.set_account(
+        &custody,
+        &AccountSharedData::from(token_account(&other_mint, &authority, 1_000_000)),
+    );
+    assert_bridge_error(
+        b.release(&relayer, 0, &recipient, &digest, bytes.clone())
+            .await,
+        BridgeError::InvalidPda,
+    );
+
+    // Not a token account at all.
+    b.ctx
+        .set_account(&custody, &AccountSharedData::from(wallet_account()));
+    assert_bridge_error(
+        b.release(&relayer, 0, &recipient, &digest, bytes).await,
+        BridgeError::InvalidPda,
+    );
 }
 
 #[tokio::test]

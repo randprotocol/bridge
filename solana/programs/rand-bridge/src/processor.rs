@@ -704,6 +704,7 @@ fn process_lock(
     let (_, attested_fee) = normalize(relayer_fee, registry.decimals)?;
     debug_assert!(attested_fee <= attested, "normalisation is monotonic");
 
+    check_key(mint_account.owner, &spl_token::id())?;
     let (custody_key, _) = custody_pda(program_id, mint_account.key);
     check_key(custody_account.key, &custody_key)?;
     let sequence = config.sequence;
@@ -808,8 +809,14 @@ fn process_release(
     check_signer(relayer)?;
     check_key(token_program.key, &spl_token::id())?;
     check_key(system_account.key, &system_program::id())?;
+    check_key(mint_account.owner, &spl_token::id())?;
     let (custody_key, _) = custody_pda(program_id, mint_account.key);
     check_key(custody_account.key, &custody_key)?;
+    // Not just the address: the account it names must really be an SPL
+    // token account for this mint under this program's custody
+    // authority. Checked here, before any effect is written and long
+    // before the payout CPIs.
+    custody_state(custody_account, program_id, mint_account.key)?;
     let (authority_key, authority_bump) = authority_pda(program_id);
     check_key(authority_account.key, &authority_key)?;
     let now = now_from(clock_account)?;
