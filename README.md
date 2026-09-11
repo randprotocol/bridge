@@ -32,7 +32,10 @@ Status below).
 | `docs/superpowers/` | Design spec and implementation plan this repo was built from |
 
 The Rand fullnode itself (`bridge-codec` and `shrugg-core::bridge` crates, transaction kinds,
-RPC, wallet CLI) lives in the separate `../fullnode` repository, branch `feat/bridge`.
+RPC, wallet CLI) lives in the separate `../fullnode` repository, on `main` (merged in `543d72b`).
+Enabling the bridge is a hard fork: a chain whose genesis has no `bridge` section is byte-identical
+to a pre-bridge node, and activation is bundled into the next chain cut-over rather than deployed
+node by node.
 
 ## Build and test
 
