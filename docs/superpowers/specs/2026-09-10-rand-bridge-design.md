@@ -367,10 +367,12 @@ the wallet CLI applies the same two checks before it signs.
 A `BridgeAttest` transaction is additionally capped at `MAX_ATTESTATION_BYTES` (16384) and
 rejected as `AttestationTooLarge` before anything is decoded, so an oversized blob cannot buy
 decode and signature-recovery work at the zero minimum fee. For the same reason, `check_attest`
-runs every check that needs no signature recovery first — the replay check on the digest, the
+runs every check that needs no signature recovery first — guardian-set resolution
+(`UnknownGuardianSet`, immediately after the decode), then the replay check on the digest, the
 emitter binding, the payload's shape, chains and amounts, and a rotation's index — and recovers
-the quorum's signatures last, so a replayed (public, already-consumed) or mis-addressed
-attestation costs a node one keccak rather than a quorum of secp256k1 recoveries. The set of
+the quorum's signatures last (set expiry, index order and quorum, low-s, recovery), so a replayed
+(public, already-consumed) or mis-addressed attestation costs a node one keccak rather than a
+quorum of secp256k1 recoveries. The set of
 accepted attestations is the same either way; only which refusal is reported first differs. The
 EVM and Solana verifiers keep the Section 5.1 order, since there the submitter pays for the
 recovery. A transfer payload with

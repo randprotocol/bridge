@@ -29,6 +29,7 @@ Status below).
 | `tools/vectors/` | Rust generator for the shared attestation test vectors consumed by every verifier |
 | `vectors/attestations.json` | The generated vectors themselves (checked into this repo; a byte-identical copy lives in the fullnode) |
 | `spec/ATTESTATION.md` | The attestation wire-format reference: envelope, body, payloads, digest, quorum, chain-id registry, plus a worked example |
+| `docs/architecture.md` | End-to-end architecture: endpoints, guardians, attestation, the fullnode's bridge code, vectors, deployment |
 | `docs/superpowers/` | Design spec and implementation plan this repo was built from |
 
 The Rand fullnode itself (`bridge-codec` and `shrugg-core::bridge` crates, transaction kinds,
