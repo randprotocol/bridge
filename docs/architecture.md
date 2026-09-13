@@ -664,12 +664,67 @@ How each side consumes them:
 3. **Register the endpoints back into genesis** under `bridge.emitters`, keyed by bridge chain id
    and left-padded to 32 bytes, before the chain launches. The emitter table is the other half of
    the trust binding and must be in genesis, not added to a live chain.
-4. **Whitelist tokens** on each endpoint with `setToken` / `SetToken` and set the pauser.
+4. **Whitelist tokens** on each endpoint with `setToken` / `SetToken` and set the pauser. The
+   approved list is in §10.1; nothing outside it is enabled.
 
 The bridge's fullnode changes are on fullnode `main`. Nothing on `main` after the zkVM
 constraint-set change can run the current chain, so bridge activation is bundled into the next
 chain cut-over as a fork item, together with the consensus and zkVM changes, and is not rolled out
 node by node.
+
+### 10.1 Approved tokens
+
+Two tokens are approved for bridging, USDT and USDC, each on all four source chains. These are
+the only addresses `setToken` / `SetToken` enable at launch; the allowlist is enforced on the
+endpoints (§6.3, §7.1), and Rand's registry (§8.2) fills in from the first attestation it sees,
+so an address absent from this table can neither be locked nor minted. Each row is a distinct
+Rand asset: the same ticker on two chains is two assets with separate custody (§8.2).
+
+| chain | token | contract address | decimals | issuer |
+|---|---|---|---|---|
+| 2 Ethereum | USDT | `0xdAC17F958D2ee523a2206206994597C13D831ec7` | 6 | Tether |
+| 2 Ethereum | USDC | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | 6 | Circle |
+| 3 BNB Smart Chain | USDT | `0x55d398326f99059fF775485246999027B3197955` | 18 | Binance-Peg (BSC-USD) |
+| 3 BNB Smart Chain | USDC | `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` | 18 | Binance-Peg |
+| 4 Tron | USDT | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` (hex `41a614f803b6fd780986a42c78ec9c7f77e6ded13c`) | 6 | Tether |
+| 4 Tron | USDC | `TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8` (hex `413487b63d30b5b2c87fb7ffa8bcfade38eaac1abe`) | 6 | Circle, discontinued |
+| 5 Solana | USDT | `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB` | 6 | Tether |
+| 5 Solana | USDC | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | 6 | Circle |
+
+Notes on the rows:
+
+- **BSC.** Both tokens are Binance-issued pegs, not Tether's or Circle's own contracts, and carry
+  18 decimals, so they take the `d > 8` normalisation path in §3.4: the low 10 digits of a lock
+  are dust that stays with the user and only the covered amount is pulled.
+- **Tron.** `setToken` takes the 20-byte form (the hex above without its `41` prefix); the
+  base58 string is what explorers and wallets show. See `tron/README.md` §3 for the conversion.
+- **Tron USDC.** Circle stopped minting USDC on Tron in February 2024 and ended redemption in
+  February 2025. The contract still exists and trades, but there is no issuer behind it. It is on
+  the list because the launch policy is "USDT and USDC on every chain"; give it a tight per-transfer
+  and daily cap, or leave it disabled, until that policy is revisited.
+- **Everything else.** Bridging a token that is not on this list means adding it here first,
+  then enabling it on exactly one endpoint, the one for its home chain.
+
+The same rows in the forms the verifiers compare on. `token_address` is the 32-byte wire field
+(§3.3; 20-byte addresses left-padded, Solana mint pubkeys as-is), and the asset id is
+`blake3("shrugg-bridge-asset" || token_chain BE u16 || token_address)`, which is the key Rand's
+`getAssets` and `bridge-status` report:
+
+| chain | token | `token_address` (32 bytes) | Rand asset id |
+|---|---|---|---|
+| 2 | USDT | `0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7` | `0xb97721c36f584c11082d77d03df09511053c89507916ab07b52d2f18e84c8dcd` |
+| 2 | USDC | `0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | `0xf255a297a6e0d977177b11bccb757c7952a4a9b78f4f2c6e409f405b3b62b404` |
+| 3 | USDT | `0x00000000000000000000000055d398326f99059ff775485246999027b3197955` | `0x05df632110d5fec82e8266d76346704bad8602038290d5779df96eaf86dff654` |
+| 3 | USDC | `0x0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d` | `0x8e0d5f59ebbeab2ed774ec75fba48dbadcb24cb047c9e7bc75380d301098a441` |
+| 4 | USDT | `0x000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c` | `0x57f9db0a25204158d6adad80f0d0872983a177e2378701ac1eca1467f392e5c7` |
+| 4 | USDC | `0x0000000000000000000000003487b63d30b5b2c87fb7ffa8bcfade38eaac1abe` | `0x76c02490cc19aa47622270cb3e5389f94bb69a2034cd4478c4f4ca3b882a967c` |
+| 5 | USDT | `0xce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264` | `0x8f382a5e7b91de52462c80c0b671e507ab42ff4e9ba11a15d24c8fd35420a1c7` |
+| 5 | USDC | `0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61` | `0x80382eaf36f01d0a2ed0a668321896d62c5d5a59f278d0ec235f45547d74b060` |
+
+The addresses were checked on 2026-09-13 against the issuers' own pages (Tether's supported
+protocols list, Circle's multi-chain USDC page) and BscScan / TronScan. Re-verify against those
+sources before calling `setToken` on a real deployment; this table is for the humans running it,
+nothing in the repo reads it.
 
 ---
 

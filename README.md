@@ -80,6 +80,24 @@ Tron's steps (mirroring `evm/src/` into `tron/contracts/`, `tronbox compile`, `t
 whitelisting tokens, registering the emitter) are detailed in `tron/README.md`; nothing under
 `tron/` has actually been deployed by this pass, since no Tron toolchain is installed here.
 
+## Approved tokens
+
+Two tokens are approved for bridging at launch, USDT and USDC, on each of the four source chains.
+These are the only addresses the endpoints whitelist; the 32-byte wire forms and the Rand asset
+ids for each row are in `docs/architecture.md` §10.1.
+
+| chain | USDT | USDC |
+|---|---|---|
+| Ethereum (2) | `0xdAC17F958D2ee523a2206206994597C13D831ec7` · 6 dp | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` · 6 dp |
+| BNB Smart Chain (3) | `0x55d398326f99059fF775485246999027B3197955` · 18 dp, Binance-Peg | `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` · 18 dp, Binance-Peg |
+| Tron (4) | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` · 6 dp | `TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8` · 6 dp, issuer discontinued |
+| Solana (5) | `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB` · 6 dp | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` · 6 dp |
+
+Circle stopped issuing and redeeming USDC on Tron (minting ended February 2024, redemption
+February 2025); the row is listed because the launch policy is both tokens on every chain, but it
+should be capped tightly or left disabled until that policy is revisited. Verify every address
+against the issuer and the chain's explorer before whitelisting it.
+
 ## Security notes
 
 - The guardian set is the trust root on every chain. Deployment must place the six keys with

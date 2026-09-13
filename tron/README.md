@@ -96,11 +96,13 @@ and `_recipient` do (`evm/src/RandBridgeBase.sol`).
 | token | base58check | hex (`41`-prefixed) |
 |---|---|---|
 | USDT | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` | `41a614f803b6fd780986a42c78ec9c7f77e6ded13c` |
-| USDC | `TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8` | derive with the method in Section 3 above |
+| USDC | `TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8` | `413487b63d30b5b2c87fb7ffa8bcfade38eaac1abe` |
 
 These are the addresses `setToken` should whitelist on a mainnet deployment (Section 5.1). Verify
 each against TronScan / the issuer before whitelisting -- this table is a reference for humans
 running the deployment, not something the migration reads.
+Both carry 6 decimals. Note that Circle discontinued USDC on Tron (minting ended February 2024,
+redemption February 2025); see `docs/architecture.md` §10.1 for the launch policy on that row.
 
 ## 5. `block.chainid` is not relied on
 
