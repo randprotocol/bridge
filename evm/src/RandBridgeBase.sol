@@ -41,6 +41,12 @@ abstract contract RandBridgeBase is IRandBridge {
     /// whitelisting a token whose every transfer would overflow.
     uint8 internal constant MAX_DECIMALS = 36;
 
+    /// The largest attested (8-decimal) amount a single lock may publish:
+    /// `u64::MAX`, the width of a Rand note's amount field. Rand rejects
+    /// anything above it (`BridgeError::AmountTooLarge`), so the endpoint
+    /// must too, or the locked tokens could never be minted or released.
+    uint256 internal constant MAX_ATTESTED_AMOUNT = type(uint64).max;
+
     /// `block.chainid` at deployment. Section 5.4's fork guard: a replay
     /// of this contract's state onto a forked chain cannot move tokens.
     uint256 public immutable DEPLOY_CHAIN_ID;
@@ -162,10 +168,15 @@ abstract contract RandBridgeBase is IRandBridge {
     /// Section 5.1's lock: pull `locked` units into custody and publish a
     /// transfer message addressed to Rand (`to_chain = 1`).
     ///
-    /// `relayerFee` is quoted in the token's own units, like `amount`,
-    /// and is normalised the same way, so it can round down to zero for
-    /// an 18-decimal token — always `<= amount`, which is what the
-    /// payload requires.
+    /// `randRecipient` is the 32-byte recipient hash Rand's wallet prints
+    /// for a shielded address (`blake3("rand-shielded-recipient", pk ||
+    /// kem_ek)`); the endpoint can only reject zero. `relayerFee` is
+    /// quoted in the token's own units, like `amount`, and is normalised
+    /// the same way, so it can round down to zero for an 18-decimal
+    /// token — always `<= amount`, which is what the payload requires.
+    /// Rand mints the gross `amount` and pays the fee to nobody (the
+    /// submitter has no identity on a shielded chain), so it is carried
+    /// for the record only; front ends should pass 0.
     function lock(address token, uint256 amount, bytes32 randRecipient, uint256 relayerFee, uint32 nonce)
         external
         override
@@ -181,6 +192,10 @@ abstract contract RandBridgeBase is IRandBridge {
 
         (uint256 locked, uint256 attested) = _normalize(amount, cfg.decimals);
         if (attested == 0) revert ZeroAmount();
+        // Rand keeps a bridged holding in a note whose amount is a `u64`
+        // and refuses a larger attestation at admission; a lock it could
+        // never mint would sit in custody with no burn able to release it.
+        if (attested > MAX_ATTESTED_AMOUNT) revert AmountTooLarge();
         (, uint256 attestedFee) = _normalize(relayerFee, cfg.decimals);
 
         _pull(token, msg.sender, locked);

@@ -25,18 +25,23 @@ Status below).
 |---|---|
 | `evm/` | Foundry project: `Attestation` verifier library, `RandBridgeBase` plus the Ethereum and BSC bridge contracts, deploy script, tests |
 | `tron/` | TronBox project that compiles/deploys the same EVM source as the Tron endpoint (`TronRandBridge`); see `tron/README.md` |
-| `solana/` | Native `solana-program` workspace, `programs/rand-bridge`: state, attestation verifier, instruction processing |
+| `solana/` | Native `solana-program` workspace, `programs/rand-bridge`: state, attestation verifier, instruction processing; `cli/` is `rand-bridge-cli`, the command-line client for `Initialize` and the admin instructions |
+| `deploy/` | One deploy script per chain (`eth.sh`, `bnb.sh`, `trx.sh`, `sol.sh`), signing with keys loaded from the git-ignored `deploy/.env`; see `deploy/README.md` |
+| `docs/audit/` | The internal pre-deployment audit of the three verifiers |
 | `tools/vectors/` | Rust generator for the shared attestation test vectors consumed by every verifier |
 | `vectors/attestations.json` | The generated vectors themselves (checked into this repo; a byte-identical copy lives in the fullnode) |
 | `spec/ATTESTATION.md` | The attestation wire-format reference: envelope, body, payloads, digest, quorum, chain-id registry, plus a worked example |
 | `docs/architecture.md` | End-to-end architecture: endpoints, guardians, attestation, the fullnode's bridge code, vectors, deployment |
 | `docs/superpowers/` | Design spec and implementation plan this repo was built from |
 
-The Rand fullnode itself (`bridge-codec` and `shrugg-core::bridge` crates, transaction kinds,
-RPC, wallet CLI) lives in the separate `../fullnode` repository, on `main` (merged in `543d72b`).
-Enabling the bridge is a hard fork: a chain whose genesis has no `bridge` section is byte-identical
-to a pre-bridge node, and activation is bundled into the next chain cut-over rather than deployed
-node by node.
+The Rand fullnode itself (`bridge-codec` and `randprotocol-core::bridge` crates, the two bridge
+actions, RPC, wallet CLI) lives in the separate `../fullnode` repository, on `main`. Since the
+shielded pool's phase S3 a bridged holding on Rand is a note, not a per-account balance: the
+recipient a depositor names is the 32-byte hash of a shielded address, amounts must fit a note's
+`u64`, and the relayer fee is not paid on Rand (fullnode `docs/bridge.md`). Enabling the bridge is
+a hard fork: a chain whose genesis has no `bridge` section is byte-identical to a pre-bridge node,
+and a bridge cannot be added to a running chain, so activation means cutting a new chain with a
+`bridge` section.
 
 ## Build and test
 
@@ -44,12 +49,18 @@ node by node.
 # EVM contracts (Ethereum + BSC; Tron shares the same source, see tron/README.md)
 cd evm && forge install foundry-rs/forge-std && forge test -vv
 
-# Solana program
+# Solana program and the deploy CLI
 cd solana && cargo test
+
+# Tron: compile the mirrored sources with TronBox (installs it into tron/node_modules)
+deploy/trx.sh nile --dry-run
 
 # Shared attestation vectors — regenerate, or verify the two copies match
 cd tools/vectors && cargo run --release            # regenerate vectors/attestations.json and the fullnode's copy
 cd tools/vectors && cargo run --release -- --check  # verify the two copies are byte-identical
+
+# Rehearse an EVM deployment against a local node
+anvil --port 18545 & ANVIL_RPC_URL=http://127.0.0.1:18545 deploy/evm.sh anvil --yes
 
 # Rand fullnode (separate repo)
 cd ../fullnode && cargo test --release
@@ -57,18 +68,19 @@ cd ../fullnode && cargo test --release
 
 ## Deployment order
 
-1. **Fullnode genesis first.** Build the Rand genesis with a `bridge` section (`emitter`,
-   `guardians`, and as much of the `emitters` map as is already known) via
-   `shrugg-node genesis --bridge bridge.json`. The six guardian keys and the Rand-side emitter
-   value it fixes here are the values every source-chain contract's constructor must be given
-   next — the chains have to agree on one guardian set and one Rand emitter before any of them
-   can accept an attestation from the other.
+1. **Fullnode genesis first.** Cut the Rand genesis with `rand-node genesis`, then add the
+   `bridge` section (`emitter`, `guardians`, and as much of the `emitters` map as is already
+   known) to the file by hand (fullnode `docs/cli.md`). The six guardian keys and the Rand-side
+   emitter value it fixes here are the values every source-chain contract's constructor must be
+   given next — the chains have to agree on one guardian set and one Rand emitter before any of
+   them can accept an attestation from the other.
 2. **Deploy the source-chain contracts** with that same guardian set and Rand emitter address
-   passed to their constructors (`script/Deploy.s.sol` reads `CHAIN`, `ADMIN`, `PAUSER`,
-   `RAND_EMITTER`, `GUARDIANS`, `EXPECTED_CHAIN_ID` from the environment for Ethereum/BSC; Tron
-   deployment follows the separate steps in `tron/README.md`; Solana needs the Solana CLI toolchain
-   for `cargo build-sbf`, which is not installed in this environment, so its program is built and
-   tested but not deployed by this pass).
+   passed to their constructors: `deploy/eth.sh`, `deploy/bnb.sh`, `deploy/trx.sh` and
+   `deploy/sol.sh`, each signing with its chain's private key from `deploy/.env`
+   (`deploy/README.md`). Underneath, `evm/script/Deploy.s.sol` handles Ethereum and BSC, TronBox
+   handles Tron, and `cargo build-sbf` + `solana program deploy` + `rand-bridge-cli initialize`
+   handle Solana (the Solana CLI is not installed on this machine, so that path is written but
+   unexercised).
 3. **Register each deployed contract's address back into the Rand genesis** `bridge.emitters` map
    (keyed by bridge chain id: 2 Ethereum, 3 BSC, 4 Tron, 5 Solana), left-padded to 32 bytes, before
    the chain launches. A source chain whose contract address is missing from `emitters` can be
@@ -106,8 +118,10 @@ against the issuer and the chain's explorer before whitelisting it.
   attestation says.
 - Guardian upgrades cannot skip indices and old sets expire after a day, limiting the window in
   which a leaked old key set matters.
-- The Rand recipient field has no checksum (base58 of 32 raw bytes). Wallets must verify the
-  32-byte round trip before calling lock; the contracts can only reject zero.
+- The Rand recipient field is the 32-byte hash of a shielded address, printed by the Rand wallet,
+  with no checksum. Front ends must carry it exactly; the contracts can only reject zero.
+- A note on Rand holds a `u64`, so every endpoint refuses to lock an attested amount above
+  `u64::MAX` (about 1.8 x 10^11 whole tokens): nothing can be custodied that Rand cannot mint.
 - Attestations are ECDSA and therefore not post-quantum. The Rand-side verifier is the natural
   place to add ML-DSA later since Rand already verifies Dilithium.
 
@@ -117,10 +131,12 @@ This pass delivers the wire format, the four source-chain custody contracts, the
 minting/burning ledger extension, and the shared test vectors that exercise all of it —
 everything needed to build the off-chain pieces against a fixed target. It does not include the
 guardian daemon or the relayer daemon: nothing runs this format end to end yet, and nothing here
-has watched a real chain, signed a real digest, or moved real funds. It does not include shielded
-notes — Rand mints a transparent, per-account bridged balance keyed by `(home chain, token)`
-rather than into a shielded commitment tree, which is the same public boundary the design
-describes but leaves the in-pool step to future shielded-balance work. None of this has been
-audited. Treat every contract, program, and ledger change here as a reviewed but unaudited
-implementation of the design in `docs/superpowers/specs/2026-09-10-rand-bridge-design.md`, not as
-something ready to hold real value.
+has watched a real chain, signed a real digest, or moved real funds. On Rand a bridged holding is
+now a shielded note (fullnode phase S3): the deposit note is computed by the chain from the
+attested amount, and nothing about a bridged balance is visible except in the one transaction that
+mints it. The deploy scripts have been rehearsed against a local anvil node and TronBox compiles
+the Tron endpoint, but no endpoint has been deployed to a public network. An internal audit is in
+`docs/audit/2026-09-17-predeploy-audit.md`; there has been no external audit. Treat every contract,
+program, and ledger change here as a reviewed but unaudited implementation of the design in
+`docs/superpowers/specs/2026-09-10-rand-bridge-design.md`, not as something ready to hold real
+value.

@@ -40,7 +40,7 @@ thiserror = "1"
 [dev-dependencies]
 hex = "0.4"
 # Signing test attestations with the shared vectors' guardian secrets;
-# `sign_digest` in the integration test mirrors `shrugg-core`'s, rather
+# `sign_digest` in the integration test mirrors `randprotocol-core`'s, rather
 # than depending on the fullnode workspace from here.
 k256 = { version = "0.13", features = ["ecdsa"] }
 serde_json = "1"

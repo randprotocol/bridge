@@ -63,6 +63,9 @@ interface IRandBridge {
     error ZeroRecipient();
     error FeeExceedsAmount();
     error ZeroAmount();
+    /// A lock's attested amount would not fit the `u64` a Rand note holds,
+    /// so Rand could never mint it (`BridgeError::AmountTooLarge` there).
+    error AmountTooLarge();
     error TransferAmountMismatch();
     error WrongEmitter();
     error WrongToChain();

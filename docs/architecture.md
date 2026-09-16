@@ -16,8 +16,12 @@ Companion documents:
 | `../fullnode/docs/bridge.md` | the fullnode's own description of its bridge code |
 | `../fullnode/docs/rpc.md`, `../fullnode/docs/cli.md` | RPC method shapes and wallet commands |
 
-Revision described: bridge repo `fca2229` and later, fullnode `main` at `dbea18c` (bridge code
-unchanged since `273e13d`).
+Revision described: bridge repo as of 2026-09-17, fullnode `main` at `756fa80` (2026-09-17). Two
+fullnode changes since the previous revision (`dbea18c`) shape this document: the SHRUGG to RAND
+rename (`ed96c39`: crate names, RPC prefix, address prefix and every hash domain), and the shielded
+pool's phase S3, under which a bridged holding on Rand is a **note** in the pool rather than a
+per-account balance. The wire format, the guardian rules and the endpoints' verification are
+unchanged by both.
 
 ---
 
@@ -74,9 +78,11 @@ that. Three independent bounds sit under the guardians on each source chain:
 - **Release caps.** Per-transfer and rolling daily caps, on releases only. Locks are not capped:
   releases are the loss surface.
 
-On Rand there is no custody to bound. A mint credits a per-account balance keyed by
-`(home chain, token)`; the bound is that a burn back to the home chain can only release what
-that chain's endpoint actually custodies.
+On Rand there is no custody to bound. A mint appends one deposit note of the bridged asset to
+the shielded pool (the asset is `(home chain, token)`, carried in the note as a dense registry
+index); the bound is that a burn back to the home chain can only release what that chain's
+endpoint actually custodies. A note's amount is a `u64`, so every endpoint refuses to lock an
+attested amount above `u64::MAX` (§3.4): nothing can be custodied that Rand could never mint.
 
 Two more rules harden against a partially compromised committee:
 
@@ -85,8 +91,9 @@ Two more rules harden against a partially compromised committee:
   bridge back.
 - Rotations cannot skip indices, and a superseded set expires 86,400 seconds after being replaced.
 
-Every component here is reviewed but unaudited, and the guardian and relayer daemons that would
-run the format end to end are not built. Nothing has watched a real chain or moved real funds.
+Every component here is reviewed internally (`docs/audit/2026-09-17-predeploy-audit.md`) but not
+externally audited, and the guardian and relayer daemons that would run the format end to end are
+not built. Nothing has watched a real chain or moved real funds.
 
 ---
 
@@ -117,23 +124,27 @@ bridge/
     src/attestation.rs           digest, secp256k1_recover, quorum
     src/error.rs                 BridgeError
     tests/                       solana-program-test suites, including the vectors
-  tools/vectors/                 generator for the shared vectors
+  solana/cli/                    rand-bridge-cli: Initialize and the admin instructions from the command line
+  tools/vectors/                 generator for the shared vectors (examples/asset_ids.rs prints §10.1)
   vectors/attestations.json      the vectors (39)
+  deploy/                        one deploy script per chain, keys from deploy/.env (deploy/README.md)
 
 fullnode/crates/
   bridge-codec/                  no_std, zero-dependency wire codec
     src/lib.rs                   constants, quorum, check_indices, is_low_s
     src/envelope.rs              Signature, Body, Attestation
     src/payload.rs               Transfer, GuardianSetUpgrade, Payload
-  shrugg-core/src/bridge/
+  randprotocol-core/src/bridge/
     mod.rs                       keccak, digest, asset_id, recover, verify
     state.rs                     BridgeConfig, BridgeState, check/apply, root
     vectors.json                 byte-identical copy of the vectors
-  shrugg-core/src/ledger.rs      TxKind dispatch, state root, block timestamp rule
-  shrugg-core/src/genesis.rs     the bridge genesis section and its validation
-  shrugg-node/src/storage.rs     RocksDB column families
-  shrugg-node/src/rpc.rs         five bridge RPC methods
-  shrugg-client/                 wallet CLI commands
+  randprotocol-core/src/ledger/
+    bridge_notes.rs              the deposit note an attestation creates, the two-bundle burn
+    mod.rs                       Action dispatch, state root, block timestamp rule
+  randprotocol-core/src/genesis.rs   the bridge genesis section and its validation
+  randprotocol-node/src/storage.rs   RocksDB column families
+  randprotocol-node/src/rpc.rs       four bridge RPC methods
+  randprotocol-client/               wallet CLI commands
 ```
 
 ---
@@ -199,7 +210,12 @@ denormalises the same way. The three implementations differ in their integer wid
 |---|---|---|---|
 | EVM | `uint256` | `uint256` | none needed; `MAX_DECIMALS = 36` bounds `10**(d-8)` |
 | Solana | `u256` unpacked to `u128` | `u64` | `AmountOverflow` if the native value exceeds `u64` |
-| Rand | `u256` unpacked to `u128` | `u128`, no denormalisation | `AmountOverflow` if the top 16 bytes are non-zero |
+| Rand | `u256` unpacked to `u128`, then `u64` | `u64` (a note's amount field), no denormalisation | `AmountOverflow` if the top 16 bytes are non-zero; `AmountTooLarge` above `u64::MAX` |
+
+Because Rand keeps a bridged amount in a note's `u64`, every endpoint's lock refuses an attested
+amount above `u64::MAX` (`AmountTooLarge` on the EVM, `AmountOverflow` on Solana) before pulling
+anything: a lock Rand could never mint would sit in custody with no burn able to release it. At 8
+decimals the bound is about 1.8 x 10^11 whole tokens per lock.
 
 ---
 
@@ -219,14 +235,28 @@ sequenceDiagram
     E-->>G: MessagePublished(seq, nonce, consistency, payload) / PostedMessage PDA
     G->>G: wait `consistency_level` depth, rebuild body, sign mu (5 of 6)
     G-->>R: attestation
-    R->>N: BridgeAttest { attestation } (SHRUGG fee, min 0)
-    N->>N: check_attest: cheap checks, then signatures
-    N->>N: spent += mu; balances[asset][to] += amount - fee; balances[asset][relayer] += fee
+    R->>N: BridgeAttest { attestation, recipient, r, time, asset, envelope } + RAND fee bundle
+    N->>N: check_attest: cheap checks, then signatures; recipient hash and asset index bound
+    N->>N: spent += mu; register asset if new; append deposit note { recipient, amount (gross), asset index }
 ```
 
 The body the guardians sign is rebuilt from the event plus the block timestamp, the endpoint's
 chain-id constant, and its address. On Solana the full body is written to a `PostedMessage` PDA
 so guardians read it durably rather than from logs.
+
+Three things about the Rand side follow from the shielded pool (fullnode `docs/bridge.md` §5):
+
+- **`to` is a hash.** The 32-byte recipient the depositor names on the source chain is
+  `blake3("rand-shielded-recipient", pk || kem_ek)` of the recipient's shielded address, which the
+  Rand wallet prints. The relayer submits the full address in the action and the ledger recomputes
+  the hash; a mismatch is refused, so a relayer cannot redirect a deposit.
+- **The relayer needs more than the attestation.** The action also carries the note's blinding
+  `r`, its `time` (held to a window around the current height) and the asset **index** the
+  registry will resolve, plus an envelope sealed to the recipient. A first sighting of a token has
+  to name the index it will be given; losing that race to another first sighting costs a re-proof.
+- **The relayer fee is not paid on Rand.** The deposit note carries the gross `amount` the
+  guardians signed; the payload's `fee` is carried for the record only, because a shielded chain
+  has no submitter identity to pay. Front ends should pass a zero `relayerFee` to `lock`.
 
 ### 4.2 Rand to home chain
 
@@ -237,10 +267,10 @@ sequenceDiagram
     participant G as Guardians
     participant R as Relayer
     participant E as Endpoint (home chain)
-    H->>N: BridgeBurn { asset, amount, to_chain, to, fee }
-    N->>N: check_burn: registered asset, to_chain == home, recipient shape, fee <= amount, balance
-    N->>N: balance -= amount; burn_sequence += 1; record BridgeBurnRecord { body, digest }
-    G->>N: shrugg_getBridgeBurn(sequence)
+    H->>N: BridgeBurn { asset_bundle, asset (index), amount, relayer_fee, to_chain, to } + RAND fee bundle
+    N->>N: check_burn: registered index, to_chain == home, recipient shape, relayer_fee <= amount != 0
+    N->>N: asset bundle's proof burns exactly `amount`; burn_sequence += 1; record BridgeBurnRecord { body, digest }
+    G->>N: rand_getBridgeBurn(sequence)
     G->>G: sign digest (5 of 6)
     G-->>R: attestation
     R->>E: release(attestation)
@@ -280,10 +310,10 @@ the fullnode runs every check that needs no recovery first.
 | 4 | quorum, low-s, recover, compare | decode, expiry, quorum, low-s, recover, compare | replay (`spent` contains `mu`) |
 | 5 | not consumed | not consumed (`["spent", mu]` PDA empty) | payload decodes |
 | 6 | emitter `(1, randEmitter)` | emitter `(1, rand_emitter)` | emitter is the registered one for `emitter_chain` |
-| 7 | payload 1, `to_chain == token_chain == self`, `fee <= amount` | payload 1, `to_chain == token_chain == 5`, `fee <= amount` | `token_chain == emitter_chain`, `to_chain == 1`, amounts fit `u128`, `fee <= amount`, `amount != 0` |
-| 8 | token enabled, recipient shape, denormalise, `amount != 0` | mint matches, token enabled, recipient and relayer ATAs, denormalise, `amount != 0` | credited balances do not overflow |
+| 7 | payload 1, `to_chain == token_chain == self`, `fee <= amount` | payload 1, `to_chain == token_chain == 5`, `fee <= amount` | `token_chain == emitter_chain`, `to_chain == 1`, amounts fit `u128`, `fee <= amount`, `amount != 0`, `amount` fits `u64` |
+| 8 | token enabled, recipient shape, denormalise, `amount != 0` | mint matches, token enabled, recipient and relayer ATAs, denormalise, `amount != 0` | asset registry index resolved (then, in the ledger: the action's `asset` and recipient hash match) |
 | 9 | custody, per-transfer cap, daily cap | custody, per-transfer cap, daily cap | set expiry, quorum, low-s, recover, compare |
-| effects | consumed, custody, window | consumed PDA, custody, window | spent, assets registry, balances |
+| effects | consumed, custody, window | consumed PDA, custody, window | spent, asset registry, one deposit note in the pool |
 | interactions | fee to submitter, rest to `to` | fee to relayer ATA, rest to recipient ATA | none |
 
 Every path writes its effects before any external call. On the EVM the digest is marked consumed
@@ -356,8 +386,10 @@ day's usage. Caps are in the token's native units; 0 means unlimited.
 5. emit `MessagePublished(sequence, nonce, consistencyLevel, payload)` and `Locked(...)` with
    `to_chain = 1`, `token_chain = this chain`; `sequence += 1`
 
-The Rand recipient is 32 raw bytes with no checksum; the contract can only reject zero. Wallets
-must verify the round trip before calling.
+The Rand recipient is the 32-byte hash of a shielded address (§4.1), which the Rand wallet
+prints; it has no checksum and the contract can only reject zero. Step 2 also refuses an attested
+amount above `u64::MAX` (`AmountTooLarge`, §3.4). `relayerFee` is carried for the record only:
+Rand mints the gross amount and pays no relayer.
 
 ### 6.5 `release`
 
@@ -374,7 +406,11 @@ window is `block.timestamp / 1 days`.
 `GUARDIANS` (comma-separated, in index order), and optionally `EXPECTED_CHAIN_ID`. Because
 `DEPLOY_CHAIN_ID` is baked in and guards every later call, the script refuses to deploy the
 Ethereum or BSC contract to a network whose `chainid` is not the expected one (1 and 56 by default).
-Tron is compiled here but deployed with TronBox from the same source; see `tron/README.md` for the
+The script signs with `DEPLOYER_PRIVATE_KEY` from the environment when it is set, so the key never
+appears on a command line. `deploy/eth.sh` and `deploy/bnb.sh` wrap it: they load `deploy/.env`,
+check the connected chain id first, run the script, and record the address and its 32-byte emitter
+wire form under `deploy/deployments/` (`deploy/README.md`). Tron is compiled here but deployed with
+TronBox from the same source through `deploy/trx.sh`; see `tron/README.md` for the
 base58check-to-20-byte conversion, the migration's environment, and the post-deploy steps.
 
 ---
@@ -385,7 +421,11 @@ A native `solana-program` crate, no Anchor. Tests run under `solana-program-test
 the program natively against a real bank and the real SPL token program, so the suite needs no
 SBF toolchain. The deployable `.so` has never been built here: `cargo build-sbf` is unavailable
 on the development machine. `lib.rs` pins a vanity program id with no known secret; a real
-deployment re-declares its own before building, since every PDA derives from it.
+deployment re-declares its own before building, since every PDA derives from it. `deploy/sol.sh`
+does exactly that once the Solana CLI is installed (generate or load the program keypair, rewrite
+`declare_id!`, `cargo build-sbf`, `solana program deploy`, then `Initialize`), and `solana/cli`
+(`rand-bridge-cli`) is the command-line client for `Initialize` and the admin instructions, with
+the signer loaded from a keypair file or an inline secret in the environment.
 
 ### 7.1 Accounts
 
@@ -438,7 +478,8 @@ made immutable before initialisation can never be initialised.
 - **Compute budget.** Five recoveries cost about 125k compute units; clients prepend a
   compute-unit-limit instruction.
 - **`u64` native amounts.** Denormalising an 18-decimal mint's amount can overflow `u64` and is
-  rejected as `AmountOverflow`.
+  rejected as `AmountOverflow`. The same error refuses a lock whose *attested* amount exceeds
+  `u64::MAX` (§3.4), mirroring the EVM `AmountTooLarge`.
 - **Upgrade guardian set index** is read straight from the envelope before decoding, because it
   selects which guardian set account must have been passed.
 
@@ -469,7 +510,7 @@ inject keccak256 and a secp256k1 recoverer.
 The codec does not check `new_index == current + 1`, key uniqueness, or non-zero keys, and does
 not enforce left-padding: those are policy, owned by the verifiers.
 
-### 8.2 `shrugg-core::bridge`
+### 8.2 `randprotocol-core::bridge`
 
 `mod.rs` supplies what the codec leaves out: `keccak256`, `digest`, `asset_id`,
 `recover_address` (rejects `v > 1`), `sign_digest` and `guardian_address` for tests and the
@@ -485,72 +526,89 @@ pub struct BridgeState {
     pub emitters: BTreeMap<u16, [u8; 32]>,              // registered emitter per source chain
     pub guardian_sets: BTreeMap<u32, GuardianSet>,      // keys + expires_at (0 = current)
     pub current_set: u32,
-    pub balances: BTreeMap<(AssetId, Address), u128>,   // bridged units, 8 decimals
-    pub assets: BTreeMap<AssetId, (u16, [u8; 32])>,     // asset -> (home chain, token)
+    pub assets: BTreeMap<AssetId, AssetInfo>,           // asset -> { chain, token, index }
+    pub next_index: u32,                                // the index the next new asset gets (from 1)
     pub spent: BTreeSet<Hash>,                          // consumed digests
     pub burn_sequence: u64,
     pub burns: BTreeMap<u64, BridgeBurnRecord>,         // outbound log; not in the root
 }
 ```
 
-`AssetId = blake3("shrugg-bridge-asset" || token_chain BE || token_address)`, so USDT from
-Ethereum and USDT from Tron are distinct assets with distinct custody. The registry is populated
-lazily by the first mint of each asset and read by burns to rebuild the payload.
+**There are no balances.** A bridged holding is a note in the pool's commitment tree, and the tree
+commits to it; what is left here is the public half of the bridge. A note's `asset` word is one
+`u32`, so the registry hands each asset a dense **index** at its first sighting (`1, 2, ...`; 0 is
+RAND and never registered), and the index never changes. `next_index` is consensus state.
+
+`AssetId = blake3("rand-bridge-asset" || token_chain BE || token_address)`, so USDT from Ethereum
+and USDT from Tron are distinct assets with distinct custody. The registry is populated lazily by
+the first mint of each asset and read by burns to rebuild the payload; `rand_getAssets` maps
+between ids and indices.
 
 The four transition functions:
 
-- `check_attest(bytes, submitter, now) -> (Attestation, mu, Payload)` runs the Rand column of the
-  Section 5 table. For a transfer it also pre-computes the credited balances so a `u128` overflow
-  is caught before any state changes. For a rotation it requires `guardian_set_index ==
-  current_set`, `new_index == current_set + 1`, and unique non-zero keys.
-- `apply_attest` calls `check_attest` and then, for a transfer, inserts `mu` into `spent`,
-  registers the asset if new, and writes the credited balances (`amount - fee` to `to`, `fee` to
-  the submitter). For a rotation it inserts `mu`, sets the old current set's `expires_at = now +
-  86_400`, installs the new set with `expires_at = 0`, and advances `current_set`.
-- `check_burn(from, asset, amount, to_chain, to, fee)` requires a registered asset, `to_chain`
-  equal to the asset's home chain, a non-zero recipient, zero upper 12 bytes when `to_chain` is
-  2, 3 or 4, `fee <= amount`, `amount != 0`, and a sufficient balance. The recipient screening
-  happens here because a burn is irreversible once guardians sign it.
-- `apply_burn` debits the balance (removing the row at zero), builds the Section 4.2 body,
-  records `BridgeBurnRecord { sequence, body, digest, tx, height }`, and increments
-  `burn_sequence`.
+- `check_attest(bytes, now) -> CheckedAttestation` runs the Rand column of the Section 5 table and
+  returns a token only it can build: the digest, `now`, and the plan (a `BridgeTransfer { asset,
+  info, amount: u64, to_hash, relayer_fee }` or a `GuardianSetUpgrade`). An amount above `u64::MAX`
+  is `AmountTooLarge`. For a rotation it requires `guardian_set_index == current_set`,
+  `new_index == current_set + 1`, and unique non-zero keys.
+- `apply_attest(checked)` is infallible: it inserts `mu` into `spent`, registers the asset if new
+  (under the index the plan already named), and hands the transfer back for the ledger to turn
+  into a deposit note. For a rotation it sets the old current set's `expires_at = now + 86_400`,
+  installs the new set with `expires_at = 0`, and advances `current_set`. The quorum is therefore
+  verified exactly once per attestation, in the ledger's validate step.
+- `check_burn(asset_index, amount, to_chain, to, relayer_fee) -> AssetId` requires a registered
+  index, `to_chain` equal to the asset's home chain, a non-zero recipient, zero upper 12 bytes when
+  `to_chain` is 2, 3 or 4, `relayer_fee <= amount`, and `amount != 0`. There is no balance to
+  check: the asset bundle's zkVM proof is what bounds a burn (`burn == amount` in that bundle).
+  The recipient screening happens here because a burn is irreversible once guardians sign it.
+- `apply_burn(tx, asset_index, amount, to_chain, to, relayer_fee, height, timestamp)` builds the
+  Section 4.2 body, records `BridgeBurnRecord { sequence, body, digest, tx, height }` with the
+  transaction hash in the sender slot (a burn is funded by notes, so there is no sender identity),
+  and increments `burn_sequence`.
 
 `root()` is the consensus commitment:
 
 ```
-blake3("shrugg-bridge-state"
+blake3("rand-bridge-state"
     || bincode(emitter, emitters, current_set, guardian_sets)
-    || merkle(blake3("shrugg-asset-balance" || asset || addr || balance BE))   // zero balances pruned
-    || merkle(blake3("shrugg-asset-registry" || asset || chain BE || token))
+    || merkle(blake3("rand-asset-registry" || asset || chain BE || token || index BE))
     || merkle(sorted spent digests)
-    || burn_sequence BE)
+    || burn_sequence BE || next_index BE)
 ```
 
 `burns` is excluded because it is derivable from transaction history. A test pins the root of a
-fixed state to a constant; changing it is a hard fork, never a test to re-baseline. `BridgeMeta`
-is the whole-state half (everything but `balances`, `spent`, `burns`), split here so a new field
-must be classified as meta or per-row or the build breaks.
+fixed state to a constant; changing it is a hard fork, never a test to re-baseline (it was re-pinned
+once, in S3, when the balance leaves left and the registry leaf gained its index). `BridgeMeta` is
+the whole-state half (everything but `spent` and `burns`), split here so a new field must be
+classified as meta or per-row or the build breaks.
 
 ### 8.3 Ledger integration
 
-Two `TxKind` variants appended after `Call`, so existing tags keep their bincode encoding:
+Two `Action` variants, bincode tags 7 and 8, after the three staking actions:
 
 | tag | variant | fields |
 |---|---|---|
-| 4 | `BridgeAttest` | `attestation: Vec<u8>` |
-| 5 | `BridgeBurn` | `asset: AssetId, amount: u128, to_chain: u16, to: [u8; 32], fee: u128` |
+| 7 | `BridgeAttest` | `attestation: Vec<u8>, recipient: ShieldedAddress, r, time: u32, asset: u32, envelope` |
+| 8 | `BridgeBurn` | `asset_bundle: Bundle, asset: u32, amount: u64, relayer_fee: u64, to_chain: u16, to: [u8; 32]` |
 
-Both pay the flat SHRUGG fee only, minimum 0 like `Transfer`; the value they move is a bridged
-asset. `validate_inner` checks `attestation.len() <= MAX_ATTESTATION_BYTES` (16,384) before
-parsing anything, then bridge presence (`BridgeError::Disabled`), then `check_attest` or
-`check_burn`. `apply_tx_with_receipt` debits the fee and calls `apply_attest` or `apply_burn`.
-Bridged balances are a separate per-asset ledger; moving one never touches a SHRUGG account
-balance.
+Both ride on an ordinary shielded transaction and pay their fee in RAND out of the transaction's
+own bundle: an attest pays one bundle's base fee, a burn two (its asset bundle is the second). The
+inbound side: the ledger recomputes the recipient hash from `recipient` and requires it to equal
+the payload's `to`; `asset` must equal the index the registry resolves (or would assign to a first
+sighting); `time` must fall in the window a bundle's time gets; the deposit note is then computed
+by the chain from the attested gross amount, so a relayer can neither inflate nor redirect a mint.
+The outbound side: a burn is one transaction with two bundles, a RAND bundle paying the fee and an
+asset bundle whose proof burns exactly `amount` of the bridged asset (the `relayer_fee` is a
+portion of `amount`, paid on the destination chain by the release). `validate_inner` checks
+`attestation.len() <= MAX_ATTESTATION_BYTES` (16,384) before parsing anything, then bridge
+presence, then `check_attest` or `check_burn`, all before the bundle proofs are verified.
+`apply_tx` consumes the `CheckedAttestation` that validation produced, so the quorum is never
+verified twice.
 
-When a bridge exists the state root becomes `blake3(accounts_root || programs_root ||
-bridge_root)`; without one it stays the 64-byte pre-bridge form. The genesis hash appends
-`bincode(BridgeCommit)`, a plain-bytes twin of the human-readable `BridgeConfig`, only when the
-section is present.
+When a bridge exists the state root becomes `blake3("rand-state-2" || tree_root || nullifier_root
+|| validators_root || programs_root || bridge_root)`; without one the fifth word is absent and the
+chain is byte-identical to an unbridged one. The genesis hash appends `bincode(BridgeCommit)`, a
+plain-bytes twin of the human-readable `BridgeConfig`, only when the section is present.
 
 ### 8.4 Genesis
 
@@ -562,11 +620,13 @@ section is present.
 }
 ```
 
-Built with `shrugg-node genesis --bridge bridge.json`. `check_bridge` rejects an empty guardian
+`rand-node genesis` has no `--bridge` flag: cut the genesis, then add the section to the file by
+hand before distributing it (fullnode `docs/cli.md`). `check_bridge` rejects an empty guardian
 set, a duplicate or zero guardian, a zero emitter, an emitter equal to the governance emitter,
 chain 1 in `emitters`, a source emitter equal to the governance emitter, and a zero source
 emitter. `emitters` may be partial: a chain without an entry can accept locks but cannot mint on
-Rand. Guardian set 0 is installed as current with `expires_at = 0`.
+Rand. Guardian set 0 is installed as current with `expires_at = 0`. A genesis registers no assets;
+the first attestation naming a token puts it in the registry under index 1.
 
 ### 8.5 Block time on a bridged chain
 
@@ -579,11 +639,10 @@ Chains without a bridge keep their previous rules unchanged.
 
 ### 8.6 Storage, RPC, wallet
 
-Storage adds three RocksDB column families and one meta key:
+Storage adds two RocksDB column families and one meta key:
 
 | location | key | value |
 |---|---|---|
-| `bridge_balances` | `asset \|\| address` | `bincode(u128)`; row deleted at zero |
 | `bridge_spent` | digest | empty |
 | `bridge_burns` | sequence BE | `bincode(BridgeBurnRecord)` |
 | `meta["bridge_state"]` | | `bincode(BridgeMeta)`; its presence marks a bridged database |
@@ -593,28 +652,29 @@ commit path is a `Corrupt` error, never a silent skip. The startup integrity che
 stored bridge with the replayed one separately from the root, because the root omits the burn
 log. A database predating the bridge initialises its state fresh from genesis.
 
-RPC methods, all in `docs/rpc.md` of the fullnode:
+RPC methods, all in `docs/rpc.md` of the fullnode; none is per-address, because balances are
+notes only a viewing key can total:
 
 | method | params | result |
 |---|---|---|
-| `shrugg_getAssetBalance` | `[address, asset]` | decimal string of bridged units; `"0"` if unknown |
-| `shrugg_getAssets` | `[address]` | every non-zero bridged holding |
-| `shrugg_getBridgeState` | `[]` | emitter, emitters, guardian set, assets, `burn_sequence`; `{"enabled": false}` without a bridge |
-| `shrugg_getBridgeBurn` | `[sequence]` | one outbound record, or `null` |
-| `shrugg_bridgeAssetId` | `[token_chain, token_address]` | the asset id; a pure function, answers on any chain |
+| `rand_getBridgeState` | `[]` | emitter, emitters, current guardian set, the registry, `next_index`, `burn_sequence`; `{"enabled": false}` without a bridge |
+| `rand_getAssets` | `[]` | the registry, ascending by index: `{ index, chain, token, asset_id }` |
+| `rand_bridgeAssetId` | `[token_chain, token_address]` | the asset id; a pure function, answers on any chain |
+| `rand_getBridgeBurn` | `[sequence]` | one outbound message (`body_hex`, `digest`, `tx`, `height`), or `null` |
 
-Wallet commands: `bridge-mint <attestation hex or @file>`, `bridge-burn <asset> <amount>
-<to_chain> <to> [--bridge-fee]`, `asset-balance [address] <asset>`, `bridge-status`. The wallet
-applies the same recipient checks as `check_burn` before signing. Bridged amounts are plain
-integers of 8-decimal units, not SHRUGG's 9-decimal strings.
+Wallet commands (`rand`): `bridge-mint <attestation hex or @file>` (seals the recipient's
+envelope and pays with a RAND bundle), `bridge-burn <asset index> <amount> <to_chain> <to>` (proves
+two bundles), `asset-balance [index]` (this wallet's own notes), `bridge` (the public state), and
+`bridge-message <sequence>` (one outbound message for a guardian to sign). Bridged amounts are plain
+integers of 8-decimal units, not RAND's 9-decimal strings.
 
 ---
 
 ## 9. Shared test vectors
 
-`tools/vectors` is a Rust binary that depends on `shrugg-core` by path and writes
+`tools/vectors` is a Rust binary that depends on `randprotocol-core` by path and writes
 `vectors/attestations.json` plus the fullnode copy at
-`crates/shrugg-core/src/bridge/vectors.json`. `cargo run --release -- --check` re-renders from the
+`crates/randprotocol-core/src/bridge/vectors.json`. `cargo run --release -- --check` re-renders from the
 generator and fails if either file differs, naming the one that drifted; comparing the two files
 to each other would pass on two equally stale copies.
 
@@ -638,9 +698,12 @@ force, `current_set`, `expect`, the decoded body and payload, and `replay_of` wh
 How each side consumes them:
 
 - **Fullnode.** `shared_vectors_match_verify` re-verifies the 23 signature-level vectors
-  against `bridge::verify` with the vector's own set; `vectors_ledger_level` drives the other 21
-  through a live `Ledger` as real `BridgeAttest` transactions. Both assert an exact count so a
-  vector that stops matching fails the build instead of being skipped. `unknown_set` is
+  against `bridge::verify` with the vector's own set, asserting the exact count so a vector that
+  stops matching fails the build instead of being skipped. The account-era `vectors_ledger_level`
+  pass, which drove the remaining vectors through a live `Ledger`, went with the accounts in S1
+  and has not been rebuilt on the note pool; those refusals (`wrong_emitter`, `replay`,
+  `unknown_set`, ...) are covered by hand-written unit tests in `bridge/state.rs` and
+  `ledger/bridge_notes.rs`, and by the EVM and Solana vector suites. `unknown_set` was
   ledger-level only: `verify` takes a resolved set, so an unknown index is a resolution concern
   only `check_attest` can raise.
 - **EVM.** `Vectors.t.sol` runs every vector through the `Attestation` library;
@@ -657,20 +720,23 @@ How each side consumes them:
 
 1. **Rand genesis first.** Choose the six guardian keys and the Rand emitter value; build the
    genesis with a `bridge` section. These values are what every endpoint constructor takes next.
-2. **Deploy the endpoints** with the same guardian set and Rand emitter. Ethereum and BSC through
+2. **Deploy the endpoints** with the same guardian set and Rand emitter, from the command line:
+   `deploy/eth.sh`, `deploy/bnb.sh`, `deploy/trx.sh`, `deploy/sol.sh`, each loading its chain's
+   private key from `deploy/.env` (`deploy/README.md`). Underneath: Ethereum and BSC through
    `Deploy.s.sol`; Tron through TronBox; Solana through `cargo build-sbf`, `solana program
-   deploy`, then `Initialize` signed by the upgrade authority, then hand the authority to a
-   multisig.
+   deploy`, then `rand-bridge-cli initialize` signed by the upgrade authority, then hand the
+   authority to a multisig.
 3. **Register the endpoints back into genesis** under `bridge.emitters`, keyed by bridge chain id
    and left-padded to 32 bytes, before the chain launches. The emitter table is the other half of
    the trust binding and must be in genesis, not added to a live chain.
 4. **Whitelist tokens** on each endpoint with `setToken` / `SetToken` and set the pauser. The
    approved list is in §10.1; nothing outside it is enabled.
 
-The bridge's fullnode changes are on fullnode `main`. Nothing on `main` after the zkVM
-constraint-set change can run the current chain, so bridge activation is bundled into the next
-chain cut-over as a fork item, together with the consensus and zkVM changes, and is not rolled out
-node by node.
+The bridge's fullnode changes are on fullnode `main`, and the fleet's chain 10 (cut 2026-09-16,
+the RAND rename) runs a build that contains them but has **no `bridge` section**. The guardian
+set, emitter table and asset registry are genesis state, so a bridge cannot be added to a running
+chain: activation means cutting the next chain with a `bridge` section that names the guardian
+keys and the four emitter addresses the scripts above print (fullnode `deploy/README.md`).
 
 ### 10.1 Approved tokens
 
@@ -707,19 +773,22 @@ Notes on the rows:
 
 The same rows in the forms the verifiers compare on. `token_address` is the 32-byte wire field
 (§3.3; 20-byte addresses left-padded, Solana mint pubkeys as-is), and the asset id is
-`blake3("shrugg-bridge-asset" || token_chain BE u16 || token_address)`, which is the key Rand's
-`getAssets` and `bridge-status` report:
+`blake3("rand-bridge-asset" || token_chain BE u16 || token_address)` (the domain was
+`shrugg-bridge-asset` before the rename, so every id below changed on 2026-09-16), which is what
+`rand_getAssets` and `rand_bridgeAssetId` report. The note **index** an asset gets on Rand is not
+in this table: it is assigned by the first accepted attestation, in order of arrival. Regenerate
+with `cd tools/vectors && cargo run --release --example asset_ids`:
 
 | chain | token | `token_address` (32 bytes) | Rand asset id |
 |---|---|---|---|
-| 2 | USDT | `0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7` | `0xb97721c36f584c11082d77d03df09511053c89507916ab07b52d2f18e84c8dcd` |
-| 2 | USDC | `0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | `0xf255a297a6e0d977177b11bccb757c7952a4a9b78f4f2c6e409f405b3b62b404` |
-| 3 | USDT | `0x00000000000000000000000055d398326f99059ff775485246999027b3197955` | `0x05df632110d5fec82e8266d76346704bad8602038290d5779df96eaf86dff654` |
-| 3 | USDC | `0x0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d` | `0x8e0d5f59ebbeab2ed774ec75fba48dbadcb24cb047c9e7bc75380d301098a441` |
-| 4 | USDT | `0x000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c` | `0x57f9db0a25204158d6adad80f0d0872983a177e2378701ac1eca1467f392e5c7` |
-| 4 | USDC | `0x0000000000000000000000003487b63d30b5b2c87fb7ffa8bcfade38eaac1abe` | `0x76c02490cc19aa47622270cb3e5389f94bb69a2034cd4478c4f4ca3b882a967c` |
-| 5 | USDT | `0xce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264` | `0x8f382a5e7b91de52462c80c0b671e507ab42ff4e9ba11a15d24c8fd35420a1c7` |
-| 5 | USDC | `0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61` | `0x80382eaf36f01d0a2ed0a668321896d62c5d5a59f278d0ec235f45547d74b060` |
+| 2 | USDT | `0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7` | `0xfb0877ed2d2914e5e120d23d57a04125b44897dd57071259883f71a8cac153cf` |
+| 2 | USDC | `0x000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | `0x00fc5cb39e645801faaa3bc253d1b0f845187b06bf44961788c389b0e280d1ff` |
+| 3 | USDT | `0x00000000000000000000000055d398326f99059ff775485246999027b3197955` | `0x4798ab7e34f187ca6bfc96ebfbf1df308354f13e352d5efc8aec53566ae86afb` |
+| 3 | USDC | `0x0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d` | `0x7a7acd6751668de71015424b6e6e00cb2af6e51b1e64c9fbe9027ad2aa05d8c3` |
+| 4 | USDT | `0x000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c` | `0xe913fd240badfd891c609efad7b6d7e3382da081b889a4fa2697ac53bddbf1f0` |
+| 4 | USDC | `0x0000000000000000000000003487b63d30b5b2c87fb7ffa8bcfade38eaac1abe` | `0x3bd0440eaa091e78ff625eebc416aa598bac41ffedee15682fb4bc5589fb67b1` |
+| 5 | USDT | `0xce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264` | `0x6fbe3acd18b78cdcf435e9964385e22f60fb74fd472a9d215545b8a52babbdf1` |
+| 5 | USDC | `0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61` | `0x4a3587528f24107c4a7fef4180ed083dbf7cfee922542b985828f08937c7aa8f` |
 
 The addresses were checked on 2026-09-13 against the issuers' own pages (Tether's supported
 protocols list, Circle's multi-chain USDC page) and BscScan / TronScan. Re-verify against those
@@ -745,11 +814,17 @@ or not at all:
   `emitter_address`; the upper 12 bytes are checked on the way out of Rand and on the way into an
   endpoint.
 - `fee <= amount`; zero attested or denormalised amounts are refused everywhere.
+- An attested amount fits a `u64`: refused by every lock (`AmountTooLarge` / `AmountOverflow`) and
+  by Rand's `check_attest` (`AmountTooLarge`).
+- On Rand the payload's `to` is `blake3("rand-shielded-recipient", pk || kem_ek)` of the
+  recipient's shielded address; the endpoints treat it as opaque.
 - Effects before interactions on every release.
 
-And the consensus-facing constants on Rand: `TxKind` tags 4 and 5, `MAX_ATTESTATION_BYTES`,
-the bridge root's domain tags and field order, the genesis commit's `BridgeCommit` encoding, and
-the block-timestamp rules. Changing any of these is a hard fork on every bridged chain.
+And the consensus-facing constants on Rand: `Action` tags 7 and 8, `MAX_ATTESTATION_BYTES`, the
+hash domains `rand-bridge-asset`, `rand-bridge-state`, `rand-asset-registry` and
+`rand-shielded-recipient`, the bridge root's field order, `FIRST_ASSET_INDEX = 1`, the genesis
+commit's `BridgeCommit` encoding, and the block-timestamp rules. Changing any of these is a hard
+fork on every bridged chain (the rename already was one: chain 10).
 
 ---
 
@@ -757,8 +832,13 @@ the block-timestamp rules. Changing any of these is a hard fork on every bridged
 
 - **No guardian daemon, no relayer daemon.** The format is fixed so they can be built against it;
   nothing runs it end to end yet.
-- **No shielded notes.** Rand mints a transparent per-account balance. A future shielded design
-  would have to shield bridged balances too.
+- **No relayer is paid on Rand.** The deposit is minted gross and the submitter pays a RAND fee
+  bundle for the privilege; relaying to Rand is altruistic or paid out of band until the pool can
+  pay an identity-less submitter.
+- **A first sighting can lose a race.** A deposit of a token the registry has never seen must
+  name the index it will get; two relayers racing two different new tokens cost the loser a fee
+  bundle and a re-proof.
+- **A burn costs two zkVM proofs**, minutes on a laptop today, and about 600 KB of block space.
 - **`BridgeState.burns` is unbounded in memory** and cloned on every speculative block execution.
   It must be drained into storage per block before a chain approaches roughly 100k burns; the
   change is not a fork because the map is outside the root.
@@ -767,8 +847,10 @@ the block-timestamp rules. Changing any of these is a hard fork on every bridged
   grace window indefinitely. Forbidding equal timestamps would not fix this and would stall an
   honest chain; it is recorded as a consequence of the timestamp rule, not a defended property.
 - **No rate limiting on Rand** beyond the flat fee and the 16 KiB cap.
-- **The Rand recipient has no checksum**; wallets must verify the 32-byte round trip.
+- **The Rand recipient has no checksum**; it is a hash the wallet prints, and front ends must
+  accept and carry it exactly.
 - **Attestations are ECDSA**, not post-quantum. The Rand verifier is the natural place to add
   ML-DSA later.
-- **Tron and Solana are built and tested but not deployed** by this pass; no Tron toolchain or
-  Solana CLI is installed on the build machine.
+- **Tron and Solana are built and tested but not deployed.** Tron now compiles under TronBox
+  (`deploy/trx.sh --dry-run`); the Solana SBF build still needs the Solana CLI, which is not
+  installed on the build machine. Neither program has been deployed to any network.

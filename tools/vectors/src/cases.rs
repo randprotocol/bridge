@@ -6,7 +6,7 @@
 //! "Guardian N" below always means the 1-based secret `secrets[N - 1]`
 //! unless a comment says otherwise.
 
-use shrugg_core::bridge as b;
+use randprotocol_core::bridge as b;
 
 use crate::types::{BodyJson, GuardianEntry, PayloadJson, SetEntry, Vector, VectorsFile};
 

@@ -1,5 +1,5 @@
 //! The JSON schema written to `vectors/attestations.json` and
-//! `crates/shrugg-core/src/bridge/vectors.json`. Field order on every
+//! `crates/randprotocol-core/src/bridge/vectors.json`. Field order on every
 //! struct is the serialization order (`serde_json::to_string_pretty`
 //! preserves struct-declaration order), so this order IS the file's byte
 //! layout; keep it in sync with the brief's schema.
@@ -31,7 +31,7 @@ pub struct BodyJson {
     pub consistency_level: u8,
 }
 
-/// The human-readable mirror of a [`shrugg_core::bridge::Payload`]. Picked
+/// The human-readable mirror of a [`randprotocol_core::bridge::Payload`]. Picked
 /// by `serde(untagged)` based on which fields are present, so a transfer
 /// serializes as `{id, amount, token_address, token_chain, to, to_chain,
 /// fee}` and an upgrade as `{id, new_index, keys}`.

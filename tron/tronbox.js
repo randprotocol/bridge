@@ -2,8 +2,10 @@
 // (TronRandBridge, bridge chain id 4 -- see docs/superpowers/specs/2026-09-10-rand-bridge-design.md
 // Section 5.4). See tron/README.md for the full deployment walkthrough.
 //
-// This file is deployment tooling only: no Tron toolchain is installed on the
-// build machine, so it has never actually been run against a live network.
+// Driven by deploy/trx.sh, which loads TRON_PRIVATE_KEY from deploy/.env and
+// runs `tronbox migrate`; the per-network PRIVATE_KEY_* variables are kept as
+// a fallback for anyone running tronbox by hand. TRON_RPC_URL overrides the
+// public TronGrid endpoint of whichever network is selected.
 
 const FEE_LIMIT = 1_000_000_000; // 1000 TRX, in sun
 const USER_FEE_PERCENTAGE = 100; // resource consumer pays 100% of bandwidth/energy fees
@@ -11,24 +13,24 @@ const USER_FEE_PERCENTAGE = 100; // resource consumer pays 100% of bandwidth/ene
 module.exports = {
   networks: {
     shasta: {
-      privateKey: process.env.PRIVATE_KEY_SHASTA,
+      privateKey: process.env.TRON_PRIVATE_KEY || process.env.PRIVATE_KEY_SHASTA,
       userFeePercentage: USER_FEE_PERCENTAGE,
       feeLimit: FEE_LIMIT,
-      fullHost: 'https://api.shasta.trongrid.io',
+      fullHost: process.env.TRON_RPC_URL || 'https://api.shasta.trongrid.io',
       network_id: '2',
     },
     nile: {
-      privateKey: process.env.PRIVATE_KEY_NILE,
+      privateKey: process.env.TRON_PRIVATE_KEY || process.env.PRIVATE_KEY_NILE,
       userFeePercentage: USER_FEE_PERCENTAGE,
       feeLimit: FEE_LIMIT,
-      fullHost: 'https://nile.trongrid.io',
+      fullHost: process.env.TRON_RPC_URL || 'https://nile.trongrid.io',
       network_id: '3',
     },
     mainnet: {
-      privateKey: process.env.PRIVATE_KEY_MAINNET,
+      privateKey: process.env.TRON_PRIVATE_KEY || process.env.PRIVATE_KEY_MAINNET,
       userFeePercentage: USER_FEE_PERCENTAGE,
       feeLimit: FEE_LIMIT,
-      fullHost: 'https://api.trongrid.io',
+      fullHost: process.env.TRON_RPC_URL || 'https://api.trongrid.io',
       network_id: '1',
     },
   },

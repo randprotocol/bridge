@@ -384,6 +384,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "randprotocol-core"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "bridge-codec",
+ "bs58",
+ "crystals-dilithium",
+ "hex",
+ "k256",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -476,26 +496,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "shrugg-core"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "blake3",
- "bridge-codec",
- "bs58",
- "crystals-dilithium",
- "hex",
- "k256",
- "rand",
- "serde",
- "serde_json",
- "sha3",
- "thiserror",
- "tracing",
- "zeroize",
-]
 
 [[package]]
 name = "signature"
@@ -628,9 +628,9 @@ name = "vectors"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "randprotocol-core",
  "serde",
  "serde_json",
- "shrugg-core",
 ]
 
 [[package]]

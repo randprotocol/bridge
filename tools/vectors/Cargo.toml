@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-shrugg-core = { path = "../../../fullnode/crates/shrugg-core" }
+randprotocol-core = { path = "../../../fullnode/crates/randprotocol-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"

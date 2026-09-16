@@ -31,6 +31,14 @@ whole suite runs without the Solana toolchain installed.
 
 ## Deploying
 
+`deploy/sol.sh [devnet|testnet|mainnet-beta]` (repo root) does every step
+below from the command line — program keypair, `declare_id!` rewrite,
+`cargo build-sbf`, `solana program deploy`, `Initialize` — with the
+deployer key loaded from `deploy/.env` (`SOL_KEYPAIR` or
+`SOL_PRIVATE_KEY`). `cli/` is `rand-bridge-cli`, the client it uses for
+`Initialize` and the admin instructions (`set-token`, `pause`, `unpause`,
+`transfer-admin`, `accept-admin`, `show`).
+
 Building the deployable `.so` needs the Solana CLI, which is *not*
 installed on the machine this crate was developed on — `cargo build-sbf`
 is unavailable here and has never been run against this source:
@@ -63,7 +71,8 @@ matters:
 
 ```
 solana program deploy target/deploy/rand_bridge.so     # you are the authority
-# ... send the Initialize transaction, signed by that same key ...
+rand-bridge-cli initialize --program <PROGRAM_ID> --admin <ADMIN> \
+  --rand-emitter 0x<64 hex> --guardians 0x<40 hex>,...   # signed by that same key
 solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTISIG>
 ```
 

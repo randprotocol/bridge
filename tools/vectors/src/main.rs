@@ -3,7 +3,7 @@
 //!
 //! `cargo run --release` (no args) regenerates both copies of the vector
 //! file: `vectors/attestations.json` in this repo and
-//! `../fullnode/crates/shrugg-core/src/bridge/vectors.json`.
+//! `../fullnode/crates/randprotocol-core/src/bridge/vectors.json`.
 //! `cargo run --release -- --check` asserts the two on-disk copies are
 //! byte-identical and exits 1 otherwise.
 //! `cargo run --release -- --out <path>` writes a single copy to `<path>`
@@ -21,7 +21,7 @@ fn bridge_repo_out() -> PathBuf {
 
 fn fullnode_out() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../fullnode/crates/shrugg-core/src/bridge/vectors.json")
+        .join("../../../fullnode/crates/randprotocol-core/src/bridge/vectors.json")
 }
 
 fn render() -> String {
@@ -101,11 +101,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use shrugg_core::bridge::{verify, GuardianSet, IndexError, VerifyError};
+    use randprotocol_core::bridge::{verify, GuardianSet, IndexError, VerifyError};
 
     /// Self-check mirroring the fullnode's `bridge::vectors` test: every
     /// signature-level vector is independently re-verified with
-    /// `shrugg_core::bridge::verify` before shipping.
+    /// `randprotocol_core::bridge::verify` before shipping.
     ///
     /// `unknown_set` is intentionally excluded: `verify` takes an
     /// already-resolved `GuardianSet`, not an index, so "no set at this
@@ -186,7 +186,7 @@ mod tests {
                 "bad_version" => assert!(
                     matches!(
                         result,
-                        Err(VerifyError::Codec(shrugg_core::bridge::CodecError::BadVersion))
+                        Err(VerifyError::Codec(randprotocol_core::bridge::CodecError::BadVersion))
                     ),
                     "{}: {result:?}",
                     v.name

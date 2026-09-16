@@ -1,0 +1,16 @@
+{
+  "name": "rand-bridge-tron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TronBox wiring for the Rand bridge's Tron endpoint (TronRandBridge). Sources are mirrored from ../evm/src by deploy/trx.sh.",
+  "scripts": {
+    "sync": "rsync -a --delete ../evm/src/ contracts/",
+    "compile": "npm run sync && tronbox compile",
+    "migrate:nile": "npm run sync && tronbox migrate --network nile",
+    "migrate:shasta": "npm run sync && tronbox migrate --network shasta",
+    "migrate:mainnet": "npm run sync && tronbox migrate --network mainnet"
+  },
+  "devDependencies": {
+    "tronbox": "^4.10.0"
+  }
+}

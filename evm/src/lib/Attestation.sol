@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 ///
 /// The wire format is defined once, in Rust, by
 /// `fullnode/crates/bridge-codec` (envelope/body/payload byte layouts) and
-/// `fullnode/crates/shrugg-core::bridge` (digest, guardian address
+/// `fullnode/crates/randprotocol-core::bridge` (digest, guardian address
 /// derivation, quorum/index/low-s rules); every layout and rule below
 /// mirrors that crate byte-for-byte and rule-for-rule so a Rand-signed
 /// attestation verifies identically on every chain.
@@ -175,7 +175,7 @@ library Attestation {
 
     /// Validates `sigs` against `digest` and the guardian set `keys`,
     /// reverting on the first failure found. Mirrors
-    /// `shrugg_core::bridge::verify`'s two-pass structure exactly:
+    /// `randprotocol_core::bridge::verify`'s two-pass structure exactly:
     ///
     /// 1. `check_indices`: every `sigs[i].index < keys.length`, indices
     ///    strictly increasing, and `sigs.length >= quorum(keys.length)` —

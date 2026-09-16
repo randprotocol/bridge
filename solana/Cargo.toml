@@ -1,5 +1,5 @@
 [workspace]
-members = ["programs/rand-bridge"]
+members = ["programs/rand-bridge", "cli"]
 resolver = "2"
 
 [profile.release]

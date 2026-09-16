@@ -78,7 +78,7 @@ contract AttestationTest is Test {
 
     /// Pins `Attestation.GOVERNANCE_EMITTER` to the string it's derived
     /// from, mirroring the Rust twin
-    /// (`shrugg_core::bridge::tests::governance_emitter_matches_string`)
+    /// (`randprotocol_core::bridge::tests::governance_emitter_matches_string`)
     /// and the brief's pinned value
     /// `0xb86dc29d182146831be319f8cdd0be86ace823413a477458bf67ffb151b2b55f`.
     function test_governance_emitter_matches_string() public pure {

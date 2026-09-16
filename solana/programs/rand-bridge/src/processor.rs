@@ -53,6 +53,13 @@ pub const MAX_DECIMALS: u8 = 36;
 /// Length of the rolling rate-limit window, in seconds.
 pub const SECONDS_PER_DAY: u64 = 86_400;
 
+/// The largest attested (8-decimal) amount a single lock may publish:
+/// `u64::MAX`, the width of a Rand note's amount field. Rand rejects
+/// anything above it (`BridgeError::AmountTooLarge` there), so the
+/// program must too, or the locked tokens could never be minted or
+/// released. Mirrors `RandBridgeBase.MAX_ATTESTED_AMOUNT`.
+pub const MAX_ATTESTED_AMOUNT: u128 = u64::MAX as u128;
+
 /// Dispatches a Borsh-encoded [`BridgeInstruction`].
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -697,6 +704,13 @@ fn process_lock(
     let (locked, attested) = normalize(amount, registry.decimals)?;
     if attested == 0 {
         return Err(BridgeError::ZeroAmount.into());
+    }
+    // Rand keeps a bridged holding in a note whose amount is a `u64` and
+    // refuses a larger attestation at admission; a lock it could never
+    // mint would sit in custody with no burn able to release it. Mirrors
+    // `RandBridgeBase.lock`'s `AmountTooLarge`.
+    if attested > MAX_ATTESTED_AMOUNT {
+        return Err(BridgeError::AmountOverflow.into());
     }
     // The fee is quoted in the mint's own units like `amount`, and
     // normalised the same way, so it rounds down with it and stays

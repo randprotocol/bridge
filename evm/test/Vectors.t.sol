@@ -16,7 +16,7 @@ import {VectorLoader} from "./utils/VectorLoader.sol";
 /// `bad_payload`. `set_expired`, `unknown_set` and `stale_governance_set`
 /// are guardian-set *resolution* concerns that belong to the bridge
 /// contract (Task D2), not this pure library, so they're skipped here
-/// (mirrors the fullnode's own `shrugg-core::bridge` vector test).
+/// (mirrors the fullnode's own `randprotocol-core::bridge` vector test).
 /// Ledger-level checks (`wrong_emitter`, `wrong_to_chain`,
 /// `wrong_token_chain`, `fee_exceeds_amount`, `amount_overflow`, `replay`)
 /// are also out of scope for this library.

@@ -17,8 +17,16 @@ import {TronRandBridge} from "../src/TronRandBridge.sol";
 /// PAUSER=0x...           # pause quorum (optional; defaults to none)
 /// RAND_EMITTER=0x...     # 32-byte Rand burn emitter from genesis
 /// GUARDIANS=0xa,0xb,...  # guardian set 0, in index order
+/// DEPLOYER_PRIVATE_KEY=0x...  # optional: sign with this key (see below)
 /// forge script script/Deploy.s.sol:Deploy --rpc-url $RPC --broadcast
 /// ```
+///
+/// The deployer key is taken from `DEPLOYER_PRIVATE_KEY` when that
+/// variable is set, so the key stays in the environment rather than on
+/// the command line where `ps` and shell history could see it. Leave it
+/// unset to sign with whatever `forge script` was given instead
+/// (`--private-key`, `--account`, `--ledger`, ...). `deploy/evm.sh` is
+/// the wrapper that loads the key from `deploy/.env` and runs this.
 ///
 /// Tron is compiled here but deployed with TronBox from the Foundry
 /// artifact (Section 5.4); running this script with `CHAIN=tron` against
@@ -43,7 +51,13 @@ contract Deploy is Script {
         // for a testnet (Sepolia 11155111, BSC testnet 97, ...).
         uint256 expected = vm.envOr("EXPECTED_CHAIN_ID", uint256(0));
 
-        vm.startBroadcast();
+        uint256 deployerKey = vm.envOr("DEPLOYER_PRIVATE_KEY", uint256(0));
+        if (deployerKey != 0) {
+            console2.log("deployer     ", vm.addr(deployerKey));
+            vm.startBroadcast(deployerKey);
+        } else {
+            vm.startBroadcast();
+        }
         bytes32 which = keccak256(bytes(chain));
         if (which == keccak256("ethereum")) {
             _requireChainId(expected == 0 ? 1 : expected);

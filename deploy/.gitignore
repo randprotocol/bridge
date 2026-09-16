@@ -1,0 +1,7 @@
+# Never commit keys. `.env.example` documents the variables.
+.env
+.env.*
+!.env.example
+# Program keypairs and temporary keypair files written by sol.sh
+keys/
+*.keypair.json

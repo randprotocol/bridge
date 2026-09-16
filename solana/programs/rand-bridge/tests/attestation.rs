@@ -1,5 +1,5 @@
 //! Cross-chain conformance: the Solana verifier must agree, vector for
-//! vector, with the Rust reference verifier in `shrugg-core` and with the
+//! vector, with the Rust reference verifier in `randprotocol-core` and with the
 //! Solidity verifier, over the shared `vectors/attestations.json`.
 //!
 //! Only signature-level `expect` codes are asserted here; ledger-level

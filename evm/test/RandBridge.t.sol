@@ -259,6 +259,33 @@ contract RandBridgeTest is Test {
         bridge.lock(address(t6), 1000, keccak256("r"), 0, 0);
     }
 
+    /// Rand holds a bridged amount in a note whose amount field is a
+    /// `u64`, and refuses an attestation above that at admission time
+    /// (`BridgeError::AmountTooLarge`). A lock the endpoint accepted but
+    /// Rand can never mint would leave the tokens in custody with no
+    /// burn that could ever release them, so the endpoint refuses first.
+    function test_lock_rejects_attested_amount_above_u64() public {
+        uint256 max = uint256(type(uint64).max);
+        t8.mint(user, max + 1);
+
+        // 8 decimals: attested == amount, so the bound is exact.
+        vm.expectRevert(IRandBridge.AmountTooLarge.selector);
+        vm.prank(user);
+        bridge.lock(address(t8), max + 1, keccak256("r"), 0, 0);
+
+        vm.prank(user);
+        bridge.lock(address(t8), max, keccak256("r"), 0, 0);
+        assertEq(bridge.custody(address(t8)), max, "u64::MAX itself is attestable");
+
+        // 6 decimals scale up by 100 on the way to the wire, so the bound
+        // is hit at a hundredth of the native amount.
+        uint256 native = max / 100 + 1;
+        t6.mint(user, native);
+        vm.expectRevert(IRandBridge.AmountTooLarge.selector);
+        vm.prank(user);
+        bridge.lock(address(t6), native, keccak256("r"), 0, 0);
+    }
+
     function test_lock_rejects_fee_on_transfer_token() public {
         t6.setFee(100); // 1%
 

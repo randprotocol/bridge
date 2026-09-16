@@ -55,7 +55,7 @@ const QUORUM: &[u8] = &[0, 1, 2, 3, 4];
 // ----------------------------------------------------------------------
 // guardian secp256k1 helpers
 //
-// `sign_digest` and `guardian_address` mirror `shrugg-core::bridge`; they
+// `sign_digest` and `guardian_address` mirror `randprotocol-core::bridge`; they
 // are copied rather than imported so this crate does not depend on the
 // fullnode workspace.
 // ----------------------------------------------------------------------
@@ -790,6 +790,35 @@ async fn lock_truncates_9dp_mint() {
         b.lock(&owner, owner_ata, 9, [0x33; 32], 0, 0).await,
         BridgeError::ZeroAmount,
     );
+}
+
+/// Rand holds a bridged amount in a note whose amount field is a `u64`
+/// and refuses an attestation above that at admission time. A lock this
+/// program accepted but Rand could never mint would leave the tokens in
+/// custody with no burn that could ever release them, so the program
+/// refuses first, with the same error a denormalisation overflow gets.
+#[tokio::test]
+async fn lock_refuses_an_attested_amount_above_u64() {
+    // 0 decimals: every native unit becomes 10^8 attested units.
+    let mut b = Bridge::simple(0).await;
+    b.set_token(true, 0, 0).await.expect("set token");
+
+    let owner = Keypair::new();
+    b.fund(&owner.pubkey());
+    let limit = u64::MAX / 100_000_000; // the largest native amount that fits
+    let owner_ata = b.put_ata(&owner.pubkey(), u64::MAX);
+
+    assert_bridge_error(
+        b.lock(&owner, owner_ata, limit + 1, [0x33; 32], 0, 0).await,
+        BridgeError::AmountOverflow,
+    );
+    assert_eq!(b.config().await.sequence, 0, "nothing was posted");
+    assert_eq!(b.custody_balance().await, 0, "nothing was pulled");
+
+    b.lock(&owner, owner_ata, limit, [0x33; 32], 0, 0)
+        .await
+        .expect("the largest attestable amount locks");
+    assert_eq!(b.registry().await.custody, limit);
 }
 
 #[tokio::test]

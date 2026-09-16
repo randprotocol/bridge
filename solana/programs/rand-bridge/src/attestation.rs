@@ -1,7 +1,7 @@
 //! Guardian attestation verification.
 //!
 //! This is the Solana half of a three-chain verifier: it must accept and
-//! reject exactly what the Rust reference (`shrugg-core::bridge::verify`)
+//! reject exactly what the Rust reference (`randprotocol-core::bridge::verify`)
 //! and the Solidity `RandBridge` do, vector for vector. The wire format
 //! comes from `bridge-codec`; the hashing and the ECDSA recovery come from
 //! the `keccak` and `secp256k1_recover` syscalls, which `solana-program`

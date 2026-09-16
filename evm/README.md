@@ -3,7 +3,7 @@
 Foundry project for the Rand bridge's EVM-side contracts. The `Attestation`
 library (`src/lib/Attestation.sol`) decodes and verifies the Wormhole-shaped
 attestation wire format that is shared byte-for-byte with the Rand fullnode
-(`crates/bridge-codec`, `crates/shrugg-core::bridge`) and the Solana program.
+(`crates/bridge-codec`, `crates/randprotocol-core::bridge`) and the Solana program.
 
 ## Setup
 

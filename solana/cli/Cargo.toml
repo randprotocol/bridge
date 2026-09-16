@@ -1,0 +1,25 @@
+[package]
+name = "rand-bridge-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line client for deploying and administering the Rand bridge's Solana program"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "rand-bridge-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+borsh = "1"
+bs58 = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+rand-bridge = { path = "../programs/rand-bridge", features = ["no-entrypoint"] }
+serde_json = "1"
+solana-client = "2.3"
+solana-sdk = "2.3"
+
+[dev-dependencies]
+tempfile = "3"
