@@ -118,6 +118,18 @@ against the issuer and the chain's explorer before whitelisting it.
   attestation says.
 - Guardian upgrades cannot skip indices and old sets expire after a day, limiting the window in
   which a leaked old key set matters.
+- Keep the guardian set small. No verifier bounds the set size on chain, but transport does: a
+  Solana release must fit one transaction (about seven signatures with the current account list,
+  so n <= 10; the rotation itself fits to n = 11), and Rand's 16 KiB attestation cap admits about
+  253. A rotation past the tightest chain's bound would be accepted on one chain and be
+  unsubmittable on another, so the sets would diverge. Governance holds n well under the bound
+  (launch: 6) as a matter of policy.
+- The whitelisted tokens are issuer-controlled. Tether or Circle can pause a token (releases
+  halt, fail closed), blacklist a recipient (that burn's payout stays in custody), blacklist an
+  endpoint (its backing is frozen), or change transfer semantics in an upgrade. Locks measure the
+  received balance delta and reject fee-on-transfer behavior; a release under such semantics
+  would pass the issuer's cut on to the recipient. This is accepted issuer risk of bridging
+  USDT/USDC specifically.
 - The Rand recipient field is the 32-byte hash of a shielded address, printed by the Rand wallet,
   with no checksum. Front ends must carry it exactly; the contracts can only reject zero.
 - A note on Rand holds a `u64`, so every endpoint refuses to lock an attested amount above

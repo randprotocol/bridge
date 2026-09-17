@@ -73,8 +73,14 @@ info "rpc $rpc"
 actual_id="$(cast chain-id --rpc-url "$rpc")" || die "cannot reach $rpc"
 [[ "$actual_id" == "$chain_id" ]] || die "$rpc reports chain id $actual_id, expected $chain_id for $network"
 
-deployer="$(DEPLOYER_PRIVATE_KEY="${!key_var}" cast wallet address --private-key "${!key_var}" 2>/dev/null || true)"
-[[ -n "$deployer" ]] && info "deployer $deployer (balance $(cast balance --rpc-url "$rpc" --ether "$deployer" 2>/dev/null || echo '?') native)"
+# The key never goes on a command line, so the deployer address is not
+# derived here: `cast wallet address` only takes a key as an argument.
+# Deploy.s.sol logs the deployer itself (forge computes it from the
+# DEPLOYER_PRIVATE_KEY environment) before it broadcasts. Set the
+# non-secret DEPLOYER_ADDRESS to get a pre-flight balance line.
+if [[ -n "${DEPLOYER_ADDRESS:-}" ]]; then
+  info "deployer $DEPLOYER_ADDRESS (balance $(cast balance --rpc-url "$rpc" --ether "$DEPLOYER_ADDRESS" 2>/dev/null || echo '?') native)"
+fi
 
 if [[ "$dry_run" == "0" ]]; then
   confirm "$network" "$mainnet"

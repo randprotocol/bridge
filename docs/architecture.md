@@ -846,6 +846,10 @@ fork on every bridged chain (the rename already was one: chain 10).
   colluding leaders can hold `timestamp_ms` constant, keeping a superseded guardian set inside its
   grace window indefinitely. Forbidding equal timestamps would not fix this and would stall an
   honest chain; it is recorded as a consequence of the timestamp rule, not a defended property.
+- **There is no forward bound on block timestamps either.** Only a rewind is rejected, so a
+  Byzantine leader with a committing quorum can do the opposite: jump `timestamp_ms` past a
+  superseded set's `expires_at` and strand in-flight transfers signed by it. They can be re-signed
+  under the current set, and the current set never expires, so the bridge itself keeps running.
 - **No rate limiting on Rand** beyond the flat fee and the 16 KiB cap.
 - **The Rand recipient has no checksum**; it is a hash the wallet prints, and front ends must
   accept and carry it exactly.
@@ -853,4 +857,23 @@ fork on every bridged chain (the rename already was one: chain 10).
   ML-DSA later.
 - **Tron and Solana are built and tested but not deployed.** Tron now compiles under TronBox
   (`deploy/trx.sh --dry-run`); the Solana SBF build still needs the Solana CLI, which is not
-  installed on the build machine. Neither program has been deployed to any network.
+  installed on the build machine. Neither program has been deployed to any network. Tron's
+  endpoint is exercised only under EVM semantics in the Foundry suite: the guardian-key
+  comparison assumes the TVM's `ecrecover` returns the `0x41`-prefixed address form the migration
+  stores, and a failure there fails closed (every release reverts `WrongGuardian`). The Nile
+  round trip in the deployment plan is where that assumption is tested before mainnet.
+- **Guardian-set size is bounded by transport, not by any verifier.** `n_sigs` is one byte (255
+  max) and EVM gas is the only on-chain limit there, but a Solana release must fit a 1,232-byte
+  transaction: about seven signatures with the current account list, so `n <= 10` (the rotation
+  itself fits to `n = 11`), relaxable to roughly 20 with address lookup tables. Rand's 16 KiB
+  attestation cap admits about 253. A rotation past the tightest chain's bound would be applied
+  there and be unsubmittable elsewhere, so the guardian sets would diverge per chain; governance
+  keeps `n` small (launch: 6) as a matter of policy.
+- **A deposit note's commitment can be front-run.** Every commitment input is public in a pending
+  `BridgeAttest`, so anyone can land a conflicting commitment and fail the attest with
+  `CommitmentExists`. The attestation's digest stays unspent and `deposit_note` recomputes the
+  note, so the cost to the honest party is a re-seal and a re-proof; the attacker's is a fee
+  bundle per grief.
+- **Spent-marker PDAs are permanent.** Every release and rotation on Solana creates a
+  `["spent", digest]` account paid for by the submitter; it can never be closed, so the markers
+  accumulate rent-exempt lamports forever. Relayers will price this into fees.

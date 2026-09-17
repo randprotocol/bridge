@@ -121,6 +121,11 @@ A guardian set upgrade is signed by the current set, carries `emitter_chain = 1`
 `consistency_level = 0`. It is submitted to every chain independently; each chain checks
 `new_index == current + 1` so the same message cannot be applied twice and sets cannot be skipped.
 
+Of those body fields, only the emitter pair is normative: verifiers do **not** check
+`sequence`, `nonce`, or `consistency_level` on a payload-2 message. The replay- and
+skip-resistance comes from `new_index == current + 1` plus the consumed-digest set, so the
+three values are what governance *should* emit, not what a verifier relies on.
+
 "Signed by the current set" is a rule the verifier enforces, not a convention: a payload-2
 message additionally requires `guardian_set_index == current`, checked in addition to the
 quorum rule of Section 3.4. The grace window of Section 3.4 covers transfer payloads only, so a
