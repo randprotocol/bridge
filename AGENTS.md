@@ -36,10 +36,10 @@ read it before touching anything there, it is worked on by many sessions in para
   `SOL_KEYPAIR=deploy/keys/solana-devnet-deployer.keypair.json SOL_ADMIN=<that pubkey>
   RAND_EMITTER=... GUARDIANS=... deploy/sol.sh devnet`.
 - **Issue trackers** (created 2026-09-17, both were empty before):
-  - `randprotocol/bridge` #1 stale fee-floor claim in the audit doc (fixed, uncommitted) ·
-    #2 testnet round trips (Tron dry-run done; broadcasts blocked on keys) ·
+  - `randprotocol/bridge` #1 stale fee-floor claim in the audit doc (closed, `687ac32`) ·
+    #2 testnet round trips (Tron dry-run + Solana localnet done; broadcasts blocked on keys) ·
     #3 guardian + relayer daemons (not started) · #4 external-audit gate
-  - `randprotocol/fullnode` #1 genesis `check_bridge` guardian-count bound (fixed, uncommitted) ·
+  - `randprotocol/fullnode` #1 genesis `check_bridge` guardian-count bound (closed, `544926c`) ·
     #2 no forward bound on block timestamps · #3 deposit-note commitment front-running ·
     #4 mempool re-check gaps
 - **Key commits**: `13dc315` (S3 + RAND-rename rewrite of all docs, deploy scripts, first audit),
