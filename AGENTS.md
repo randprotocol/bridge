@@ -74,7 +74,8 @@ Parity across all verifiers is the security property; change these everywhere or
 - Bridged holdings are **shielded notes** (no per-account balances); the asset registry maps
   `blake3("rand-bridge-asset" || chain BE || token)` to a dense `u32` index (0 = RAND). Mints are
   **gross** (relayer fee is record-only on Rand, paid only on source-chain release). Deposit
-  `to` is a `ReceiverId` resolved via `Ledger::resolve_pk`.
+  `to` is the 32-byte `recipient_hash` of the recipient's full shielded address (chain 12; chain
+  11's `ReceiverId` form, resolved via `Ledger::resolve_pk`, was reverted at fullnode `17db41d`).
 - `Action` bincode tags: `BridgeAttest = 7`, `BridgeBurn = 8` (Bond/Unbond/Withdraw took 4-6).
 - Fee floors: `BridgeAttest = BUNDLE_BASE`, `BridgeBurn = 2 * BUNDLE_BASE` (two bundles).
 - RPC: `rand_getBridgeState`, `rand_getAssets` (no param, registry rows), `rand_getBridgeBurn`,
