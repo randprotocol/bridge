@@ -16,11 +16,11 @@ read it before touching anything there, it is worked on by many sessions in para
 - **All test suites green**: `cd evm && forge test` (38), `cd solana && cargo test` (35 incl.
   solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (51),
   `cd tools/vectors && cargo run --release -- --check` (both vector copies byte-identical).
-- **Progress later the same day**: fullnode issue #1 is fixed (uncommitted in `../fullnode`:
+- **Progress later the same day**: fullnode issue #1 is fixed and closed (fullnode `544926c`:
   `check_bridge` now refuses a guardian set whose quorum attestation exceeds
   `MAX_ATTESTATION_BYTES` — boundary pinned at 367 accepted / 368 refused — plus the two stale
-  "zero minimum fee" comments in `bridge/state.rs`; tests green). Bridge issue #1 is fixed
-  (uncommitted: the audit doc's I-1 now names the real `BUNDLE_BASE` floor). Tron half of issue
+  "zero minimum fee" comments in `bridge/state.rs`; tests green). Bridge issue #1 is fixed and
+  closed (`687ac32`: the audit doc's I-1 names the real `BUNDLE_BASE` floor). Tron half of issue
   #2 is keyless-verified: `deploy/trx.sh nile --dry-run` compiles the mirrored sources under
   Tron solc 0.8.20. Solana half of issue #2 is rehearsed on **localnet**: `deploy/sol.sh localnet
   --yes` ran end to end against `solana-test-validator` (deploy, `Initialize`, `show`, `pause`/
