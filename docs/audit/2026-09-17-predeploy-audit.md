@@ -105,8 +105,9 @@ submitter.
 ### I-1: verification order is not identical across verifiers, by design
 
 Only accept/reject is normative. The EVM and Solana endpoints recover signatures before checking
-replay and payload rules (the submitter pays), Rand runs every cheap check first (its fee floor is
-zero). The shared vectors pin the accept/reject decision on all three, not the first error.
+replay and payload rules (the submitter pays), Rand runs every cheap check first (its
+attestation-specific surcharge is zero; the fee floor is `BUNDLE_BASE`, fullnode `gas.rs`).
+The shared vectors pin the accept/reject decision on all three, not the first error.
 
 ### I-2: reentrancy through a lock hook is harmless
 

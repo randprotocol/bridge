@@ -50,8 +50,9 @@ deploy/sol.sh devnet             # then: deploy/sol.sh mainnet-beta
 
 `sol.sh` generates the program-id keypair under `deploy/keys/` (git-ignored) the first time, rewrites
 `declare_id!` in `solana/programs/rand-bridge/src/lib.rs` to match (commit that), builds with
-`cargo build-sbf`, deploys with the deployer as upgrade authority, and runs `Initialize`, which the
-program only accepts from the upgrade authority. Hand the authority to a multisig afterwards:
+`cargo build-sbf --arch v3` (SBPF v3 is what devnet and mainnet run; the v0 default is being
+retired by SIMD-0500), deploys with the deployer as upgrade authority, and runs `Initialize`, which
+the program only accepts from the upgrade authority. Hand the authority to a multisig afterwards:
 
 ```sh
 solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTISIG> --url <RPC>

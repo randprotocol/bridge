@@ -55,7 +55,7 @@ fi
 
 need_tool forge "install Foundry: https://getfoundry.sh"
 need_tool jq
-require "$key_var" "$rpc_var"
+require "$key_var" "$rpc_var" ADMIN
 check_common_args
 is_hex_key "${!key_var}" || die "$key_var must be 0x + 64 hex"
 if [[ -z "${PAUSER:-}" ]]; then

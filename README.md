@@ -78,7 +78,7 @@ cd ../fullnode && cargo test --release
    passed to their constructors: `deploy/eth.sh`, `deploy/bnb.sh`, `deploy/trx.sh` and
    `deploy/sol.sh`, each signing with its chain's private key from `deploy/.env`
    (`deploy/README.md`). Underneath, `evm/script/Deploy.s.sol` handles Ethereum and BSC, TronBox
-   handles Tron, and `cargo build-sbf` + `solana program deploy` + `rand-bridge-cli initialize`
+   handles Tron, and `cargo build-sbf --arch v3` + `solana program deploy` + `rand-bridge-cli initialize`
    handle Solana (the Solana CLI is not installed on this machine, so that path is written but
    unexercised).
 3. **Register each deployed contract's address back into the Rand genesis** `bridge.emitters` map

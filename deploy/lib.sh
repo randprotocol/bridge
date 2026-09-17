@@ -61,9 +61,11 @@ is_hex_key() { [[ "$1" =~ ^0x[0-9a-fA-F]{64}$ ]]; }
 is_hex32() { [[ "$1" =~ ^0x[0-9a-fA-F]{64}$ ]]; }
 is_evm_address() { [[ "$1" =~ ^0x[0-9a-fA-F]{40}$ ]]; }
 
-# Validates the constructor arguments every endpoint shares.
+# Validates the attestation arguments every endpoint shares. The admin is
+# chain-specific (an EVM address for the EVM/Tron scripts, a pubkey for
+# Solana), so each script requires its own.
 check_common_args() {
-  require ADMIN RAND_EMITTER GUARDIANS
+  require RAND_EMITTER GUARDIANS
   is_hex32 "$RAND_EMITTER" || die "RAND_EMITTER must be 0x + 64 hex (the 32-byte Rand burn emitter from genesis)"
   local n
   n="$(tr ',' '\n' <<<"$GUARDIANS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"

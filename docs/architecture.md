@@ -419,11 +419,12 @@ base58check-to-20-byte conversion, the migration's environment, and the post-dep
 
 A native `solana-program` crate, no Anchor. Tests run under `solana-program-test`, which compiles
 the program natively against a real bank and the real SPL token program, so the suite needs no
-SBF toolchain. The deployable `.so` has never been built here: `cargo build-sbf` is unavailable
-on the development machine. `lib.rs` pins a vanity program id with no known secret; a real
-deployment re-declares its own before building, since every PDA derives from it. `deploy/sol.sh`
-does exactly that once the Solana CLI is installed (generate or load the program keypair, rewrite
-`declare_id!`, `cargo build-sbf`, `solana program deploy`, then `Initialize`), and `solana/cli`
+SBF toolchain. The deployable `.so` builds with `cargo build-sbf --arch v3` (SBPF v3, live on
+devnet and mainnet; the v0 default is being retired by SIMD-0500) and was rehearsed end to end
+against a local validator on 2026-09-17. `lib.rs` pins a vanity program id with no known secret;
+a real deployment re-declares its own before building, since every PDA derives from it.
+`deploy/sol.sh` does exactly that (generate or load the program keypair, rewrite `declare_id!`,
+`cargo build-sbf --arch v3`, `solana program deploy`, then `Initialize`), and `solana/cli`
 (`rand-bridge-cli`) is the command-line client for `Initialize` and the admin instructions, with
 the signer loaded from a keypair file or an inline secret in the environment.
 

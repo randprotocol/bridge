@@ -103,10 +103,14 @@ if [[ "$declared" != "$program_id" ]]; then
   skip_build=0
 fi
 
+# SBPF v3: live on devnet and mainnet (SIMD-0178/0189/0377), and the only
+# format left once SIMD-0500 disables v0-v2 deployments. cargo build-sbf
+# still defaults to v0, which a default solana-test-validator (every
+# feature active) already refuses.
 so="$BRIDGE_ROOT/solana/target/deploy/rand_bridge.so"
 if [[ "$skip_build" == "0" || ! -f "$so" ]]; then
-  info "cargo build-sbf"
-  (cd "$BRIDGE_ROOT/solana" && cargo build-sbf --manifest-path programs/rand-bridge/Cargo.toml)
+  info "cargo build-sbf --arch v3"
+  (cd "$BRIDGE_ROOT/solana" && cargo build-sbf --arch v3 --manifest-path programs/rand-bridge/Cargo.toml)
 fi
 [[ -f "$so" ]] || die "build did not produce $so"
 info "program binary $so ($(du -h "$so" | cut -f1))"

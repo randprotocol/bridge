@@ -37,7 +37,7 @@ load_env
 need_tool node "install Node.js 18+"
 need_tool npm
 need_tool rsync
-require TRON_PRIVATE_KEY
+require TRON_PRIVATE_KEY ADMIN
 check_common_args
 require PAUSER   # 2_deploy.js insists on an explicit pauser
 

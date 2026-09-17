@@ -31,23 +31,30 @@ whole suite runs without the Solana toolchain installed.
 
 ## Deploying
 
-`deploy/sol.sh [devnet|testnet|mainnet-beta]` (repo root) does every step
-below from the command line — program keypair, `declare_id!` rewrite,
-`cargo build-sbf`, `solana program deploy`, `Initialize` — with the
-deployer key loaded from `deploy/.env` (`SOL_KEYPAIR` or
-`SOL_PRIVATE_KEY`). `cli/` is `rand-bridge-cli`, the client it uses for
-`Initialize` and the admin instructions (`set-token`, `pause`, `unpause`,
-`transfer-admin`, `accept-admin`, `show`).
+`deploy/sol.sh [devnet|testnet|mainnet-beta|localnet]` (repo root) does
+every step below from the command line — program keypair, `declare_id!`
+rewrite, `cargo build-sbf --arch v3`, `solana program deploy`,
+`Initialize` — with the deployer key loaded from `deploy/.env`
+(`SOL_KEYPAIR` or `SOL_PRIVATE_KEY`). `cli/` is `rand-bridge-cli`, the
+client it uses for `Initialize` and the admin instructions (`set-token`,
+`pause`, `unpause`, `transfer-admin`, `accept-admin`, `show`).
 
-Building the deployable `.so` needs the Solana CLI, which is *not*
-installed on the machine this crate was developed on — `cargo build-sbf`
-is unavailable here and has never been run against this source:
+Building the deployable `.so` needs the Solana CLI (agave). The program
+builds and deploys cleanly: rehearsed end to end on 2026-09-17 against
+`solana-test-validator` (agave 4.2.2, platform-tools v1.54) — deploy,
+`Initialize`, `show`, `pause`/`unpause`, `set-token`:
 
 ```
 sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-cargo build-sbf --manifest-path programs/rand-bridge/Cargo.toml
+cargo build-sbf --arch v3 --manifest-path programs/rand-bridge/Cargo.toml
 solana program deploy target/deploy/rand_bridge.so
 ```
+
+Build for **SBPF v3** (`--arch v3`). `cargo build-sbf` still defaults to
+v0; devnet and mainnet accept both today, but SIMD-0500 (pending) retires
+v0–v2 deployments and a default `solana-test-validator` — every feature
+gate active — already rejects a v0 binary with
+`Detected sbpf_version required by the executable which are not enabled`.
 
 `lib.rs` pins a placeholder program id
 (`RandBr1dge111111111111111111111111111111111`), a readable vanity key
