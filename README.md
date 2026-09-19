@@ -146,7 +146,9 @@ has watched a real chain, signed a real digest, or moved real funds. On Rand a b
 now a shielded note (fullnode phase S3): the deposit note is computed by the chain from the
 attested amount, and nothing about a bridged balance is visible except in the one transaction that
 mints it. The deploy scripts have been rehearsed against a local anvil node and TronBox compiles
-the Tron endpoint, but no endpoint has been deployed to a public network. An internal audit is in
+the Tron endpoint. The four endpoints were deployed to mainnet on 2026-09-19
+(`deploy/deployments/README.md`) with no token whitelisted; nothing moves until a Rand chain carries
+the matching `bridge` section. An internal audit is in
 `docs/audit/2026-09-17-predeploy-audit.md`; there has been no external audit. Treat every contract,
 program, and ledger change here as a reviewed but unaudited implementation of the design in
 `docs/superpowers/specs/2026-09-10-rand-bridge-design.md`, not as something ready to hold real

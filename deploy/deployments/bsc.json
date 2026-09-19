@@ -1,0 +1,23 @@
+[
+  {
+    "network": "bsc",
+    "chain": "bsc",
+    "address": "0xd6ebd21c3df90c9175ebdc8d6b377a9361604892",
+    "tx": "0xd9995f323ac3851115dd755432fef4ac786fb47990daa34e8003e33c302334af",
+    "admin": "0xe49Bd2571A549e8797bE649229F62891Fe300d0e",
+    "pauser": "0xe49Bd2571A549e8797bE649229F62891Fe300d0e",
+    "rand_emitter": "0xc02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f",
+    "guardians": [
+      "0x5B5C007b5638B643a1f6b3C18AFB2a7784a9a2aa",
+      "0x3fACDAf6Ea59Bc75cD18B4CA1844344005e66453",
+      "0x8CD7478ECa7235E8A5265d4B7F638086f25cC9F5",
+      "0x76845347679B878c0016491B19defc59C83E20fB",
+      "0x62fA3e39F56636955DF228917EDD2e9e68F3a957",
+      "0xb3F1409AE0D5b2467229fA74a92c51b15f980445"
+    ],
+    "bridge_commit": "e24deb7",
+    "deployed_at": "2026-09-19T07:53:53Z",
+    "emitter_wire_form": "0x000000000000000000000000d6ebd21c3df90c9175ebdc8d6b377a9361604892",
+    "chain_id": 56
+  }
+]

@@ -91,10 +91,10 @@ trap 'rm -f "$log"' EXIT
 TRON_PRIVATE_KEY="$key" ADMIN="$ADMIN" PAUSER="$PAUSER" RAND_EMITTER="$RAND_EMITTER" GUARDIANS="$GUARDIANS" \
   npx tronbox migrate --network "$network" --reset 2>&1 | tee "$log"
 
-# TronBox prints "TronRandBridge: (base58) T... (hex) 41..." on success.
 # Only that line counts: `--reset` also redeploys Migrations, and its
 # address must never be read back as the emitter.
-line="$(grep -E 'TronRandBridge:' "$log" | tail -1 || true)"
+# TronBox prints the name on one line and the two address forms on the next two.
+line="$(grep -A2 -E 'TronRandBridge:' "$log" | tail -3 | tr '\n' ' ' || true)"
 hex="$(grep -Eo '\(hex\) 41[0-9a-fA-F]{40}' <<<"$line" | awk '{print $2}' || true)"
 base58="$(grep -Eo '\(base58\) T[1-9A-HJ-NP-Za-km-z]{33}' <<<"$line" | awk '{print $2}' || true)"
 [[ -n "$hex" && -n "$base58" ]] || die "could not find the deployed address in tronbox's output; check tron/build/"

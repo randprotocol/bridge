@@ -61,6 +61,18 @@ read it before touching anything there, it is worked on by many sessions in para
   `git pull --rebase`. With aggregation on, the proposer keeps only `BUNDLE_BASE` and the rest
   becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
   chain enables aggregation. It ships with the chain cut that first carries a `bridge` section.
+- **MAINNET ENDPOINTS ARE DEPLOYED (2026-09-19)** — addresses, tx hashes and the matching Rand
+  genesis `bridge` section are in `deploy/deployments/README.md`. Ethereum and BSC
+  `0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892`, Tron `TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU`, Solana
+  `FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu` (`declare_id!` now names it — do not let a
+  localnet/devnet rehearsal overwrite it in a commit). `RAND_EMITTER =
+  keccak256("rand-bridge-mainnet-burn-emitter")`. **No token is whitelisted and no Rand chain
+  carries the bridge yet**, so nothing can move. Still to do: Solana upgrade authority → multisig,
+  `setToken` (USDT only on Tron; small caps first), the Rand chain cut, guardians + relayer
+  running, explorer verification of the EVM sources. The user keeps all six guardian keys, the
+  admin keys and the deployer keys in `~/.zshrc` on one machine — the 5-of-6 is nominal until the
+  keys move to separate operators (rotation tooling does not exist yet). The program keypair is
+  `deploy/keys/solana-mainnet-beta-program.keypair.json` (git-ignored).
 - **Testnet deployment is configured and blocked only on faucet funds** (2026-09-19):
   `deploy/.env` (mode 600, git-ignored) holds one EVM key for Sepolia + BSC testnet
   (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`, also `ADMIN` and `PAUSER`), a Tron key

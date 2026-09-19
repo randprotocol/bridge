@@ -1,0 +1,23 @@
+[
+  {
+    "network": "solana-mainnet-beta",
+    "chain": "solana",
+    "address": "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu",
+    "tx": "",
+    "admin": "HLc2AjnRTGvH4ZK6YjPmizJ3m8wGJr5qJ3T38rkdN2P2",
+    "pauser": "8bYjGxCUK4aUJmDr1D5i2fV1fPzhQEU2wtkTAeF2jwES",
+    "rand_emitter": "0xc02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f",
+    "guardians": [
+      "0x5B5C007b5638B643a1f6b3C18AFB2a7784a9a2aa",
+      "0x3fACDAf6Ea59Bc75cD18B4CA1844344005e66453",
+      "0x8CD7478ECa7235E8A5265d4B7F638086f25cC9F5",
+      "0x76845347679B878c0016491B19defc59C83E20fB",
+      "0x62fA3e39F56636955DF228917EDD2e9e68F3a957",
+      "0xb3F1409AE0D5b2467229fA74a92c51b15f980445"
+    ],
+    "bridge_commit": "e24deb7",
+    "deployed_at": "2026-09-19T07:56:08Z",
+    "emitter_wire_form": "0xd3e58f1e9317bbc3c69b63fadff558ea82ba5d00765f1f1e483d705d209b413a",
+    "upgrade_authority": "DvV45t4mfWKJvUXvFLoEuYgRqzmL1m6DaHbn8ZLw77kX"
+  }
+]

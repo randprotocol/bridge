@@ -19,7 +19,7 @@ pub mod entrypoint;
 // re-declares this with its own keypair before `cargo build-sbf`; the
 // tests and the PDA derivations only need *a* fixed id, and a readable
 // one keeps the derived addresses reproducible.
-solana_program::declare_id!("RandBr1dge111111111111111111111111111111111");
+solana_program::declare_id!("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu");
 
 pub mod attestation;
 pub mod error;
