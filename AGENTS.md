@@ -69,6 +69,10 @@ read it before touching anything there, it is worked on by many sessions in para
   the "redirected BridgeBurn copy is refused" case passing.** The Rand side is also becoming ONE
   pooled token, zUSD, with seven backings and per-backing `locked` counters (== endpoint custody);
   bridged-asset transfers and per-asset supply do not exist on fullnode main yet.
+- **Design review of 2026-09-18 and the plan that follows:** `docs/bridging-architecture-review-notes.md`
+  (option C: own bridge + Dilithium2 co-signature + verifier threshold + Rand-side limits + S3 id;
+  nothing in it touches a deployed endpoint, but it is all consensus work that belongs in the
+  chain-14 genesis or needs a custody-carrying migration later).
 - **MAINNET ENDPOINTS ARE DEPLOYED (2026-09-19)** — addresses, tx hashes and the matching Rand
   genesis `bridge` section are in `docs/mainnet-deployment.md`. Ethereum and BSC
   `0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892`, Tron `TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU`, Solana
@@ -77,8 +81,8 @@ read it before touching anything there, it is worked on by many sessions in para
   keccak256("rand-bridge-mainnet-burn-emitter")`. **No token is whitelisted and no Rand chain
   carries the bridge yet**, so nothing can move. Still to do: Solana upgrade authority → multisig,
   `setToken` (USDT only on Tron; small caps first), the Rand chain cut, guardians + relayer
-  running, explorer verification of the EVM sources. The user keeps all six guardian keys, the
-  admin keys and the deployer keys in `~/.zshrc` on one machine — the 5-of-6 is nominal until the
+  running, explorer verification of the EVM sources. All six guardian keys, the admin keys and
+  the deployer keys are currently held on one machine — the 5-of-6 is nominal until the
   keys move to separate operators (rotation tooling does not exist yet). The program keypair is
   `deploy/keys/solana-mainnet-beta-program.keypair.json` (git-ignored).
 - **Testnet deployment is configured and blocked only on faucet funds** (2026-09-19):
