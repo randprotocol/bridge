@@ -51,18 +51,31 @@ read it before touching anything there, it is worked on by many sessions in para
 - **Fees added 2026-09-19**: 10 bps on release on EVM/Tron and Solana (forge 51, solana 41 tests;
   the legacy tests run fee-free via `setProtocolFee(0)` in their setup); a first cut that also
   skimmed locks (`3ad92f1`) was reverted the same day on the user's ruling that deposits are free.
-  The RAND side is fullnode branch **`bridge-burn-fee`** (worktree `/tmp/fullnode-bridge-burn-fee`,
-  off `a941774`): `BRIDGE_BURN_FEE = 10 * BUNDLE_BASE`, wallet default, docs, pinned tests — core
-  bridge/gas tests and the wallet burn tests green; the proving suites (wallet flow, cluster) not
-  run. **Not merged to fullnode `main`**: the shared checkout had another session's 143-file
-  uncommitted diff (incl. `gas.rs`). With aggregation on, the proposer keeps only `BUNDLE_BASE`
-  and the rest becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
+  The RAND side is fullnode `142e1f7` on `origin/main` (fast-forwarded from branch
+  `bridge-burn-fee`): `BRIDGE_BURN_FEE = 10 * BUNDLE_BASE`, wallet default, docs, pinned tests.
+  Core bridge/gas tests, the wallet flow (4 tests, 889 s) and the cluster's
+  `bridge_mint_deposits_a_note_and_a_burn_spends_it` (real proofs) are green; the 21 node-lib
+  aggregation tests could not run (no `RECURSION_FIXTURES` cache on this machine — unrelated to
+  the fee). The shared checkout's *local* `main` is still at `a941774`: it held another
+  session's 145-file uncommitted diff, so git refused the fast-forward; that session must
+  `git pull --rebase`. With aggregation on, the proposer keeps only `BUNDLE_BASE` and the rest
+  becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
   chain enables aggregation. It ships with the chain cut that first carries a `bridge` section.
-- **Testnet deployer keys exist** (2026-09-19): `deploy/.env` (mode 600, git-ignored) holds one
-  EVM key for Sepolia + BSC testnet (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`), a Tron key
-  (`TYToFBuiEEPFasMc7NBxF54KRkQX7o79nh`) and points at the Solana devnet deployer below; addresses
-  in `deploy/keys/deployer-addresses.json`. All unfunded; `ADMIN`/`PAUSER`/`RAND_EMITTER`/
-  `GUARDIANS` are still placeholders. Testnet-only keys — mainnet uses `DEPLOY_ENV_FILE`.
+- **Testnet deployment is configured and blocked only on faucet funds** (2026-09-19):
+  `deploy/.env` (mode 600, git-ignored) holds one EVM key for Sepolia + BSC testnet
+  (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`, also `ADMIN` and `PAUSER`), a Tron key
+  (`TYToFBuiEEPFasMc7NBxF54KRkQX7o79nh`), the Solana devnet deployer below, six **testnet-only**
+  guardian keys (`deploy/keys/testnet-guardians.json`) and `RAND_EMITTER =
+  keccak256("rand-bridge-testnet-burn-emitter")`. All four `--dry-run`s pass from it; every
+  address held 0 on every network when last checked. Mainnet uses `DEPLOY_ENV_FILE` with fresh
+  guardian keys and emitter. Costs and what gets deployed: `docs/deployment-costs.md` (~$540 to
+  fund a mainnet deployment; testnets free).
+- **Daemons built 2026-09-19** (`daemons/`, `1f020fb`): `rand-guardian` + `rand-relayer`; signing
+  and assembly reproduce the shared ok vectors byte for byte; a lock and a release run against the
+  real `EthereumRandBridge` on anvil (`cargo test` in `daemons/`, needs Foundry). Untested paths:
+  Tron log facade + submitter, Solana (`rand-bridge-cli release`) and Rand (`rand bridge-mint`)
+  subprocess submitters. No rotation tooling. Real USDT/USDC fork tests:
+  `FOUNDRY_PROFILE=fork ETH_FORK_URL=… BSC_FORK_URL=… forge test --match-contract ForkTokensTest`.
 - **Issue trackers** (created 2026-09-17, both were empty before):
   - `randprotocol/bridge` #1 stale fee-floor claim in the audit doc (closed, `687ac32`) ·
     #2 testnet round trips (Tron dry-run + Solana localnet done; broadcasts blocked on keys) ·
@@ -117,8 +130,8 @@ Parity across all verifiers is the security property; change these everywhere or
   `to` is the 32-byte `recipient_hash` of the recipient's full shielded address (chain 12; chain
   11's `ReceiverId` form, resolved via `Ledger::resolve_pk`, was reverted at fullnode `17db41d`).
 - `Action` bincode tags: `BridgeAttest = 7`, `BridgeBurn = 8` (Bond/Unbond/Withdraw took 4-6).
-- Fee floors: `BridgeAttest = BUNDLE_BASE`, `BridgeBurn = 2 * BUNDLE_BASE` (two bundles) on fullnode
-  `main`; `BRIDGE_BURN_FEE` = 0.01 RAND on branch `bridge-burn-fee` (see State).
+- Fee floors: `BridgeAttest = BUNDLE_BASE`, `BridgeBurn = BRIDGE_BURN_FEE` = 0.01 RAND (fullnode
+  `142e1f7`; covers the base for both of the burn's bundles).
 - RPC: `rand_getBridgeState`, `rand_getAssets` (no param, registry rows), `rand_getBridgeBurn`,
   `rand_bridgeAssetId`. `rand_getAssetBalance` is **removed** (method-not-found).
 - Storage CFs: `bridge_spent`, `bridge_burns`, `meta["bridge_state"]`; no `bridge_balances`.
