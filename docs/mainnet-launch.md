@@ -103,8 +103,16 @@ runs in this order; each step that signs or broadcasts needs the owner's explici
    rand-bridge-gov pq-list $G --nonce 6 --token-index 1 --chain 5 --decimals 6  --token c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61 --out zusd-6.json   # Solana USDC
    ```
 
+   **Sign the register first, submit it, and sign the six lists only after it has committed.**
+   `M_list` signs `token_index`, and registering a native token on Rand is permissionless: if anyone
+   registers a token between the cut and zUSD's registration, zUSD lands at index 2 and six
+   pre-signed lists would be refused (no funds at risk, only re-signing). Read zUSD's index from
+   `rand_getTokens` / `rand_getBridgeState` and use it for `--token-index` (1 below is the
+   expected value, not a given).
+
    Nonces are the ledger's `list_nonce` at the time (read `rand_getBridgeState`); a quorum for one
-   message authorises no other. The token is named **"Shielded USD"**, symbol `zUSD`; the salt is
+   message authorises no other. A pause while already paused, or an unpause while not paused, is
+   refused and does not spend a nonce. The token is named **"Shielded USD"**, symbol `zUSD`; the salt is
    `keccak256("rand-zusd-shielded-usd-chain-14")`; chain 14 lists no token in genesis, so the
    registration takes index 1 (RAND is 0). `--decimals` is the *backing's* source decimals — zUSD
    itself has 8 on Rand and is not in the message. The wallet then carries each file:
