@@ -186,6 +186,9 @@ co-signature** on every `BridgeAttest`. The co-signature format is `spec/PQ-COSI
 (accepted by the fullnode as written); its vectors are `vectors/pq-cosignatures.json`
 (`tools/vectors`, `--bin pq-vectors`), and the guardian and relayer implement it (W1, bridge side:
 done; Rand side: in `feat/rpl`). B3 is settled: round-3 Dilithium2 as the node already links it.
-S3 Phase B does not return in chain 14 (B5), so the relayer keeps its off-chain recipient table.
+S3 Phase B (B5) is **undecided**: short addresses are being implemented again on fullnode branch
+`feat/harm-addresses` (a new `Action::RegisterReceiver`), and whether they ship in chain 14 is the
+user's call. Until then the relayer keeps its off-chain recipient table; if the registry ships, the
+relayer resolves recipients from the chain and the table becomes the fallback (W3).
 Post-genesis listing of backings is a Rand-only PQ-quorum message, not an attestation payload, so
 `bridge-codec` and the deployed endpoints stay byte-stable.
