@@ -250,3 +250,114 @@ fn guardians_cosign_deposits_only_and_the_relayer_assembles_the_pq_quorum() {
     // One guardian short of five co-signatures: no quorum, nothing submitted.
     assert!(assemble_pq(&deposit, &set, &collected[..4]).is_none());
 }
+
+/// The governance layouts, against the generator's hand-written bytes.
+#[test]
+fn governance_messages_and_quorums_match_the_vectors() {
+    use bridge_daemons::pq_gov::{self, Backing};
+    let f = file();
+    let chain_id = f["rand_chain_id"].as_u64().unwrap();
+    let guardians = guardians(&f);
+    let keys: Vec<PqKey> = f["pq_guardians"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| PqKey::from_seed_hex(g["seed"].as_str().unwrap()).unwrap())
+        .collect();
+    let g = &f["governance"];
+    let word = |v: &Value| -> [u8; 32] {
+        hex::decode(v.as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    };
+    let backing = |v: &Value| Backing {
+        chain: v["chain"].as_u64().unwrap() as u16,
+        token: word(&v["token"]),
+        decimals: v["decimals"].as_u64().unwrap() as u8,
+    };
+
+    let r = &g["register"];
+    let register = pq_gov::register_message(
+        chain_id,
+        r["list_nonce"].as_u64().unwrap(),
+        r["name"].as_str().unwrap(),
+        r["symbol"].as_str().unwrap(),
+        &word(&r["salt"]),
+        &backing(r),
+    )
+    .unwrap();
+    let l = &g["list"];
+    let list = pq_gov::list_message(
+        chain_id,
+        l["list_nonce"].as_u64().unwrap(),
+        l["token_index"].as_u64().unwrap() as u32,
+        &backing(l),
+    );
+    let unpause = pq_gov::unpause_message(chain_id, g["unpause"]["pause_nonce"].as_u64().unwrap());
+    let pause = pq_gov::pause_message(chain_id, g["pause"]["pause_nonce"].as_u64().unwrap());
+
+    for (name, message) in [
+        ("register", &register),
+        ("list", &list),
+        ("unpause", &unpause),
+        ("pause", &pause),
+    ] {
+        assert_eq!(
+            hex::encode(message),
+            g[name]["message"].as_str().unwrap(),
+            "{name} layout"
+        );
+    }
+    assert_eq!(list.len(), 21 + 8 + 8 + 39, "the list tail is 39 bytes");
+
+    for (name, message) in [
+        ("register", &register),
+        ("list", &list),
+        ("unpause", &unpause),
+    ] {
+        let quorum = pq_gov::sign_quorum(message, &guardians, &keys).unwrap();
+        assert_eq!(
+            quorum,
+            super_list(&g[name]["pq_signatures"]),
+            "{name} quorum"
+        );
+        assert_eq!(pq::check_raw(&quorum, &guardians, message), Ok(()));
+        // A quorum for one message authorises no other.
+        assert_eq!(
+            pq::check_raw(&quorum, &guardians, &pause),
+            Err(PqError::PqBadSignature)
+        );
+    }
+    // Four of six is refused; so is a stranger's seed.
+    assert!(pq_gov::sign_quorum(&list, &guardians, &keys[..4]).is_err());
+    assert!(pq_gov::sign_quorum(
+        &list,
+        &guardians,
+        &[PqKey::from_seed_hex(&"77".repeat(32)).unwrap()]
+    )
+    .is_err());
+
+    // The pause key signs the pause message, and only that.
+    let pause_key = PqKey::from_seed_hex(g["pause"]["pause_key_seed"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(pause_key.public_key()),
+        g["pause"]["pause_key"].as_str().unwrap()
+    );
+    assert_eq!(
+        hex::encode(pause_key.sign_raw(&pause)),
+        g["pause"]["signature"].as_str().unwrap()
+    );
+    assert!(
+        !pq::verify_raw(
+            &pause_key.public_key(),
+            &unpause,
+            &pause_key.sign_raw(&pause)
+        ),
+        "a pause signature cannot unpause"
+    );
+}
+
+fn super_list(v: &Value) -> Vec<PqSignature> {
+    list(v)
+}

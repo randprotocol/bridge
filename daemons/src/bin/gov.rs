@@ -38,6 +38,87 @@ struct CurrentSet {
     current_guardians: Vec<String>,
 }
 
+#[derive(Args)]
+struct PqQuorumArgs {
+    #[arg(long)]
+    rand_chain_id: u64,
+    /// The ledger's current nonce for this message kind (`list_nonce` or `pause_nonce`).
+    #[arg(long)]
+    nonce: u64,
+    /// `{"pq_guardians": ["<hex>", …]}` — the chain's PQ guardian set.
+    #[arg(long)]
+    pq_guardians_file: PathBuf,
+    /// Environment variables holding 32-byte PQ seeds (a quorum or more), comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    seed_envs: Vec<String>,
+    /// Where to write `[{"index", "signature"}]`.
+    #[arg(long)]
+    out: PathBuf,
+}
+
+#[derive(Args)]
+struct BackingArgs {
+    /// Bridge chain id of the coin: 2 Ethereum, 3 BSC, 4 Tron, 5 Solana.
+    #[arg(long)]
+    chain: u16,
+    /// The coin's 32-byte wire form, hex (docs/architecture.md §10.1).
+    #[arg(long)]
+    token: String,
+    /// The coin's decimals on its own chain.
+    #[arg(long)]
+    decimals: u8,
+}
+
+impl BackingArgs {
+    fn backing(&self) -> Result<bridge_daemons::pq_gov::Backing> {
+        if !(2..=5).contains(&self.chain) {
+            bail!("--chain must be 2, 3, 4 or 5");
+        }
+        Ok(bridge_daemons::pq_gov::Backing {
+            chain: self.chain,
+            token: bridge_daemons::config::hex32(&self.token)?,
+            decimals: self.decimals,
+        })
+    }
+}
+
+fn pq_guardians(path: &PathBuf) -> Result<Vec<Vec<u8>>> {
+    let file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+    )?;
+    file["pq_guardians"]
+        .as_array()
+        .ok_or_else(|| anyhow!("no pq_guardians array"))?
+        .iter()
+        .map(|k| hex::decode(k.as_str().unwrap_or_default()).context("pq_guardians entry"))
+        .collect()
+}
+
+/// Signs `message` with the quorum the arguments name and writes pq.json.
+fn sign_governance(what: &str, message: &[u8], args: &PqQuorumArgs) -> Result<()> {
+    let guardians = pq_guardians(&args.pq_guardians_file)?;
+    let signers = args
+        .seed_envs
+        .iter()
+        .map(|v| bridge_daemons::pq::PqKey::from_seed_hex(&take_env(v)?))
+        .collect::<Result<Vec<_>>>()?;
+    let quorum = bridge_daemons::pq_gov::sign_quorum(message, &guardians, &signers)?;
+    std::fs::write(&args.out, serde_json::to_vec(&quorum)?)
+        .with_context(|| format!("writing {}", args.out.display()))?;
+    println!("{what}");
+    println!(
+        "message    0x{}  ({} bytes)",
+        hex::encode(message),
+        message.len()
+    );
+    println!(
+        "signed by  PQ guardians {:?} -> {}",
+        quorum.iter().map(|s| s.index).collect::<Vec<_>>(),
+        args.out.display()
+    );
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum Command {
     Rotate {
@@ -83,6 +164,47 @@ enum Command {
         /// Environment variables holding 32-byte PQ seeds (a quorum or more), comma-separated.
         #[arg(long, value_delimiter = ',')]
         seed_envs: Vec<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Rand-only: a PQ guardian quorum over `ListBacking` (spec/PQ-COSIGNATURE.md §8).
+    PqList {
+        #[command(flatten)]
+        quorum: PqQuorumArgs,
+        /// The bridged token's registry index on Rand.
+        #[arg(long)]
+        token_index: u32,
+        #[command(flatten)]
+        backing: BackingArgs,
+    },
+    /// Rand-only: a PQ guardian quorum over `RegisterBridgedToken` (a new token + its first backing).
+    PqRegister {
+        #[command(flatten)]
+        quorum: PqQuorumArgs,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        symbol: String,
+        /// 32-byte salt, hex.
+        #[arg(long)]
+        salt: String,
+        #[command(flatten)]
+        backing: BackingArgs,
+    },
+    /// Rand-only: a PQ guardian quorum to UNPAUSE minting.
+    PqUnpause {
+        #[command(flatten)]
+        quorum: PqQuorumArgs,
+    },
+    /// Rand-only: the single pause key's signature to PAUSE minting. It cannot unpause.
+    Pause {
+        #[arg(long)]
+        rand_chain_id: u64,
+        /// The ledger's current `pause_nonce` (rand_getBridgeState).
+        #[arg(long)]
+        nonce: u64,
+        #[arg(long, default_value = "RAND_BRIDGE_PAUSE_KEY_SEED")]
+        seed_env: String,
         #[arg(long)]
         out: PathBuf,
     },
@@ -288,6 +410,63 @@ async fn main() -> Result<()> {
                 quorum.iter().map(|s| s.index).collect::<Vec<_>>(),
                 out.display()
             );
+        }
+        Command::PqList {
+            quorum,
+            token_index,
+            backing,
+        } => {
+            let b = backing.backing()?;
+            let m = bridge_daemons::pq_gov::list_message(
+                quorum.rand_chain_id,
+                quorum.nonce,
+                token_index,
+                &b,
+            );
+            sign_governance(&format!("ListBacking: token {token_index} += chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &m, &quorum)?;
+        }
+        Command::PqRegister {
+            quorum,
+            name,
+            symbol,
+            salt,
+            backing,
+        } => {
+            let b = backing.backing()?;
+            let m = bridge_daemons::pq_gov::register_message(
+                quorum.rand_chain_id,
+                quorum.nonce,
+                &name,
+                &symbol,
+                &bridge_daemons::config::hex32(&salt)?,
+                &b,
+            )?;
+            sign_governance(&format!("RegisterBridgedToken: {name} ({symbol}), first backing chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &m, &quorum)?;
+        }
+        Command::PqUnpause { quorum } => {
+            let m = bridge_daemons::pq_gov::unpause_message(quorum.rand_chain_id, quorum.nonce);
+            sign_governance(
+                &format!(
+                    "UNPAUSE minting on Rand chain {}, pause_nonce {}",
+                    quorum.rand_chain_id, quorum.nonce
+                ),
+                &m,
+                &quorum,
+            )?;
+        }
+        Command::Pause {
+            rand_chain_id,
+            nonce,
+            seed_env,
+            out,
+        } => {
+            let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(&seed_env)?)?;
+            let m = bridge_daemons::pq_gov::pause_message(rand_chain_id, nonce);
+            std::fs::write(&out, hex::encode(key.sign_raw(&m)))
+                .with_context(|| format!("writing {}", out.display()))?;
+            println!("PAUSE minting on Rand chain {rand_chain_id}, pause_nonce {nonce}");
+            println!("message    0x{}", hex::encode(&m));
+            println!("signature  -> {}", out.display());
         }
         Command::PqPublicKey { seed_env } => {
             use sha2::{Digest, Sha256};

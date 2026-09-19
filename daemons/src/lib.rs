@@ -15,6 +15,7 @@ pub mod governance;
 pub mod guardian;
 pub mod message;
 pub mod pq;
+pub mod pq_gov;
 pub mod relayer;
 pub mod rpc;
 pub mod sources;

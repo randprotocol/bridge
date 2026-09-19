@@ -106,6 +106,53 @@ fn render() -> String {
         case("signed_over_another_mu", "PqBadSignature", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3, 4], &message(TEST_CHAIN_ID, &other_mu))),
     ];
 
+    // The Rand-only governance messages (spec §8): fixed big-endian layouts,
+    // written out here by hand so the daemons' builders are checked against
+    // an independent construction.
+    let gov = |domain: &[u8], nonce: u64, tail: &[u8]| {
+        let mut m = domain.to_vec();
+        m.extend_from_slice(&TEST_CHAIN_ID.to_be_bytes());
+        m.extend_from_slice(&nonce.to_be_bytes());
+        m.extend_from_slice(tail);
+        m
+    };
+    let usdt: [u8; 32] = {
+        let mut w = [0u8; 32];
+        w[12..].copy_from_slice(&hex::decode("dac17f958d2ee523a2206206994597c13d831ec7").unwrap());
+        w
+    };
+    let sol_usdc: [u8; 32] = hex::decode("c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61").unwrap().try_into().unwrap();
+    let mut register_tail = vec![4u8];
+    register_tail.extend_from_slice(b"zUSD");
+    register_tail.push(4);
+    register_tail.extend_from_slice(b"zUSD");
+    register_tail.extend_from_slice(&[0x5a; 32]); // salt
+    register_tail.extend_from_slice(&2u16.to_be_bytes());
+    register_tail.extend_from_slice(&usdt);
+    register_tail.push(6);
+    let mut list_tail = 1u32.to_be_bytes().to_vec();
+    list_tail.extend_from_slice(&5u16.to_be_bytes());
+    list_tail.extend_from_slice(&sol_usdc);
+    list_tail.push(6);
+    let pause_seed = keccak256(b"rand-bridge-pq-test-pause-key");
+    let pause_key = dilithium2::Keypair::generate(Some(&pause_seed)).expect("seed");
+    let pause_m = gov(b"rand-bridge-pause-1", 0, &[]);
+    let quorum_over = |m: &[u8]| sigs(&[0, 1, 2, 3, 4], m);
+    let register_m = gov(b"rand-bridge-pq-register-1", 0, &register_tail);
+    let list_m = gov(b"rand-bridge-pq-list-1", 1, &list_tail);
+    let unpause_m = gov(b"rand-bridge-pq-unpause-1", 1, &[]);
+    let governance = json!({
+        "register": { "list_nonce": 0, "name": "zUSD", "symbol": "zUSD", "salt": hex::encode([0x5a; 32]),
+                      "chain": 2, "token": hex::encode(usdt), "decimals": 6,
+                      "message": hex::encode(&register_m), "pq_signatures": quorum_over(&register_m) },
+        "list": { "list_nonce": 1, "token_index": 1, "chain": 5, "token": hex::encode(sol_usdc), "decimals": 6,
+                  "message": hex::encode(&list_m), "pq_signatures": quorum_over(&list_m) },
+        "unpause": { "pause_nonce": 1, "message": hex::encode(&unpause_m), "pq_signatures": quorum_over(&unpause_m) },
+        "pause": { "pause_nonce": 0, "pause_key_seed": hex::encode(pause_seed),
+                   "pause_key": hex::encode(pause_key.public.to_bytes()),
+                   "message": hex::encode(&pause_m), "signature": hex::encode(pause_key.sign(&pause_m)) },
+    });
+
     let guardians: Vec<Value> = (0..N as u8)
         .map(|i| json!({ "index": i, "seed": hex::encode(seed(i)), "public_key": hex::encode(keypair(i).public.to_bytes()) }))
         .collect();
@@ -118,6 +165,7 @@ fn render() -> String {
         "pq_guardians": guardians,
         "bodies": bodies,
         "cases": cases,
+        "governance": governance,
     });
     let mut out = serde_json::to_string_pretty(&file).expect("json");
     out.push('\n');

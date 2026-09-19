@@ -67,3 +67,46 @@ without `PAUSER`, or with a guardian key / emitter that appears in a testnet dep
 - Guardian-set rotation has no tooling yet; it is a governance message signed by the current set
   (`spec/ATTESTATION.md` §3.6) and must be built before the first rotation is needed.
 - `withdrawFees` / `withdraw-fees` collects the 10 bps; it can never reach custody.
+
+## 4. Addendum (2026-09-19, evening): what changed after the deployment
+
+The runbook above was written before the endpoints were deployed the same day. The launch now
+runs in this order; each step that signs or broadcasts needs the owner's explicit go-ahead.
+
+1. **Rotate the guardian set on the four endpoints** (set 0 → set 1): `rand-bridge-gov rotate`
+   (signed by five of the current six), `verify`, then the SAME file to `submit-evm` (Ethereum, BSC),
+   `submit-tron`, and `rand-bridge-cli guardian-set-upgrade` (Solana). The file is a bearer
+   instrument — anyone holding it can apply it — so it is produced when the rotation is meant to
+   happen, not before.
+2. **Wait 86,400 s**: the superseded set keeps verifying transfers for a day.
+3. **Chain 14 is cut** (fullnode `feat/rpl`: transaction binding, per-backing mint cap and pause,
+   forward timestamp bound, Dilithium2 co-signature, fresh validator keys). Its genesis carries the
+   `bridge` section of `docs/mainnet-deployment.md` — `guardians` = set 0, `pq_guardians` = the
+   set-1 operators' Dilithium2 keys, the pause key — and **no token**.
+4. **Rotate Rand**: the same rotation file plus `rand-bridge-gov cosign` →
+   `rand bridge-rotate @rotation.hex --pq @pq.json`, so all five chains are on set 1.
+5. **Deploy zUSD by transaction** from the faucet-funded deployer: one `RegisterBridgedToken`
+   (zUSD + its first backing, `list_nonce` 0) and six `ListBacking` (`list_nonce` 1..6), each
+   authorised by a PQ guardian quorum over the fixed layouts of `spec/PQ-COSIGNATURE.md` §8:
+
+   ```sh
+   G="--rand-chain-id 14 --pq-guardians-file ~/.rand-bridge/mainnet-pq-set1/public.json \
+      --seed-envs NEW_GUARDIAN1_PQ_SEED,NEW_GUARDIAN2_PQ_SEED,NEW_GUARDIAN3_PQ_SEED,NEW_GUARDIAN4_PQ_SEED,NEW_GUARDIAN5_PQ_SEED"
+   rand-bridge-gov pq-register $G --nonce 0 --name zUSD --symbol zUSD --salt <32-byte hex> \
+       --chain 2 --decimals 6  --token 000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7 --out zusd-0-register.json
+   rand-bridge-gov pq-list $G --nonce 1 --token-index <zUSD index> --chain 2 --decimals 6  --token 000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --out zusd-1.json   # Ethereum USDC
+   rand-bridge-gov pq-list $G --nonce 2 --token-index <zUSD index> --chain 3 --decimals 18 --token 00000000000000000000000055d398326f99059ff775485246999027b3197955 --out zusd-2.json   # BSC USDT
+   rand-bridge-gov pq-list $G --nonce 3 --token-index <zUSD index> --chain 3 --decimals 18 --token 0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d --out zusd-3.json   # BSC USDC
+   rand-bridge-gov pq-list $G --nonce 4 --token-index <zUSD index> --chain 4 --decimals 6  --token 000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c --out zusd-4.json   # Tron USDT
+   rand-bridge-gov pq-list $G --nonce 5 --token-index <zUSD index> --chain 5 --decimals 6  --token ce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264 --out zusd-5.json   # Solana USDT
+   rand-bridge-gov pq-list $G --nonce 6 --token-index <zUSD index> --chain 5 --decimals 6  --token c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61 --out zusd-6.json   # Solana USDC
+   ```
+
+   Nonces are the ledger's `list_nonce` at the time (read `rand_getBridgeState`); a quorum for one
+   message authorises no other. Salt and the zUSD index come from the fullnode at the cut.
+6. **Only then `setToken`** on the endpoints, small caps first (list on Rand FIRST, whitelist
+   SECOND — the other order strands a lock behind `UnlistedToken`), start the guardians
+   (`GUARDIAN{i}_PQ_SEED` mapped from `NEW_GUARDIAN{i}_PQ_SEED`, `rand.chain_id = 14`) and a relayer,
+   one round trip per chain from the tester wallets, `rand-bridge-audit`, then raise the caps after
+   the external audit. An emergency stop on Rand is `rand-bridge-gov pause` (the single pause key);
+   resuming takes `pq-unpause` (a guardian quorum).

@@ -48,16 +48,25 @@ impl PqKey {
 
     /// Deterministic, so the vectors reproduce byte for byte.
     pub fn sign(&self, rand_chain_id: u64, mu: &[u8; 32]) -> Vec<u8> {
-        self.keypair.sign(&message(rand_chain_id, mu)).to_vec()
+        self.sign_raw(&message(rand_chain_id, mu))
+    }
+
+    /// Signs `message` as it stands: for the governance layouts of `pq_gov`.
+    pub fn sign_raw(&self, message: &[u8]) -> Vec<u8> {
+        self.keypair.sign(message).to_vec()
     }
 }
 
 pub fn verify(public_key: &[u8], rand_chain_id: u64, mu: &[u8; 32], signature: &[u8]) -> bool {
+    verify_raw(public_key, &message(rand_chain_id, mu), signature)
+}
+
+pub fn verify_raw(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     if signature.len() != SIGNATURE_LEN {
         return false;
     }
     match dilithium2::PublicKey::from_bytes(public_key) {
-        Ok(pk) => pk.verify(&message(rand_chain_id, mu), signature),
+        Ok(pk) => pk.verify(message, signature),
         Err(_) => false,
     }
 }
@@ -92,6 +101,15 @@ pub fn check(
     rand_chain_id: u64,
     mu: &[u8; 32],
 ) -> Result<(), PqError> {
+    check_raw(list, pq_guardians, &message(rand_chain_id, mu))
+}
+
+/// The five rules over an arbitrary message.
+pub fn check_raw(
+    list: &[PqSignature],
+    pq_guardians: &[Vec<u8>],
+    message: &[u8],
+) -> Result<(), PqError> {
     let n = pq_guardians.len();
     if list.len() < quorum(n) || list.len() > n {
         return Err(PqError::PqNoQuorum);
@@ -112,12 +130,7 @@ pub fn check(
         }
     }
     for (s, bytes) in list.iter().zip(&decoded) {
-        if !verify(
-            &pq_guardians[usize::from(s.index)],
-            rand_chain_id,
-            mu,
-            bytes,
-        ) {
+        if !verify_raw(&pq_guardians[usize::from(s.index)], message, bytes) {
             return Err(PqError::PqBadSignature);
         }
     }
@@ -132,12 +145,20 @@ pub fn assemble(
     rand_chain_id: u64,
     mu: &[u8; 32],
 ) -> Option<Vec<PqSignature>> {
+    assemble_raw(found, pq_guardians, &message(rand_chain_id, mu))
+}
+
+pub fn assemble_raw(
+    found: &[(u8, Vec<u8>)],
+    pq_guardians: &[Vec<u8>],
+    message: &[u8],
+) -> Option<Vec<PqSignature>> {
     let mut by_index: BTreeMap<u8, &Vec<u8>> = BTreeMap::new();
     for (index, signature) in found {
         let Some(key) = pq_guardians.get(usize::from(*index)) else {
             continue;
         };
-        if verify(key, rand_chain_id, mu, signature) {
+        if verify_raw(key, message, signature) {
             by_index.entry(*index).or_insert(signature);
         }
     }
