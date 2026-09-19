@@ -13,7 +13,7 @@ read it before touching anything there, it is worked on by many sessions in para
   deploy tooling and the fullnode bridge glue) landed as doc/tooling follow-ups in commit
   `e44b7b6` and filed the issue trackers below. Both are internal — mainnet still needs an
   external audit (bridge issue #4).
-- **All test suites green**: `cd evm && forge test` (43), `cd solana && cargo test` (40 incl.
+- **All test suites green**: `cd evm && forge test` (53), `cd solana && cargo test` (41 incl.
   solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (50),
   `cd tools/vectors && cargo run --release -- --check` (both vector copies byte-identical).
 - **Progress later the same day**: fullnode issue #1 is fixed and closed (fullnode `544926c`:
@@ -48,6 +48,13 @@ read it before touching anything there, it is worked on by many sessions in para
   on-chain set-size bound, no Solana `SetPauser`, `Lock` sequence griefing, sub-unit dust).
   Suites: forge 43, solana 40, fullnode bridge 50, vectors OK. Licence is now GPL-3.0-only
   (`7343e2c`), matching the fullnode.
+- **Protocol fee added 2026-09-19** (user decision: 10 bps in USDT/USDC each way, plus a RAND fee
+  on top for validator infrastructure). The 10 bps is implemented on EVM/Tron and Solana (forge
+  53, solana 41 tests; the legacy tests run fee-free via `setProtocolFee(0)` in their setup). The
+  **RAND surcharge is not implemented**: it is a fullnode consensus change (`gas::fee_floor`, flat
+  surcharge on `BridgeAttest`/`BridgeBurn`; the whole fee already goes to the block proposer when
+  aggregation is off; no fork mechanism exists, so it ships with the chain cut that first carries
+  a `bridge` genesis section). Amount undecided; on deposits the *relayer* pays it, not the user.
 - **Testnet deployer keys exist** (2026-09-19): `deploy/.env` (mode 600, git-ignored) holds one
   EVM key for Sepolia + BSC testnet (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`), a Tron key
   (`TYToFBuiEEPFasMc7NBxF54KRkQX7o79nh`) and points at the Solana devnet deployer below; addresses
@@ -85,6 +92,12 @@ Parity across all verifiers is the security property; change these everywhere or
   endpoint actually holds; locks measure the received balance delta (fee-on-transfer rejected),
   and EVM/Tron releases measure the paid delta and **ignore the token's return value** (Tron USDT
   returns `false` from a successful `transfer`).
+- **Protocol fee** (10 bps default, cap 100, `docs/architecture.md` §3.5) is an endpoint-side skim
+  in the bridged token, never in the attestation: a lock attests and custodies the **net** amount
+  (custody == bridged supply stays exact), a release takes it from the gross amount **before** the
+  relayer fee (`relayer = min(fee, amount - protocol fee)`, so it can neither be dodged nor brick
+  a release). Fees live in `accruedFees` / `accrued_fees`, outside custody; `withdrawFees` can
+  never reach custody. Same arithmetic on EVM and Solana — change both or neither.
 - Guardian keys and the Rand emitter are per network: nothing in an attestation names testnet or
   mainnet.
 - Guardian-set size is bounded by transport, not on-chain: Solana's 1,232-byte transaction caps

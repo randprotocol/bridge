@@ -80,6 +80,18 @@ pub enum BridgeInstruction {
     },
     /// Second half of the two-step admin handover.
     AcceptAdmin,
+    /// Set the protocol fee rate. Admin only, at most
+    /// `MAX_PROTOCOL_FEE_BPS`.
+    SetProtocolFee {
+        /// Basis points of the bridged amount, taken on lock and release.
+        bps: u16,
+    },
+    /// Pay accrued protocol fees out of the custody token account. Admin
+    /// only; bounded by `TokenRegistry::accrued_fees`, never custody.
+    WithdrawFees {
+        /// Amount in the mint's own units.
+        amount: u64,
+    },
 }
 
 /// `Initialize`.
@@ -337,7 +349,46 @@ pub fn accept_admin(program: &Pubkey, pending_admin: &Pubkey) -> Instruction {
     role_instruction(program, pending_admin, BridgeInstruction::AcceptAdmin)
 }
 
-/// The four role instructions share one account list: the signer whose
+/// `SetProtocolFee`: `[signer]` admin, `[writable]` config PDA.
+pub fn set_protocol_fee(program: &Pubkey, admin: &Pubkey, bps: u16) -> Instruction {
+    role_instruction(program, admin, BridgeInstruction::SetProtocolFee { bps })
+}
+
+/// `WithdrawFees`.
+///
+/// Accounts:
+/// 0. `[signer]` admin — must equal `Config::admin`.
+/// 1. `[]` config PDA.
+/// 2. `[]` the SPL mint.
+/// 3. `[writable]` token registry PDA `["token", mint]`.
+/// 4. `[writable]` custody PDA `["custody", mint]`.
+/// 5. `[]` custody authority PDA `["authority"]`.
+/// 6. `[writable]` destination token account for the mint.
+/// 7. `[]` SPL token program.
+pub fn withdraw_fees(
+    program: &Pubkey,
+    admin: &Pubkey,
+    mint: &Pubkey,
+    destination: &Pubkey,
+    amount: u64,
+) -> Instruction {
+    Instruction::new_with_borsh(
+        *program,
+        &BridgeInstruction::WithdrawFees { amount },
+        vec![
+            AccountMeta::new_readonly(*admin, true),
+            AccountMeta::new_readonly(config_pda(program).0, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new(token_pda(program, mint).0, false),
+            AccountMeta::new(custody_pda(program, mint).0, false),
+            AccountMeta::new_readonly(authority_pda(program).0, false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+    )
+}
+
+/// The role instructions share one account list: the signer whose
 /// authority is being exercised, and the config it mutates.
 fn role_instruction(program: &Pubkey, signer: &Pubkey, ix: BridgeInstruction) -> Instruction {
     Instruction::new_with_borsh(
@@ -411,6 +462,8 @@ mod tests {
                 to: Pubkey::new_from_array([6u8; 32]),
             },
             BridgeInstruction::AcceptAdmin,
+            BridgeInstruction::SetProtocolFee { bps: 10 },
+            BridgeInstruction::WithdrawFees { amount: 11 },
         ];
         for (tag, ix) in all.iter().enumerate() {
             let bytes = borsh::to_vec(ix).expect("serializes");

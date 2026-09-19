@@ -83,6 +83,9 @@ contract RandBridgeTest is Test {
         bridge.setToken(address(t6), true, 0, 0);
         bridge.setToken(address(t8), true, 0, 0);
         bridge.setToken(address(t18), true, 0, 0);
+        // Everything outside the "protocol fee" section exercises exact
+        // amounts, so it runs fee-free; that section turns the fee back on.
+        bridge.setProtocolFee(0);
         vm.stopPrank();
 
         _fund(t6, 1_000_000_000);
@@ -532,6 +535,129 @@ contract RandBridgeTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // protocol fee
+    // ------------------------------------------------------------------
+
+    function _feeOn() internal {
+        vm.prank(admin);
+        bridge.setProtocolFee(10);
+    }
+
+    function test_protocol_fee_defaults_to_10_bps() public {
+        EthereumRandBridge fresh = new EthereumRandBridge(admin, pauser, randEmitter, guardians);
+        assertEq(fresh.protocolFeeBps(), 10);
+    }
+
+    function test_protocol_fee_on_lock_is_skimmed_before_custody_and_attestation() public {
+        _feeOn();
+
+        vm.expectEmit(true, true, true, true);
+        emit Locked(address(t6), user, bytes32(uint256(1)), 999_000, 99_900_000, 0);
+        vm.prank(user);
+        bridge.lock(address(t6), 1_000_000, bytes32(uint256(1)), 0, 0); // 1 USDT
+
+        assertEq(t6.balanceOf(address(bridge)), 1_000_000, "the gross amount was pulled");
+        assertEq(bridge.custody(address(t6)), 999_000, "custody backs exactly what was attested");
+        assertEq(bridge.accruedFees(address(t6)), 1_000, "10 bps");
+    }
+
+    function test_protocol_fee_on_lock_18_decimals_stays_on_the_attested_grid() public {
+        _feeOn();
+        vm.prank(user);
+        bridge.lock(address(t18), 1 ether + 12_345, bytes32(uint256(1)), 0, 0);
+
+        // Sub-grid dust is never pulled; the net re-normalises exactly.
+        assertEq(t18.balanceOf(address(bridge)), 1 ether);
+        assertEq(bridge.custody(address(t18)), 0.999 ether);
+        assertEq(bridge.accruedFees(address(t18)), 0.001 ether);
+        assertEq(bridge.custody(address(t18)) % 1e10, 0, "custody is a whole number of attested units");
+    }
+
+    function test_protocol_fee_on_lock_relayer_fee_is_bounded_by_the_net_amount() public {
+        _feeOn();
+        vm.prank(user);
+        vm.expectRevert(IRandBridge.FeeExceedsAmount.selector);
+        bridge.lock(address(t8), 1000, bytes32(uint256(1)), 1000, 0); // net is 999
+    }
+
+    function test_protocol_fee_on_release() public {
+        _lock8(1000);
+        _feeOn();
+
+        bridge.release(_fromRand(_releasePayload(address(t8), 1000, 10)));
+
+        assertEq(t8.balanceOf(recipient), 989, "amount - protocol fee - relayer fee");
+        assertEq(t8.balanceOf(address(this)), 10, "relayer fee in full");
+        assertEq(bridge.accruedFees(address(t8)), 1, "10 bps of 1000");
+        assertEq(bridge.custody(address(t8)), 0, "the whole attested amount left custody");
+        assertEq(t8.balanceOf(address(bridge)), 1, "only the accrued fee remains");
+    }
+
+    function test_protocol_fee_on_release_comes_before_the_relayer_fee() public {
+        // A burn that names its whole amount as the relayer fee cannot be
+        // used to dodge the protocol fee, and cannot brick the release.
+        _lock8(1000);
+        _feeOn();
+
+        bridge.release(_fromRand(_releasePayload(address(t8), 1000, 1000)));
+
+        assertEq(t8.balanceOf(address(this)), 999, "relayer gets what is left");
+        assertEq(t8.balanceOf(recipient), 0);
+        assertEq(bridge.accruedFees(address(t8)), 1);
+    }
+
+    function test_protocol_fee_rounds_down_to_zero_on_tiny_releases() public {
+        _lock8(1000);
+        _feeOn();
+        bridge.release(_fromRand(_releasePayload(address(t8), 999, 0)));
+        assertEq(t8.balanceOf(recipient), 999);
+        assertEq(bridge.accruedFees(address(t8)), 0);
+    }
+
+    function test_setProtocolFee_is_admin_only_and_capped() public {
+        vm.expectRevert(IRandBridge.NotAdmin.selector);
+        bridge.setProtocolFee(5);
+
+        vm.startPrank(admin);
+        vm.expectRevert(IRandBridge.ProtocolFeeTooHigh.selector);
+        bridge.setProtocolFee(101);
+        bridge.setProtocolFee(100);
+        vm.stopPrank();
+        assertEq(bridge.protocolFeeBps(), 100);
+    }
+
+    function test_withdrawFees_pays_only_accrued_fees_never_custody() public {
+        _feeOn();
+        _lock8(100_000); // fee 100, custody 99_900
+        address treasury = address(0x7EA5);
+
+        vm.expectRevert(IRandBridge.NotAdmin.selector);
+        bridge.withdrawFees(address(t8), treasury, 100);
+
+        vm.startPrank(admin);
+        vm.expectRevert(IRandBridge.ZeroAddress.selector);
+        bridge.withdrawFees(address(t8), address(0), 100);
+        vm.expectRevert(IRandBridge.InsufficientFees.selector);
+        bridge.withdrawFees(address(t8), treasury, 101);
+        bridge.withdrawFees(address(t8), treasury, 60);
+        vm.stopPrank();
+
+        assertEq(t8.balanceOf(treasury), 60);
+        assertEq(bridge.accruedFees(address(t8)), 40);
+        assertEq(bridge.custody(address(t8)), 99_900, "custody untouched");
+    }
+
+    function test_withdrawFees_works_while_paused() public {
+        _feeOn();
+        _lock8(100_000);
+        vm.prank(pauser);
+        bridge.pause();
+        vm.prank(admin);
+        bridge.withdrawFees(address(t8), address(0x7EA5), 100);
+        assertEq(t8.balanceOf(address(0x7EA5)), 100);
+    }
+
+    // ------------------------------------------------------------------
     // guardian rotation
     // ------------------------------------------------------------------
 
@@ -787,8 +913,10 @@ contract RandBridgeTest is Test {
 
     function test_fork_guard_eth_and_not_tron() public {
         TronRandBridge tron = new TronRandBridge(admin, pauser, randEmitter, guardians);
-        vm.prank(admin);
+        vm.startPrank(admin);
         tron.setToken(address(t6), true, 0, 0);
+        tron.setProtocolFee(0);
+        vm.stopPrank();
         vm.prank(user);
         t6.approve(address(tron), type(uint256).max);
 

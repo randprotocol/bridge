@@ -218,6 +218,36 @@ amount above `u64::MAX` (`AmountTooLarge` on the EVM, `AmountOverflow` on Solana
 anything: a lock Rand could never mint would sit in custody with no burn able to release it. At 8
 decimals the bound is about 1.8 x 10^11 whole tokens per lock.
 
+### 3.5 Protocol fee
+
+Every endpoint takes a protocol fee in the bridged token itself: **10 bps on the way in and 10 bps
+on the way out** (`protocolFeeBps` / `Config::protocol_fee_bps`, admin-settable, hard-capped at
+100 bps because the endpoints cannot be upgraded). It is an endpoint-side skim and deliberately
+not part of the attestation format, so no verifier rule changes and the verifiers stay in parity:
+
+```
+lock:     pulled = amount less sub-grid dust          (what leaves the user)
+          locked, attested = normalise(pulled - pulled * bps / 10_000)
+          protocol fee = pulled - locked               custody += locked
+release:  amount = denormalise(attested)               custody -= amount
+          protocol fee = amount * bps / 10_000
+          relayer = min(relayer_fee, amount - protocol fee)
+          recipient = amount - protocol fee - relayer
+```
+
+On a lock the *net* amount is attested and minted, so custody still equals the bridged supply on
+Rand exactly. On a release the protocol fee is taken from the gross amount before the relayer
+fee: a burn that names its whole amount as the relayer fee cannot dodge it, and cannot make the
+release impossible (the burn on Rand is already final). Fees accrue per token outside the custody
+counter (`accruedFees[token]` / `TokenRegistry::accrued_fees`, held in the same contract / token
+account) and leave only through the admin's `withdrawFees` / `WithdrawFees`, which is bounded by
+the accrued amount, can never reach custody, and is not gated by the pause. A round trip of `x`
+costs about 20 bps of `x` plus the relayer fee; amounts small enough that `x * bps / 10_000`
+rounds to zero pay nothing.
+
+The RAND-denominated fee on `BridgeAttest` / `BridgeBurn` is separate and lives in the fullnode
+(`gas::fee_floor`, §8.3).
+
 ---
 
 ## 4. Message lifecycles
@@ -379,12 +409,13 @@ day's usage. Caps are in the token's native units; 0 means unlimited.
 
 ### 6.4 `lock`
 
-1. fork guard, not paused, token enabled, `randRecipient != 0`, `relayerFee <= amount`
-2. normalise `amount`; `attested != 0`; normalise `relayerFee` the same way (it rounds down with
-   the amount, so it stays `<= attested`)
-3. pull `locked` and measure the balance delta; a mismatch reverts `TransferAmountMismatch`, so a
+1. fork guard, not paused, token enabled, `randRecipient != 0`
+2. `_lockAmounts`: normalise `amount` into `pulled`, take the protocol fee (§3.5), normalise the
+   net into `locked` / `attested`; `relayerFee <= locked`; `attested != 0`; normalise `relayerFee`
+   the same way (it rounds down with the amount, so it stays `<= attested`)
+3. pull `pulled` and measure the balance delta; a mismatch reverts `TransferAmountMismatch`, so a
    fee-on-transfer token is rejected rather than mis-accounted
-4. `custody[token] += locked`
+4. `custody[token] += locked`; `accruedFees[token] += pulled - locked`
 5. emit `MessagePublished(sequence, nonce, consistencyLevel, payload)` and `Locked(...)` with
    `to_chain = 1`, `token_chain = this chain`; `sequence += 1`
 
@@ -400,7 +431,10 @@ Steps as in the table in Section 5. Two decoding rules are specific to EVM-famil
 reverts `BadTokenAddress` or `BadRecipient`, and a zero recipient reverts `ZeroRecipient`. Attested
 dust that denormalises to zero native units reverts `ZeroAmount` rather than consuming the digest
 for nothing, which leaves the burn re-submittable if the token is later reconfigured. The daily
-window is `block.timestamp / 1 days`.
+window is `block.timestamp / 1 days`. The whole attested amount leaves custody; the protocol fee
+(§3.5) moves to `accruedFees`, the relayer fee and the remainder are paid through `_push`, which
+ignores the token's return value and requires the contract's balance to fall by exactly the amount
+paid (Tron USDT returns `false` from a successful `transfer`).
 
 ### 6.6 Deployment
 
@@ -463,6 +497,8 @@ SPL-owned, authority equal to the authority PDA, mint equal to the named mint.
 | `Unpause` | admin | |
 | `TransferAdmin { to }` | admin | `to == default` cancels |
 | `AcceptAdmin` | pending admin | |
+| `SetProtocolFee { bps }` | admin | at most 100 bps (§3.5); `Initialize` sets 10 |
+| `WithdrawFees { amount }` | admin | pays `accrued_fees` out of the custody token account; never custody; allowed while paused |
 
 `Initialize` has no config to check a role against, so it authenticates against the program's
 ProgramData account under the upgradeable loader: the payer must be the recorded upgrade

@@ -79,6 +79,10 @@ solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTI
    EVM/Tron endpoints (from the admin), `rand-bridge-cli set-token --program ... --mint ...` on
    Solana (signed by the admin).
 3. Verify the EVM sources on the explorer if `--verify` was not used.
+4. Every endpoint launches with the 10 bps protocol fee (`docs/architecture.md` §3.5). The admin
+   collects it with `withdrawFees(token, to, amount)` on the EVM/Tron endpoints and
+   `rand-bridge-cli withdraw-fees --program ... --mint ... --to <token account> --amount ...` on
+   Solana; `setProtocolFee` / `set-protocol-fee --bps` changes the rate, up to 100 bps.
 
 ## Tooling
 

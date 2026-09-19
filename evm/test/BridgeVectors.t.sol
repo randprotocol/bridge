@@ -39,6 +39,10 @@ contract BridgeVectorsTest is Test {
         json = VectorLoader.readFile(vm);
 
         bridge = new EthereumRandBridge(admin, pauser, _randEmitter(), _fixtureGuardians());
+        // The shared vectors pin which attestations are accepted, with
+        // exact amounts; the protocol fee has its own tests.
+        vm.prank(admin);
+        bridge.setProtocolFee(0);
 
         // The fixture's attestations are timestamped just before its
         // `now`; guardian set 0 is current, so only the clock's rough

@@ -39,7 +39,7 @@ use crate::instruction::{associated_token_address, program_data_address, BridgeI
 use crate::state::{
     authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, seeds, spent_pda, token_pda,
     BridgeAccount, Config, Consumed, GuardianSetAccount, PostedMessage, TokenRegistry, CHAIN_ID,
-    CONSISTENCY_LEVEL,
+    CONSISTENCY_LEVEL, DEFAULT_PROTOCOL_FEE_BPS, MAX_PROTOCOL_FEE_BPS,
 };
 
 /// The largest mint `decimals` this program will whitelist.
@@ -103,6 +103,12 @@ pub fn process_instruction(
         BridgeInstruction::Unpause => process_unpause(program_id, accounts),
         BridgeInstruction::TransferAdmin { to } => process_transfer_admin(program_id, accounts, to),
         BridgeInstruction::AcceptAdmin => process_accept_admin(program_id, accounts),
+        BridgeInstruction::SetProtocolFee { bps } => {
+            process_set_protocol_fee(program_id, accounts, bps)
+        }
+        BridgeInstruction::WithdrawFees { amount } => {
+            process_withdraw_fees(program_id, accounts, amount)
+        }
     }
 }
 
@@ -285,6 +291,12 @@ fn normalize(amount: u64, decimals: u8) -> Result<(u64, u128), BridgeError> {
             .ok_or(BridgeError::AmountOverflow)?;
         Ok((amount, attested))
     }
+}
+
+/// `bps` basis points of `amount`, rounded down. `bps <= 10_000` always
+/// (it is capped at `MAX_PROTOCOL_FEE_BPS`), so the result is `<= amount`.
+fn protocol_fee_of(amount: u64, bps: u16) -> u64 {
+    (u128::from(amount) * u128::from(bps) / 10_000) as u64
 }
 
 /// The inverse of [`normalize`]: an 8-decimal wire amount back into the
@@ -508,6 +520,7 @@ fn process_initialize(
         current_guardian_set: 0,
         sequence: 0,
         bump: config_bump,
+        protocol_fee_bps: DEFAULT_PROTOCOL_FEE_BPS,
     };
     create_state(
         &config,
@@ -596,6 +609,7 @@ fn process_set_token(
             window_start: 0,
             window_used: 0,
             custody: 0,
+            accrued_fees: 0,
         }
     };
 
@@ -697,11 +711,23 @@ fn process_lock(
     if rand_recipient == [0u8; 32] {
         return Err(BridgeError::ZeroRecipient.into());
     }
-    if relayer_fee > amount {
+
+    // `pulled` is `amount` less any dust below one attested unit. The
+    // protocol fee comes out of it *before* custody and before the
+    // attestation: what is attested, minted on Rand and held in custody
+    // is the net amount, so custody still backs the notes one for one and
+    // no verifier sees the fee at all. The net is normalised again so it
+    // sits on the attested grid; for a mint with more than 8 decimals the
+    // remainder joins the fee. Mirrors `RandBridgeBase._lockAmounts`.
+    let (pulled, _) = normalize(amount, registry.decimals)?;
+    let (locked, attested) = normalize(
+        pulled - protocol_fee_of(pulled, config.protocol_fee_bps),
+        registry.decimals,
+    )?;
+    let protocol_fee = pulled - locked;
+    if relayer_fee > locked {
         return Err(BridgeError::FeeExceedsAmount.into());
     }
-
-    let (locked, attested) = normalize(amount, registry.decimals)?;
     if attested == 0 {
         return Err(BridgeError::ZeroAmount.into());
     }
@@ -736,7 +762,7 @@ fn process_lock(
             custody_account.key,
             owner.key,
             &[],
-            locked,
+            pulled,
         )?,
         &[
             owner_token_account.clone(),
@@ -746,13 +772,17 @@ fn process_lock(
         ],
     )?;
     let after = custody_state(custody_account, program_id, mint_account.key)?.amount;
-    if after.checked_sub(before) != Some(locked) {
+    if after.checked_sub(before) != Some(pulled) {
         return Err(BridgeError::TransferAmountMismatch.into());
     }
 
     registry.custody = registry
         .custody
         .checked_add(locked)
+        .ok_or(BridgeError::AmountOverflow)?;
+    registry.accrued_fees = registry
+        .accrued_fees
+        .checked_add(protocol_fee)
         .ok_or(BridgeError::AmountOverflow)?;
 
     let body = Body {
@@ -931,6 +961,12 @@ fn process_release(
     if fee > amount {
         return Err(BridgeError::FeeExceedsAmount.into());
     }
+    // The protocol fee is taken from the gross amount first and the
+    // relayer is paid out of what is left: a burn that names its whole
+    // amount as the relayer fee can neither dodge the protocol fee nor
+    // make the release impossible (the burn on Rand is already final).
+    let protocol_fee = protocol_fee_of(amount, config.protocol_fee_bps);
+    let fee = fee.min(amount - protocol_fee);
 
     // 8. custody soundness, then the caps.
     if registry.custody < amount {
@@ -966,6 +1002,11 @@ fn process_release(
         .custody
         .checked_sub(amount)
         .ok_or(BridgeError::InsufficientCustody)?;
+    // Leaves custody, stays in the token account.
+    registry.accrued_fees = registry
+        .accrued_fees
+        .checked_add(protocol_fee)
+        .ok_or(BridgeError::AmountOverflow)?;
     registry.window_start = window;
     registry.window_used = window_used;
     store(&registry, registry_account)?;
@@ -981,7 +1022,7 @@ fn process_release(
             authority_bump,
         )?;
     }
-    let payout = amount - fee;
+    let payout = amount - protocol_fee - fee;
     if payout != 0 {
         transfer_from_custody(
             custody_account,
@@ -993,7 +1034,12 @@ fn process_release(
         )?;
     }
 
-    msg!("rand-bridge: released {} (fee {})", amount, fee);
+    msg!(
+        "rand-bridge: released {} (fee {}, protocol fee {})",
+        amount,
+        fee,
+        protocol_fee
+    );
     Ok(())
 }
 
@@ -1191,6 +1237,81 @@ fn process_accept_admin(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progra
     config.pending_admin = Pubkey::default();
     store(&config, config_account)?;
     msg!("rand-bridge: admin transferred");
+    Ok(())
+}
+
+fn process_set_protocol_fee(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    bps: u16,
+) -> ProgramResult {
+    let (signer, config_account, mut config) = role_accounts(accounts, program_id)?;
+    if *signer.key != config.admin {
+        return Err(BridgeError::NotAdmin.into());
+    }
+    if bps > MAX_PROTOCOL_FEE_BPS {
+        return Err(BridgeError::ProtocolFeeTooHigh.into());
+    }
+    config.protocol_fee_bps = bps;
+    store(&config, config_account)?;
+    msg!("rand-bridge: protocol fee {} bps", bps);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// WithdrawFees
+// ----------------------------------------------------------------------
+
+/// Pays accrued protocol fees out. Bounded by `accrued_fees`, so it can
+/// never reach custody; not gated by the pause, which protects custody
+/// and has no bearing on fees already earned.
+fn process_withdraw_fees(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    amount: u64,
+) -> ProgramResult {
+    let iter = &mut accounts.iter();
+    let admin = next_account_info(iter)?;
+    let config_account = next_account_info(iter)?;
+    let mint_account = next_account_info(iter)?;
+    let registry_account = next_account_info(iter)?;
+    let custody_account = next_account_info(iter)?;
+    let authority_account = next_account_info(iter)?;
+    let destination_account = next_account_info(iter)?;
+    let token_program = next_account_info(iter)?;
+
+    check_signer(admin)?;
+    check_key(token_program.key, &spl_token::id())?;
+    let config = load_config(config_account, program_id)?;
+    if *admin.key != config.admin {
+        return Err(BridgeError::NotAdmin.into());
+    }
+    let mut registry = load_registry(registry_account, program_id, mint_account.key)?;
+    let (custody_key, _) = custody_pda(program_id, mint_account.key);
+    check_key(custody_account.key, &custody_key)?;
+    let (authority_key, authority_bump) = authority_pda(program_id);
+    check_key(authority_account.key, &authority_key)?;
+    // A transfer onto itself succeeds and moves nothing: the fees would
+    // leave the counter and stay in the account, outside both counters.
+    if destination_account.key == custody_account.key {
+        return Err(BridgeError::BadRecipient.into());
+    }
+
+    registry.accrued_fees = registry
+        .accrued_fees
+        .checked_sub(amount)
+        .ok_or(BridgeError::InsufficientFees)?;
+    store(&registry, registry_account)?;
+
+    transfer_from_custody(
+        custody_account,
+        destination_account,
+        authority_account,
+        token_program,
+        amount,
+        authority_bump,
+    )?;
+    msg!("rand-bridge: withdrew {} in fees", amount);
     Ok(())
 }
 

@@ -17,6 +17,12 @@ pub const CHAIN_ID: u16 = 5;
 /// The consistency level this program stamps on the messages it emits.
 pub const CONSISTENCY_LEVEL: u8 = 1;
 
+/// The protocol fee every endpoint launches with: 10 bps of the bridged
+/// token, on the way in and on the way out. Mirrors `RandBridgeBase`.
+pub const DEFAULT_PROTOCOL_FEE_BPS: u16 = 10;
+/// The most the admin can ever set it to (1%).
+pub const MAX_PROTOCOL_FEE_BPS: u16 = 100;
+
 /// Leading discriminator byte of a [`Config`] account.
 pub const DISCRIMINATOR_CONFIG: u8 = 1;
 /// Leading discriminator byte of a [`GuardianSetAccount`].
@@ -72,6 +78,8 @@ pub struct Config {
     pub sequence: u64,
     /// The config PDA's bump seed.
     pub bump: u8,
+    /// Protocol fee rate, in basis points of the bridged amount.
+    pub protocol_fee_bps: u16,
 }
 
 /// One guardian set: its member keys, indexed `0..n`, and its expiry.
@@ -113,6 +121,10 @@ pub struct TokenRegistry {
     pub window_used: u64,
     /// Amount this program currently holds in custody for the mint.
     pub custody: u64,
+    /// Protocol fees collected and not yet withdrawn. They sit in the same
+    /// token account as custody but are never part of it: `custody` is
+    /// exactly what backs the notes on Rand.
+    pub accrued_fees: u64,
 }
 
 /// Existence of this account marks an attestation digest as redeemed.
@@ -237,6 +249,7 @@ mod tests {
             current_guardian_set: 3,
             sequence: 17,
             bump: 254,
+            protocol_fee_bps: 10,
         }
     }
 
@@ -301,6 +314,7 @@ mod tests {
                 window_start: 1,
                 window_used: 2,
                 custody: 3,
+                accrued_fees: 4,
             },
             DISCRIMINATOR_TOKEN_REGISTRY,
         );

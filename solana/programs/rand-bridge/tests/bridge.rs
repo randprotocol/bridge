@@ -336,7 +336,20 @@ impl Bridge {
         );
         let deployer = bridge.deployer.insecure_clone();
         bridge.send(ix, &[&deployer]).await.expect("initialize");
+        assert_eq!(
+            bridge.config().await.protocol_fee_bps,
+            10,
+            "the endpoint launches at 10 bps"
+        );
+        // Everything outside the protocol-fee tests exercises exact
+        // amounts, so it runs fee-free; those tests turn the fee back on.
+        bridge.set_protocol_fee(0).await.expect("fee off");
         bridge
+    }
+
+    async fn set_protocol_fee(&mut self, bps: u16) -> Result<(), BanksClientError> {
+        let ix = bridge_ix::set_protocol_fee(&self.program, &self.admin.pubkey(), bps);
+        self.admin_send(ix).await
     }
 
     /// The common case: a fresh 6-decimal mint and the vectors' guardian
@@ -866,6 +879,126 @@ async fn release_pays_recipient_and_relayer() {
         .await
         .expect("consumed marker exists");
     assert_eq!(consumed.owner, b.program);
+}
+
+#[tokio::test]
+async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin() {
+    let mut b = Bridge::simple(6).await;
+    let mint = b.mint;
+    b.set_token(true, 0, 0).await.expect("set token");
+
+    // Admin only, capped at 1%.
+    let stranger = Keypair::new();
+    b.fund(&stranger.pubkey());
+    let ix = bridge_ix::set_protocol_fee(&b.program, &stranger.pubkey(), 10);
+    assert_bridge_error(b.send(ix, &[&stranger]).await, BridgeError::NotAdmin);
+    assert_bridge_error(
+        b.set_protocol_fee(101).await,
+        BridgeError::ProtocolFeeTooHigh,
+    );
+    b.set_protocol_fee(10).await.expect("fee on");
+
+    // Lock 2 tokens: 10 bps stays behind as a fee, the net is what custody
+    // holds and what the message attests.
+    let holder = Keypair::new();
+    b.fund(&holder.pubkey());
+    let holder_ata = b.put_ata(&holder.pubkey(), 2_000_000);
+    // The relayer fee is bounded by the net amount.
+    assert_bridge_error(
+        b.lock(&holder, holder_ata, 2_000_000, [0x44; 32], 2_000_000, 0)
+            .await,
+        BridgeError::FeeExceedsAmount,
+    );
+    b.lock(&holder, holder_ata, 2_000_000, [0x44; 32], 0, 1)
+        .await
+        .expect("lock");
+    assert_eq!(b.token(holder_ata).await.amount, 0, "the gross amount left");
+    assert_eq!(b.custody_balance().await, 2_000_000);
+    let registry = b.registry().await;
+    assert_eq!(registry.custody, 1_998_000);
+    assert_eq!(registry.accrued_fees, 2_000);
+    let posted: PostedMessage = b.state(msg_pda(&b.program, 0).0).await;
+    let decoded = Body::decode(&posted.body).expect("body");
+    let Payload::Transfer(t) = Payload::decode(&decoded.payload).expect("payload") else {
+        panic!("not a transfer");
+    };
+    assert_eq!(t.amount_u128(), Some(199_800_000), "the net amount, at 8dp");
+
+    // Release 1 token with a 0.05 relayer fee: 10 bps of the gross comes
+    // off first, the relayer is paid in full, the recipient gets the rest.
+    let relayer = Keypair::new();
+    b.fund(&relayer.pubkey());
+    let relayer_ata = b.put_ata(&relayer.pubkey(), 0);
+    let recipient = Pubkey::new_unique();
+    let recipient_ata = b.put_ata(&recipient, 0);
+    let (attestation, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            1,
+            transfer_payload(100_000_000, &mint, 5, &recipient, 5, 5_000_000),
+        ),
+        QUORUM,
+    );
+    b.release(&relayer, 0, &recipient, &digest, attestation)
+        .await
+        .expect("release");
+    assert_eq!(b.token(relayer_ata).await.amount, 50_000);
+    assert_eq!(b.token(recipient_ata).await.amount, 949_000);
+    let registry = b.registry().await;
+    assert_eq!(
+        registry.custody, 998_000,
+        "the whole attested amount left custody"
+    );
+    assert_eq!(registry.accrued_fees, 3_000);
+    assert_eq!(
+        b.custody_balance().await,
+        1_001_000,
+        "custody + accrued fees"
+    );
+
+    // A burn that names its whole amount as the relayer fee cannot dodge
+    // the protocol fee, and cannot brick the release.
+    let (attestation, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            2,
+            transfer_payload(50_000_000, &mint, 5, &recipient, 5, 50_000_000),
+        ),
+        QUORUM,
+    );
+    b.release(&relayer, 0, &recipient, &digest, attestation)
+        .await
+        .expect("release, fee == amount");
+    assert_eq!(b.token(relayer_ata).await.amount, 50_000 + 499_500);
+    assert_eq!(b.token(recipient_ata).await.amount, 949_000);
+    assert_eq!(b.registry().await.accrued_fees, 3_500);
+
+    // Withdrawal: admin only, bounded by what accrued, never custody, and
+    // not gated by the pause.
+    let treasury = Pubkey::new_unique();
+    let treasury_ata = b.put_ata(&treasury, 0);
+    let ix = bridge_ix::withdraw_fees(&b.program, &stranger.pubkey(), &mint, &treasury_ata, 1);
+    assert_bridge_error(b.send(ix, &[&stranger]).await, BridgeError::NotAdmin);
+    let admin = b.admin.pubkey();
+    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 3_501);
+    assert_bridge_error(b.admin_send(ix).await, BridgeError::InsufficientFees);
+    let custody = custody_pda(&b.program, &mint).0;
+    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &custody, 1);
+    assert_bridge_error(b.admin_send(ix).await, BridgeError::BadRecipient);
+
+    let ix = bridge_ix::pause(&b.program, &b.pauser.pubkey());
+    b.pauser_send(ix).await.expect("pause");
+    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 3_000);
+    b.admin_send(ix).await.expect("withdraw");
+    assert_eq!(b.token(treasury_ata).await.amount, 3_000);
+    let registry = b.registry().await;
+    assert_eq!(registry.accrued_fees, 500);
+    assert_eq!(registry.custody, 498_000, "custody untouched");
+    assert_eq!(b.custody_balance().await, 498_500);
 }
 
 #[tokio::test]

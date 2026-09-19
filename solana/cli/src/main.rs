@@ -113,6 +113,26 @@ enum Command {
         #[command(flatten)]
         program: ProgramArg,
     },
+    /// Set the protocol fee in basis points, at most 100 (admin).
+    SetProtocolFee {
+        #[command(flatten)]
+        program: ProgramArg,
+        #[arg(long)]
+        bps: u16,
+    },
+    /// Pay accrued protocol fees of a mint to a token account (admin).
+    WithdrawFees {
+        #[command(flatten)]
+        program: ProgramArg,
+        #[arg(long)]
+        mint: Pubkey,
+        /// The destination token account (not a wallet) for the mint.
+        #[arg(long)]
+        to: Pubkey,
+        /// Amount in the mint's own units.
+        #[arg(long)]
+        amount: u64,
+    },
     /// Print the bridge's config and current guardian set as JSON.
     Show {
         #[command(flatten)]
@@ -211,6 +231,29 @@ fn main() -> Result<()> {
             )?;
             println!("admin accepted in {sig}");
         }
+        Command::SetProtocolFee { program, bps } => {
+            let kp = signer()?;
+            let sig = send(
+                &cli.rpc_url,
+                &kp,
+                ix::set_protocol_fee(&program.program, &kp.pubkey(), bps),
+            )?;
+            println!("protocol fee {bps} bps in {sig}");
+        }
+        Command::WithdrawFees {
+            program,
+            mint,
+            to,
+            amount,
+        } => {
+            let kp = signer()?;
+            let sig = send(
+                &cli.rpc_url,
+                &kp,
+                ix::withdraw_fees(&program.program, &kp.pubkey(), &mint, &to, amount),
+            )?;
+            println!("withdrew {amount} of {mint} in fees to {to} in {sig}");
+        }
         Command::Show { program } => {
             let client = client(&cli.rpc_url);
             let program = program.program;
@@ -232,6 +275,7 @@ fn main() -> Result<()> {
                 "pending_admin": config.pending_admin.to_string(),
                 "pauser": config.pauser.to_string(),
                 "paused": config.paused,
+                "protocol_fee_bps": config.protocol_fee_bps,
                 "rand_emitter": format!("0x{}", hex::encode(config.rand_emitter)),
                 "current_guardian_set": config.current_guardian_set,
                 "guardians": set.keys.iter().map(|k| format!("0x{}", hex::encode(k))).collect::<Vec<_>>(),

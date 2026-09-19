@@ -47,6 +47,14 @@ abstract contract RandBridgeBase is IRandBridge {
     /// must too, or the locked tokens could never be minted or released.
     uint256 internal constant MAX_ATTESTED_AMOUNT = type(uint64).max;
 
+    /// The protocol fee every endpoint launches with: 10 bps of the bridged
+    /// token, on the way in and on the way out.
+    uint16 internal constant DEFAULT_PROTOCOL_FEE_BPS = 10;
+    /// The most the admin can ever set it to (1%). The contract cannot be
+    /// upgraded, so the rate is adjustable; the cap is what users rely on.
+    uint16 public constant MAX_PROTOCOL_FEE_BPS = 100;
+    uint256 internal constant BPS = 10_000;
+
     /// `block.chainid` at deployment. Section 5.4's fork guard: a replay
     /// of this contract's state onto a forked chain cannot move tokens.
     uint256 public immutable DEPLOY_CHAIN_ID;
@@ -70,6 +78,13 @@ abstract contract RandBridgeBase is IRandBridge {
 
     mapping(address => TokenConfig) internal _tokenConfigs;
     mapping(address => uint256) public override custody;
+
+    /// Protocol fee rate, in basis points of the bridged amount.
+    uint16 public override protocolFeeBps;
+    /// Protocol fees collected per token and not yet withdrawn, in token
+    /// units. Held by this contract but never part of `custody`: custody
+    /// is exactly what backs the notes on Rand, fees are the operator's.
+    mapping(address => uint256) public override accruedFees;
     mapping(bytes32 => bool) public override consumed;
 
     /// Sequence of the next message this emitter publishes; starts at 0.
@@ -84,10 +99,12 @@ abstract contract RandBridgeBase is IRandBridge {
         admin = admin_;
         pauser = pauser_;
         _guardianSets[0].keys = guardians;
+        protocolFeeBps = DEFAULT_PROTOCOL_FEE_BPS;
 
         emit AdminTransferred(admin_);
         emit PauserSet(pauser_);
         emit GuardianSetUpgraded(0, guardians);
+        emit ProtocolFeeSet(DEFAULT_PROTOCOL_FEE_BPS);
     }
 
     // ------------------------------------------------------------------
@@ -188,9 +205,9 @@ abstract contract RandBridgeBase is IRandBridge {
         TokenConfig storage cfg = _tokenConfigs[token];
         if (!cfg.enabled) revert TokenDisabled();
         if (randRecipient == bytes32(0)) revert ZeroRecipient();
-        if (relayerFee > amount) revert FeeExceedsAmount();
 
-        (uint256 locked, uint256 attested) = _normalize(amount, cfg.decimals);
+        (uint256 pulled, uint256 locked, uint256 attested) = _lockAmounts(amount, cfg.decimals);
+        if (relayerFee > locked) revert FeeExceedsAmount();
         if (attested == 0) revert ZeroAmount();
         // Rand keeps a bridged holding in a note whose amount is a `u64`
         // and refuses a larger attestation at admission; a lock it could
@@ -198,8 +215,9 @@ abstract contract RandBridgeBase is IRandBridge {
         if (attested > MAX_ATTESTED_AMOUNT) revert AmountTooLarge();
         (, uint256 attestedFee) = _normalize(relayerFee, cfg.decimals);
 
-        _pull(token, msg.sender, locked);
+        _pull(token, msg.sender, pulled);
         custody[token] += locked;
+        _accrue(token, pulled - locked);
 
         uint64 seq = sequence;
         bytes memory payload = Attestation.encodeTransfer(
@@ -217,6 +235,32 @@ abstract contract RandBridgeBase is IRandBridge {
 
         sequence = seq + 1;
         return seq;
+    }
+
+    /// What a lock of `amount` pulls, puts in custody and attests.
+    ///
+    /// `pulled` is `amount` less any dust below one attested unit. The
+    /// protocol fee comes out of it *before* custody and before the
+    /// attestation: what is attested, minted on Rand and held in custody
+    /// is the net amount, so custody still backs the notes one for one
+    /// and no verifier sees the fee at all. The net is normalised again so
+    /// it sits on the attested grid; for a token with more than 8 decimals
+    /// the remainder joins the fee (`pulled - locked`).
+    function _lockAmounts(uint256 amount, uint8 decimals)
+        internal
+        view
+        returns (uint256 pulled, uint256 locked, uint256 attested)
+    {
+        (pulled,) = _normalize(amount, decimals);
+        (locked, attested) = _normalize(pulled - pulled * protocolFeeBps / BPS, decimals);
+    }
+
+    /// Books a protocol fee: it stays in the contract, outside custody.
+    function _accrue(address token, uint256 protocolFee) private {
+        if (protocolFee != 0) {
+            accruedFees[token] += protocolFee;
+            emit ProtocolFeeCharged(token, protocolFee);
+        }
     }
 
     /// Pulls exactly `amount` of `token` from `from` into custody.
@@ -270,6 +314,13 @@ abstract contract RandBridgeBase is IRandBridge {
         // re-configured.
         if (amount == 0) revert ZeroAmount();
 
+        // The protocol fee is taken from the gross amount first and the
+        // relayer is paid out of what is left: a burn that names its whole
+        // amount as the relayer fee can neither dodge the protocol fee nor
+        // make the release impossible (the burn on Rand is already final).
+        uint256 protocolFee = amount * protocolFeeBps / BPS;
+        if (fee > amount - protocolFee) fee = amount - protocolFee;
+
         if (custody[token] < amount) revert InsufficientCustody();
         if (cfg.perTransferCap != 0 && amount > cfg.perTransferCap) revert PerTransferCap();
         uint256 window = block.timestamp / 1 days;
@@ -284,12 +335,13 @@ abstract contract RandBridgeBase is IRandBridge {
         cfg.windowUsed = windowUsed + amount;
 
         emit Released(token, to, amount, fee, p.digest);
+        _accrue(token, protocolFee); // leaves custody, stays in the contract
 
         if (fee != 0) {
             _push(token, msg.sender, fee);
         }
-        if (amount - fee != 0) {
-            _push(token, to, amount - fee);
+        if (amount - protocolFee - fee != 0) {
+            _push(token, to, amount - protocolFee - fee);
         }
     }
 
@@ -468,6 +520,24 @@ abstract contract RandBridgeBase is IRandBridge {
         // casting to 'uint8' is safe because of the bound just above
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint8(decimals);
+    }
+
+    /// Sets the protocol fee rate, at most [MAX_PROTOCOL_FEE_BPS].
+    function setProtocolFee(uint16 bps) external override onlyAdmin {
+        if (bps > MAX_PROTOCOL_FEE_BPS) revert ProtocolFeeTooHigh();
+        protocolFeeBps = bps;
+        emit ProtocolFeeSet(bps);
+    }
+
+    /// Pays accrued protocol fees out to `to`. Bounded by `accruedFees`,
+    /// so it can never reach custody; not gated by the pause, which
+    /// protects custody and has no bearing on fees already earned.
+    function withdrawFees(address token, address to, uint256 amount) external override onlyAdmin {
+        if (to == address(0) || to == address(this)) revert ZeroAddress();
+        if (amount > accruedFees[token]) revert InsufficientFees();
+        accruedFees[token] -= amount;
+        emit FeesWithdrawn(token, to, amount);
+        _push(token, to, amount);
     }
 
     function setPauser(address pauser_) external override onlyAdmin {

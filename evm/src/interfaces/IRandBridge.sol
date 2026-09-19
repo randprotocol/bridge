@@ -34,6 +34,11 @@ interface IRandBridge {
     event AdminTransferStarted(address indexed to);
     event AdminTransferred(address indexed to);
     event PauserSet(address indexed pauser);
+    /// The protocol fee taken from one lock or release, in token units. It
+    /// stays in the contract as `accruedFees`, outside `custody`.
+    event ProtocolFeeCharged(address indexed token, uint256 fee);
+    event ProtocolFeeSet(uint16 bps);
+    event FeesWithdrawn(address indexed token, address indexed to, uint256 amount);
 
     /// Caps are in the token's native units and apply to releases only; 0
     /// means unlimited. `windowStart` is a day index
@@ -88,6 +93,10 @@ interface IRandBridge {
     error DecimalsUnavailable();
     /// `setToken` found different `decimals()` while custody is outstanding.
     error DecimalsChanged();
+    /// `setProtocolFee` above `MAX_PROTOCOL_FEE_BPS`.
+    error ProtocolFeeTooHigh();
+    /// `withdrawFees` for more than the token has accrued.
+    error InsufficientFees();
     /// A guardian set larger than an attestation's one-byte counts can carry.
     error TooManyGuardians();
 
@@ -98,6 +107,8 @@ interface IRandBridge {
     function submitGuardianSetUpgrade(bytes calldata attestation) external;
     function setToken(address token, bool enabled, uint256 perTransferCap, uint256 dailyCap) external;
     function setPauser(address pauser) external;
+    function setProtocolFee(uint16 bps) external;
+    function withdrawFees(address token, address to, uint256 amount) external;
     function pause() external;
     function unpause() external;
     function transferAdmin(address to) external;
@@ -107,6 +118,8 @@ interface IRandBridge {
     function currentGuardianSetIndex() external view returns (uint32);
     function guardianSet(uint32 index) external view returns (GuardianSet memory);
     function custody(address token) external view returns (uint256);
+    function accruedFees(address token) external view returns (uint256);
+    function protocolFeeBps() external view returns (uint16);
     function consumed(bytes32 digest) external view returns (bool);
     function tokenConfig(address token) external view returns (TokenConfig memory);
     function sequence() external view returns (uint64);
