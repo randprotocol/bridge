@@ -62,7 +62,7 @@ read it before touching anything there, it is worked on by many sessions in para
   becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
   chain enables aggregation. It ships with the chain cut that first carries a `bridge` section.
 - **MAINNET ENDPOINTS ARE DEPLOYED (2026-09-19)** — addresses, tx hashes and the matching Rand
-  genesis `bridge` section are in `deploy/deployments/README.md`. Ethereum and BSC
+  genesis `bridge` section are in `docs/mainnet-deployment.md`. Ethereum and BSC
   `0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892`, Tron `TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU`, Solana
   `FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu` (`declare_id!` now names it — do not let a
   localnet/devnet rehearsal overwrite it in a commit). `RAND_EMITTER =

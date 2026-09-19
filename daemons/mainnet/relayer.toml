@@ -1,0 +1,56 @@
+# Mainnet relayer. Gas keys: RELAYER_EVM_KEY, RELAYER_TRON_KEY, SOL_PRIVATE_KEY / SOL_KEYPAIR.
+data_dir = "./data/mainnet/relayer"
+poll_secs = 15
+
+[rand]
+rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
+emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
+
+[[evm]]
+name = "ethereum"
+chain = 2
+kind = "evm"
+rpc = "https://ethereum-rpc.publicnode.com"
+contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+finality = "finalized"
+start_block = 26010199
+
+[[evm]]
+name = "bsc"
+chain = 3
+kind = "evm"
+rpc = "https://bsc-rpc.publicnode.com"
+contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+finality = 15
+start_block = 122760747
+max_log_range = 1000
+
+[[evm]]
+name = "tron"
+chain = 4
+kind = "tron"
+rpc = "https://api.trongrid.io"
+contract = "0x0992df85dcce77ded2c0387f1fa9cf98ac859700"   # TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU
+finality = 19
+start_block = 86377422
+max_log_range = 1000
+
+[solana]
+rpc = "https://api.mainnet-beta.solana.com"
+program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
+
+[relayer]
+guardians = [
+  "http://127.0.0.1:7071", "http://127.0.0.1:7072", "http://127.0.0.1:7073",
+  "http://127.0.0.1:7074", "http://127.0.0.1:7075", "http://127.0.0.1:7076",
+]
+# Until the bridged Rand chain serves rand_getBridgeState:
+guardian_set_index = 0
+guardian_addresses = [
+  "0x5B5C007b5638B643a1f6b3C18AFB2a7784a9a2aa", "0x3fACDAf6Ea59Bc75cD18B4CA1844344005e66453",
+  "0x8CD7478ECa7235E8A5265d4B7F638086f25cC9F5", "0x76845347679B878c0016491B19defc59C83E20fB",
+  "0x62fA3e39F56636955DF228917EDD2e9e68F3a957", "0xb3F1409AE0D5b2467229fA74a92c51b15f980445",
+]
+solana_cli = "../solana/target/release/rand-bridge-cli"
+rand_cli = "../../fullnode/target/release/rand"
+listen = "127.0.0.1:7080"
