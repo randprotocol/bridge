@@ -58,10 +58,29 @@ impl EvmSubmitter {
     }
 
     pub async fn release(&self, attestation: &Attestation, digest: &[u8; 32]) -> Result<Outcome> {
+        self.submit(release_calldata(attestation), digest, "release")
+            .await
+    }
+
+    /// `submitGuardianSetUpgrade(bytes)`: open to anyone, like `release`.
+    pub async fn guardian_set_upgrade(
+        &self,
+        attestation: &[u8],
+        digest: &[u8; 32],
+    ) -> Result<Outcome> {
+        self.submit(
+            crate::governance::upgrade_calldata(attestation),
+            digest,
+            "guardian-set upgrade",
+        )
+        .await
+    }
+
+    /// Sends `data` to the endpoint, unless `digest` is already consumed.
+    async fn submit(&self, data: Vec<u8>, digest: &[u8; 32], what: &str) -> Result<Outcome> {
         if self.is_consumed(digest).await? {
             return Ok(Outcome::AlreadyDone);
         }
-        let data = release_calldata(attestation);
         let call = json!({
             "from": Self::hex_addr(&self.from),
             "to": Self::hex_addr(&self.contract),
@@ -73,7 +92,7 @@ impl EvmSubmitter {
                 .rpc
                 .call("eth_estimateGas", json!([call]))
                 .await
-                .with_context(|| format!("{}: release would revert", self.name))?,
+                .with_context(|| format!("{}: {what} would revert", self.name))?,
         )?;
         let gas = gas + gas / 5;
 
@@ -124,7 +143,7 @@ impl EvmSubmitter {
             .as_str()
             .ok_or_else(|| anyhow!("no transaction hash"))?
             .to_string();
-        tracing::info!("{}: release sent in {hash}", self.name);
+        tracing::info!("{}: {what} sent in {hash}", self.name);
 
         for _ in 0..120 {
             let receipt = self
@@ -139,11 +158,11 @@ impl EvmSubmitter {
                 if self.is_consumed(digest).await? {
                     return Ok(Outcome::AlreadyDone);
                 }
-                bail!("{}: release {hash} reverted", self.name);
+                bail!("{}: {what} {hash} reverted", self.name);
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
-        bail!("{}: release {hash} not mined after six minutes", self.name)
+        bail!("{}: {what} {hash} not mined after six minutes", self.name)
     }
 }
 

@@ -92,17 +92,51 @@ impl TronSubmitter {
     }
 
     pub async fn release(&self, attestation: &Attestation, digest: &[u8; 32]) -> Result<Outcome> {
+        let encoded = attestation.encode();
+        self.submit(
+            "release(bytes)",
+            &encoded,
+            release_calldata(attestation),
+            digest,
+        )
+        .await
+    }
+
+    /// `submitGuardianSetUpgrade(bytes)`: open to anyone, like `release`.
+    pub async fn guardian_set_upgrade(
+        &self,
+        attestation: &[u8],
+        digest: &[u8; 32],
+    ) -> Result<Outcome> {
+        let calldata = crate::governance::upgrade_calldata(attestation);
+        self.submit(
+            "submitGuardianSetUpgrade(bytes)",
+            attestation,
+            calldata,
+            digest,
+        )
+        .await
+    }
+
+    /// One `bytes`-taking call: the node builds it, this checks and signs it.
+    async fn submit(
+        &self,
+        function: &str,
+        argument: &[u8],
+        calldata: Vec<u8>,
+        digest: &[u8; 32],
+    ) -> Result<Outcome> {
         if self.is_consumed(digest).await? {
             return Ok(Outcome::AlreadyDone);
         }
-        let parameter = abi_encode_bytes(&attestation.encode());
+        let parameter = abi_encode_bytes(argument);
         let built = self
             .post(
                 "wallet/triggersmartcontract",
                 json!({
                     "owner_address": tron_hex(&self.from),
                     "contract_address": tron_hex(&self.contract),
-                    "function_selector": "release(bytes)",
+                    "function_selector": function,
                     "parameter": hex::encode(&parameter),
                     "fee_limit": self.fee_limit,
                     "call_value": 0,
@@ -111,7 +145,7 @@ impl TronSubmitter {
             .await?;
         if built["result"]["result"].as_bool() != Some(true) {
             bail!(
-                "{}: node refused to build the release: {}",
+                "{}: node refused to build the call: {}",
                 self.name,
                 built["result"]
             );
@@ -125,9 +159,9 @@ impl TronSubmitter {
         }
         let mut contract = vec![0x41];
         contract.extend_from_slice(&self.contract);
-        if !contains(&raw, &contract) || !contains(&raw, &release_calldata(attestation)) {
+        if !contains(&raw, &contract) || !contains(&raw, &calldata) {
             bail!(
-                "{}: node built a transaction that is not our release",
+                "{}: node built a transaction that is not our call",
                 self.name
             );
         }
@@ -144,7 +178,7 @@ impl TronSubmitter {
             bail!("{}: broadcast refused: {sent}", self.name);
         }
         let txid = hex::encode(id);
-        tracing::info!("{}: release sent in {txid}", self.name);
+        tracing::info!("{}: {function} sent in {txid}", self.name);
 
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -160,10 +194,10 @@ impl TronSubmitter {
             if self.is_consumed(digest).await? {
                 return Ok(Outcome::AlreadyDone);
             }
-            bail!("{}: release {txid} ended {result}", self.name);
+            bail!("{}: {function} {txid} ended {result}", self.name);
         }
         bail!(
-            "{}: release {txid} not confirmed after three minutes",
+            "{}: {function} {txid} not confirmed after three minutes",
             self.name
         )
     }

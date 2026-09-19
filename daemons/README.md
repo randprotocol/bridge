@@ -55,6 +55,32 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   (`rand bridge-mint @att --pq @pq.json --to …`); short of either quorum nothing is submitted.
 - Checks `consumed(digest)` first and treats "already consumed" as done: relayers race, by design.
 
+## Governance: rotating the guardian set
+
+`rand-bridge-gov` is a deliberate command-line tool, not a daemon — a rotation is an act by people.
+
+```sh
+rand-bridge-gov rotate --current-index 0 --current-guardians 0x…,0x…(six) \
+    --new-guardians 0x…,0x…(index order) \
+    --signer-envs GUARDIAN1_PRIV_KEY,GUARDIAN2_PRIV_KEY,…(a quorum of the CURRENT set) \
+    --out rotation-1.hex
+rand-bridge-gov verify --current-index 0 --current-guardians … --attestation-file rotation-1.hex
+```
+
+It builds the payload-2 body (governance emitter, `new_index = current + 1`, unique non-zero keys),
+signs with exactly a quorum in index order, and re-checks the result under every rule the verifiers
+apply before it writes anything. It reproduces the shared vector `upgrade_set1_ok` byte for byte and
+rotates the real `EthereumRandBridge` on anvil (`cargo test --test governance`).
+
+**The file is a bearer instrument**: `submitGuardianSetUpgrade` is open to anyone, so whoever holds a
+valid rotation can apply it. Produce it only when the rotation is meant to happen, then submit the
+SAME file everywhere so all five chains stay on one set index: `rand-bridge-gov submit-evm`
+(Ethereum, BSC), `rand-bridge-gov submit-tron`, `rand-bridge-cli guardian-set-upgrade` (Solana), and
+on Rand a `BridgeAttest` carrying it (after the bridged chain is cut; its genesis starts at set 0).
+A superseded set keeps verifying *transfers* for 86,400 s, so leave a day between rotating away from
+exposed keys and whitelisting anything. The Dilithium2 set is not changed by a rotation
+(`spec/PQ-COSIGNATURE.md` §5).
+
 ## Audit
 
 `rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved

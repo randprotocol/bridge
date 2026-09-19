@@ -19,6 +19,10 @@ name = "rand-relayer"
 path = "src/bin/relayer.rs"
 
 [[bin]]
+name = "rand-bridge-gov"
+path = "src/bin/gov.rs"
+
+[[bin]]
 name = "rand-bridge-audit"
 path = "src/bin/audit.rs"
 

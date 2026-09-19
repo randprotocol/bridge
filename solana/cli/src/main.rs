@@ -126,6 +126,15 @@ enum Command {
         #[arg(long, default_value_t = 400_000)]
         compute_units: u32,
     },
+    /// Submit a guardian-set rotation (payload 2) signed by the current set.
+    /// Anyone may run it; allowed while paused.
+    GuardianSetUpgrade {
+        #[command(flatten)]
+        program: ProgramArg,
+        /// A file holding the encoded attestation as hex (from `rand-bridge-gov rotate`).
+        #[arg(long)]
+        attestation_file: PathBuf,
+    },
     /// Set the protocol fee in basis points, at most 100 (admin).
     SetProtocolFee {
         #[command(flatten)]
@@ -304,6 +313,48 @@ fn main() -> Result<()> {
                 bytes,
             );
             let sig = send_all(&cli.rpc_url, &kp, &[budget, release])?;
+            println!("{sig}");
+        }
+        Command::GuardianSetUpgrade {
+            program,
+            attestation_file,
+        } => {
+            let kp = signer()?;
+            let text = std::fs::read_to_string(&attestation_file)
+                .with_context(|| format!("reading {}", attestation_file.display()))?;
+            let bytes = hex::decode(text.trim().trim_start_matches("0x"))
+                .context("attestation is not hex")?;
+            let attestation = bridge_codec::Attestation::decode(&bytes)
+                .map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+            let bridge_codec::Payload::GuardianSetUpgrade(upgrade) =
+                bridge_codec::Payload::decode(&attestation.body.payload)
+                    .map_err(|e| anyhow!("undecodable payload: {e:?}"))?
+            else {
+                return Err(anyhow!("not a guardian-set upgrade attestation"));
+            };
+            let body = bridge_codec::Attestation::body_bytes(&bytes)
+                .map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+            let digest = rand_bridge::attestation::digest(body);
+
+            // One recovery per signature, plus the new set's account.
+            let mut budget = vec![2u8]; // ComputeBudgetInstruction::SetComputeUnitLimit
+            budget.extend_from_slice(&400_000u32.to_le_bytes());
+            let budget = Instruction {
+                program_id: "ComputeBudget111111111111111111111111111111"
+                    .parse()
+                    .expect("a pubkey"),
+                accounts: vec![],
+                data: budget,
+            };
+            let upgrade_ix = ix::guardian_set_upgrade(
+                &program.program,
+                &kp.pubkey(),
+                attestation.guardian_set_index,
+                upgrade.new_index,
+                &digest,
+                bytes,
+            );
+            let sig = send_all(&cli.rpc_url, &kp, &[budget, upgrade_ix])?;
             println!("{sig}");
         }
         Command::SetProtocolFee { program, bps } => {
