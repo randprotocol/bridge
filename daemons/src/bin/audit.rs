@@ -29,6 +29,9 @@ struct Cli {
     /// Any daemon config: the [rand], [[evm]] and [solana] sections are used.
     #[arg(long, env = "RAND_BRIDGE_CONFIG")]
     config: PathBuf,
+    /// The bridged token on Rand: a registry index, 64 hex, or `rpl1…`.
+    #[arg(long, default_value = "1")]
+    token: String,
 }
 
 /// The approved backings: (bridge chain, symbol, token, decimals).
@@ -194,25 +197,52 @@ async fn solana_rows(config: &Config) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-/// `(chain, token word) -> locked`, in attested 8-decimal units, when the
-/// Rand node serves per-backing rows.
-async fn rand_locked(config: &Config) -> Option<Vec<(u16, [u8; 32], u128)>> {
-    let state = JsonRpc::new(&config.rand.rpc)
-        .call("rand_getBridgeState", json!([]))
-        .await
-        .ok()?;
-    let assets = state["assets"].as_array()?;
-    let mut out = Vec::new();
-    for a in assets {
-        let chain = a["chain"].as_u64()? as u16;
-        let token: [u8; 32] = hex::decode(a["token"].as_str()?).ok()?.try_into().ok()?;
-        let locked = match &a["locked"] {
-            v if v.is_string() => v.as_str()?.parse().ok()?,
-            v => u128::from(v.as_u64()?),
-        };
-        out.push((chain, token, locked));
+/// What Rand says is outstanding: `(chain, token word) -> locked` in attested
+/// 8-decimal units, and the token's total supply.
+struct RandSide {
+    locked: Vec<(u16, [u8; 32], u128)>,
+    total_supply: Option<u128>,
+}
+
+fn amount(v: &serde_json::Value) -> Option<u128> {
+    match v {
+        v if v.is_string() => v.as_str()?.parse().ok(),
+        v => v.as_u64().map(u128::from),
     }
-    Some(out)
+}
+
+fn backing_rows(rows: &[serde_json::Value]) -> Option<Vec<(u16, [u8; 32], u128)>> {
+    rows.iter()
+        .map(|a| {
+            let chain = a["chain"].as_u64()? as u16;
+            let token: [u8; 32] = hex::decode(a["token"].as_str()?).ok()?.try_into().ok()?;
+            Some((chain, token, amount(&a["locked"])?))
+        })
+        .collect()
+}
+
+/// `rand_getTokenSupply [token]` is the source of truth (total supply and the
+/// per-backing `locked`); a node that predates it may still serve the backing
+/// rows in `rand_getBridgeState.assets`.
+async fn rand_side(config: &Config, token: &str) -> Option<RandSide> {
+    let rpc = JsonRpc::new(&config.rand.rpc);
+    let param = token
+        .parse::<u64>()
+        .map(|i| json!(i))
+        .unwrap_or_else(|_| json!(token));
+    if let Ok(v) = rpc.call("rand_getTokenSupply", json!([param])).await {
+        if let Some(rows) = v["backings"].as_array() {
+            return Some(RandSide {
+                locked: backing_rows(rows)?,
+                total_supply: amount(&v["total_supply"]),
+            });
+        }
+    }
+    let state = rpc.call("rand_getBridgeState", json!([])).await.ok()?;
+    Some(RandSide {
+        locked: backing_rows(state["assets"].as_array()?)?,
+        total_supply: None,
+    })
 }
 
 /// Native units -> the 8-decimal units Rand counts in.
@@ -230,7 +260,8 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config)?;
     let mut rows = evm_rows(&config).await?;
     rows.extend(solana_rows(&config).await?);
-    let locked = rand_locked(&config).await;
+    let rand = rand_side(&config, &cli.token).await;
+    let locked = rand.as_ref().map(|r| &r.locked);
 
     println!(
         "{:<5} {:<5} {:<8} {:>24} {:>18} {:>24} {:>20}  verdict",
@@ -276,8 +307,57 @@ async fn main() -> Result<()> {
             verdict
         );
     }
+    if let Some(rand) = &rand {
+        let sum: u128 = rand.locked.iter().map(|(_, _, v)| v).sum();
+        match rand.total_supply {
+            Some(total) if total == sum => {
+                println!("Rand: total supply {total} == sum of locked (8dp)")
+            }
+            Some(total) => {
+                println!("Rand: TOTAL SUPPLY {total} != SUM OF LOCKED {sum} — the ledger invariant is broken");
+                insolvent = true;
+            }
+            None => {
+                println!("Rand: sum of locked {sum} (8dp); total supply not served by this node")
+            }
+        }
+        let custody_8dp: u128 = rows.iter().map(|r| attested(r.custody, r.decimals)).sum();
+        println!(
+            "Endpoints: total custody {custody_8dp} (8dp); custody - locked = {}",
+            custody_8dp as i128 - sum as i128
+        );
+    }
     if insolvent {
         return Err(anyhow!("at least one endpoint holds less than it owes"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape `rand_getTokenSupply` serves (fullnode feat/rpl).
+    #[test]
+    fn reads_the_token_supply_rows() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"total_supply":"150000000","backings":[
+                {"chain":2,"token":"000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7","decimals":6,"locked":"100000000","minted_today":"100000000","mint_day":20716},
+                {"chain":5,"token":"c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61","decimals":6,"locked":50000000}]}"#,
+        )
+        .unwrap();
+        let rows = backing_rows(v["backings"].as_array().unwrap()).expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].0, rows[0].2), (2, 100_000_000));
+        assert_eq!(
+            (rows[1].0, rows[1].2),
+            (5, 50_000_000),
+            "a number is read like a decimal string"
+        );
+        assert_eq!(amount(&v["total_supply"]), Some(150_000_000));
+        assert_eq!(rows.iter().map(|r| r.2).sum::<u128>(), 150_000_000);
+        // 1 USDT (6 decimals) in custody is 100_000_000 on Rand; 1 BSC-USD (18) likewise.
+        assert_eq!(attested(1_000_000, 6), 100_000_000);
+        assert_eq!(attested(1_000_000_000_000_000_000, 18), 100_000_000);
+    }
 }
