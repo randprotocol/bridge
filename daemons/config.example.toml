@@ -12,6 +12,9 @@ rpc = "http://127.0.0.1:8545"
 # The 32-byte Rand burn emitter from the genesis `bridge.emitter`.
 emitter = "0000000000000000000000000000000000000000000000000000000000000000"
 start_sequence = 0
+# The Rand chain id. Required to co-sign (spec/PQ-COSIGNATURE.md): it is part of
+# what the Dilithium2 co-signature is over, so it is configured, never asked of a node.
+# chain_id = 14
 
 # ---- source endpoints ------------------------------------------------------
 # `finality` is what the guardian waits for before it signs. A signature
@@ -54,6 +57,7 @@ start_sequence = 0
 [guardian]
 listen = "127.0.0.1:7071"            # put TLS / a reverse proxy in front for remote relayers
 key_env = "GUARDIAN_KEY"             # 0x + 64 hex; one key per guardian, one guardian per host
+pq_seed_env = "GUARDIAN_PQ_SEED"     # 32-byte Dilithium2 seed, generated ON this host; unset = no co-signature
 
 # ---- relayer -----------------------------------------------------------------
 [relayer]

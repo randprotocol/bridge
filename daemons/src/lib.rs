@@ -13,6 +13,7 @@ pub mod config;
 pub mod crypto;
 pub mod guardian;
 pub mod message;
+pub mod pq;
 pub mod relayer;
 pub mod rpc;
 pub mod sources;

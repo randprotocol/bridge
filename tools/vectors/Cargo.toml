@@ -5,8 +5,18 @@ edition = "2021"
 license = "GPL-3.0-only"
 publish = false
 
+[[bin]]
+name = "vectors"
+path = "src/main.rs"
+
+[[bin]]
+name = "pq-vectors"
+path = "src/pq.rs"
+
 [dependencies]
 randprotocol-core = { path = "../../../fullnode/crates/randprotocol-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
+crystals-dilithium = "2.0"
+sha3 = "0.10"

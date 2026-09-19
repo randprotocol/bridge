@@ -79,6 +79,8 @@ fn signing_and_assembling_reproduces_the_ok_transfer_vectors() {
     let set = GuardianSet {
         index: 0,
         keys: guardians.iter().map(|k| k.address()).collect(),
+        pq_keys: Vec::new(),
+        rand_chain_id: None,
     };
     let emitters = emitters(&v);
     let mut reproduced = 0;
@@ -132,6 +134,8 @@ fn assembly_needs_a_quorum_of_distinct_set_members() {
     let set = GuardianSet {
         index: 0,
         keys: guardians.iter().map(|k| k.address()).collect(),
+        pq_keys: Vec::new(),
+        rand_chain_id: None,
     };
     let case = &v["vectors"][0];
     let message = Observed::new(

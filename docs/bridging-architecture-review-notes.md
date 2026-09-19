@@ -176,3 +176,16 @@ after it lands W5 rotation → G6 operator-held keys · W1 daemons + vectors (if
 - **B4** accept deposit linkability with a sweep wallet, or wait for a blinded recipient (CS7).
 - **B5** S3 Phase B in the same cut as the bridge, given it was reverted once at chain 12.
 - G2's shape: who may pause the Rand side — a guardian quorum, the validators, or both.
+
+## 5. Decisions taken since (2026-09-19, evening)
+
+The user chose **all three** Rand-side items for the chain-14 cut: a per-backing inbound mint cap
+(100,000 zUSD per backing per day) with a mint pause — one genesis Dilithium2 key can *pause*, a PQ
+guardian quorum is needed to *unpause*; the forward timestamp bound; and the **Dilithium2
+co-signature** on every `BridgeAttest`. The co-signature format is `spec/PQ-COSIGNATURE.md`
+(accepted by the fullnode as written); its vectors are `vectors/pq-cosignatures.json`
+(`tools/vectors`, `--bin pq-vectors`), and the guardian and relayer implement it (W1, bridge side:
+done; Rand side: in `feat/rpl`). B3 is settled: round-3 Dilithium2 as the node already links it.
+S3 Phase B does not return in chain 14 (B5), so the relayer keeps its off-chain recipient table.
+Post-genesis listing of backings is a Rand-only PQ-quorum message, not an attestation payload, so
+`bridge-codec` and the deployed endpoints stay byte-stable.

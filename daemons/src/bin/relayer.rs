@@ -86,10 +86,13 @@ fn destinations(config: &Config, section: &RelayerConfig) -> Result<Destinations
 async fn guardian_set(rand: &JsonRpc, section: &RelayerConfig) -> Result<GuardianSet> {
     match bridge_daemons::sources::rand::bridge_state(rand).await {
         Ok(Some(state)) => {
+            let rand_chain_id = bridge_daemons::sources::rand::chain_id(rand).await.ok();
             return Ok(GuardianSet {
                 index: state.guardian_set_index,
                 keys: state.guardians,
-            })
+                pq_keys: state.pq_guardians,
+                rand_chain_id,
+            });
         }
         Ok(None) => {}
         Err(e) => tracing::debug!("rand_getBridgeState: {e:#}"),
@@ -107,6 +110,8 @@ async fn guardian_set(rand: &JsonRpc, section: &RelayerConfig) -> Result<Guardia
     Ok(GuardianSet {
         index: section.guardian_set_index,
         keys,
+        pq_keys: Vec::new(),
+        rand_chain_id: None,
     })
 }
 

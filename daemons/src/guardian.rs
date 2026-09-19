@@ -6,6 +6,7 @@ use anyhow::Result;
 use crate::api::{SignedMessage, SIGNED};
 use crate::crypto::GuardianKey;
 use crate::message::{check_signable, Emitters, Observed};
+use crate::pq::PqKey;
 use crate::sources::Source;
 use crate::store::Store;
 
@@ -41,11 +42,19 @@ pub struct Refused {
     pub reason: String,
 }
 
+/// A guardian's post-quantum half: its Dilithium2 key and the Rand chain id
+/// its co-signatures name.
+pub struct PqSigner {
+    pub key: PqKey,
+    pub rand_chain_id: u64,
+}
+
 /// One poll of one source. Returns how many messages were signed.
 pub async fn step<S: Source>(
     source: &S,
     store: &Store,
     key: &GuardianKey,
+    pq: Option<&PqSigner>,
     emitters: &Emitters,
 ) -> Result<usize> {
     let cursor = match store.cursor(source.name())? {
@@ -55,7 +64,7 @@ pub async fn step<S: Source>(
     let (messages, next) = source.poll(&cursor).await?;
     let mut signed = 0;
     for message in messages {
-        if sign_one(store, key, emitters, &message)? {
+        if sign_one(store, key, pq, emitters, &message)? {
             signed += 1;
         }
     }
@@ -72,6 +81,7 @@ pub async fn step<S: Source>(
 pub fn sign_one(
     store: &Store,
     key: &GuardianKey,
+    pq: Option<&PqSigner>,
     emitters: &Emitters,
     message: &Observed,
 ) -> Result<bool> {
@@ -105,10 +115,18 @@ pub fn sign_one(
         return Ok(false);
     }
     let signature = key.sign(&message.digest)?;
+    // Only what Rand will verify is co-signed: releases stay classical.
+    let pq_signature = match pq {
+        Some(pq) if message.to_chain() == Some(bridge_codec::CHAIN_RAND) => {
+            Some(hex::encode(pq.key.sign(pq.rand_chain_id, &message.digest)))
+        }
+        _ => None,
+    };
     let signed = SignedMessage {
         message: message.clone(),
         guardian: hex::encode(key.address()),
         signature,
+        pq_signature,
     };
     store.write_message(SIGNED, chain, sequence, &signed)?;
     tracing::info!(chain, sequence, digest = %hex::encode(message.digest), "signed");

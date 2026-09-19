@@ -33,6 +33,17 @@ pub struct BridgeState {
     pub guardian_set_index: u32,
     pub guardians: Vec<[u8; 20]>,
     pub burn_sequence: u64,
+    /// Dilithium2 public keys, index-aligned with `guardians`; empty on a
+    /// chain that does not require the co-signature.
+    pub pq_guardians: Vec<Vec<u8>>,
+}
+
+/// The Rand chain's id, as the node serves it.
+pub async fn chain_id(rpc: &JsonRpc) -> Result<u64> {
+    rpc.call("rand_chainId", json!([]))
+        .await?
+        .as_u64()
+        .ok_or_else(|| anyhow!("rand_chainId: not a number"))
 }
 
 pub async fn bridge_state(rpc: &JsonRpc) -> Result<Option<BridgeState>> {
@@ -54,6 +65,14 @@ pub async fn bridge_state(rpc: &JsonRpc) -> Result<Option<BridgeState>> {
         burn_sequence: v["burn_sequence"]
             .as_u64()
             .ok_or_else(|| anyhow!("no burn_sequence"))?,
+        pq_guardians: v["pq_guardians"]
+            .as_array()
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|k| hex::decode(k.as_str()?).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }))
 }
 

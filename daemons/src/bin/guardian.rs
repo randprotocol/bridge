@@ -40,6 +40,49 @@ async fn main() -> Result<()> {
     drop(secret);
     tracing::info!("guardian {}", hex::encode(key.address()));
 
+    // The post-quantum half (spec/PQ-COSIGNATURE.md): a second key, and the
+    // Rand chain id its co-signatures name. The id is configuration, checked
+    // against the node when the node answers — never taken from it.
+    let pq = match std::env::var(&section.pq_seed_env)
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(seed) => {
+            std::env::remove_var(&section.pq_seed_env);
+            let rand_chain_id = config
+                .rand
+                .chain_id
+                .ok_or_else(|| anyhow!("rand.chain_id is required to co-sign"))?;
+            let pq_key = bridge_daemons::pq::PqKey::from_seed_hex(&seed)?;
+            tracing::info!(
+                "co-signing for Rand chain {rand_chain_id}; PQ public key {}…",
+                &hex::encode(pq_key.public_key())[..16]
+            );
+            Some(guardian::PqSigner {
+                key: pq_key,
+                rand_chain_id,
+            })
+        }
+        None => {
+            tracing::warn!(
+                "{} is not set: deposits will carry no Dilithium2 co-signature",
+                section.pq_seed_env
+            );
+            None
+        }
+    };
+    if let Some(pq) = &pq {
+        let rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
+        if let Ok(served) = bridge_daemons::sources::rand::chain_id(&rpc).await {
+            if served != pq.rand_chain_id {
+                return Err(anyhow!(
+                    "rand.chain_id is {} but the node at rand.rpc serves chain {served}",
+                    pq.rand_chain_id
+                ));
+            }
+        }
+    }
+
     let store = Store::open(&config.data_dir)?;
     let emitters = config.emitters()?;
 
@@ -69,16 +112,19 @@ async fn main() -> Result<()> {
         for source in &evm {
             report(
                 source_name(source),
-                guardian::step(source, &store, &key, &emitters).await,
+                guardian::step(source, &store, &key, pq.as_ref(), &emitters).await,
             )?;
         }
         if let Some(source) = &solana {
             report(
                 source_name(source),
-                guardian::step(source, &store, &key, &emitters).await,
+                guardian::step(source, &store, &key, pq.as_ref(), &emitters).await,
             )?;
         }
-        report("rand", guardian::step(&rand, &store, &key, &emitters).await)?;
+        report(
+            "rand",
+            guardian::step(&rand, &store, &key, pq.as_ref(), &emitters).await,
+        )?;
 
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(config.poll_secs)) => {}

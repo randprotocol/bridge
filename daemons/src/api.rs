@@ -27,6 +27,18 @@ pub struct SignedMessage {
     /// The signer's 20-byte guardian address, hex.
     pub guardian: String,
     pub signature: RawSignature,
+    /// The Dilithium2 co-signature (hex, 2,420 bytes) for a message addressed
+    /// to Rand, when this guardian holds a PQ key (`spec/PQ-COSIGNATURE.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_signature: Option<String>,
+}
+
+/// What a guardian returned for one message, after the ECDSA signature has
+/// been checked. The co-signature is checked by whoever knows the PQ set.
+pub struct Collected {
+    pub address: [u8; 20],
+    pub signature: RawSignature,
+    pub pq_signature: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,7 +113,7 @@ impl GuardianClient {
     /// Nothing the guardian says is taken on trust: the signature must
     /// recover, over the digest of the body the *relayer* observed, to the
     /// address it is returned with.
-    pub async fn signature(&self, expected: &Observed) -> Result<Option<([u8; 20], RawSignature)>> {
+    pub async fn signature(&self, expected: &Observed) -> Result<Option<Collected>> {
         let url = format!(
             "{}/v1/signature/{}/{}",
             self.origin, expected.emitter_chain, expected.sequence
@@ -129,6 +141,14 @@ impl GuardianClient {
             );
         }
         let address = crypto::recover(&expected.digest, &signed.signature)?;
-        Ok(Some((address, signed.signature)))
+        let pq_signature = signed
+            .pq_signature
+            .as_deref()
+            .and_then(|s| hex::decode(s).ok());
+        Ok(Some(Collected {
+            address,
+            signature: signed.signature,
+            pq_signature,
+        }))
     }
 }

@@ -95,8 +95,19 @@ impl RandSubmitter {
         attestation: &Attestation,
         digest: &[u8; 32],
         to: &str,
+        pq: Option<&[crate::pq::PqSignature]>,
     ) -> Result<Outcome> {
         let file = write_attestation(&self.scratch, attestation, digest)?;
+        let pq_file = match pq {
+            Some(list) => {
+                let path = self
+                    .scratch
+                    .join(format!("{}.pq.json", hex::encode(digest)));
+                std::fs::write(&path, serde_json::to_vec(list)?)?;
+                Some(path)
+            }
+            None => None,
+        };
         let mut command = Command::new(&self.cli);
         command
             .args(&self.extra_args)
@@ -104,8 +115,14 @@ impl RandSubmitter {
             .arg(format!("@{}", file.display()))
             .arg("--to")
             .arg(to);
+        if let Some(path) = &pq_file {
+            command.arg("--pq").arg(format!("@{}", path.display()));
+        }
         let outcome = run(command, "rand bridge-mint").await;
         let _ = std::fs::remove_file(&file);
+        if let Some(path) = &pq_file {
+            let _ = std::fs::remove_file(path);
+        }
         outcome
     }
 }

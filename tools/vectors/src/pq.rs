@@ -1,0 +1,138 @@
+//! Generates `vectors/pq-cosignatures.json`: the Dilithium2 co-signature
+//! vectors of `spec/PQ-COSIGNATURE.md`, built on top of the attestation
+//! vectors (which this never modifies).
+//!
+//! `cargo run --release --bin pq-vectors` writes the file;
+//! `cargo run --release --bin pq-vectors -- --check` asserts the file on disk
+//! is what the generator produces. Signing is deterministic, so it is.
+
+use std::fs;
+use std::path::PathBuf;
+
+use crystals_dilithium::dilithium2;
+use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
+
+const DOMAIN: &[u8] = b"rand-bridge-pq-cosign-1";
+const TEST_CHAIN_ID: u64 = 99;
+const N: usize = 6;
+
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    Keccak256::digest(data).into()
+}
+
+fn seed(i: u8) -> [u8; 32] {
+    let mut pre = b"rand-bridge-pq-test-guardian".to_vec();
+    pre.push(i);
+    keccak256(&pre)
+}
+
+fn keypair(i: u8) -> dilithium2::Keypair {
+    dilithium2::Keypair::generate(Some(&seed(i))).expect("32-byte seed")
+}
+
+/// `M = domain ‖ rand_chain_id (u64 BE) ‖ mu`.
+fn message(chain_id: u64, mu: &[u8; 32]) -> Vec<u8> {
+    let mut m = DOMAIN.to_vec();
+    m.extend_from_slice(&chain_id.to_be_bytes());
+    m.extend_from_slice(mu);
+    m
+}
+
+fn sig(i: u8, m: &[u8]) -> String {
+    hex::encode(keypair(i).sign(m))
+}
+
+fn sigs(indices: &[u8], m: &[u8]) -> Vec<Value> {
+    indices.iter().map(|&i| json!({ "index": i, "signature": sig(i, m) })).collect()
+}
+
+fn attestations() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/attestations.json");
+    serde_json::from_str(&fs::read_to_string(path).expect("vectors/attestations.json")).expect("json")
+}
+
+fn render() -> String {
+    let att = attestations();
+    let mut bodies = Vec::new();
+    for v in att["vectors"].as_array().expect("vectors") {
+        // Everything Rand accepts from the guardians: verifier chain 1, expected ok.
+        if v["verifier_chain"] != 1 || v["expect"] != "ok" {
+            continue;
+        }
+        let mu: [u8; 32] = hex::decode(v["digest"].as_str().expect("digest").trim_start_matches("0x"))
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes");
+        let m = message(TEST_CHAIN_ID, &mu);
+        bodies.push(json!({
+            "attestation_vector": v["name"],
+            "mu": hex::encode(mu),
+            "message": hex::encode(&m),
+            "pq_signatures": sigs(&[0, 1, 2, 3, 4, 5], &m),
+        }));
+    }
+    assert!(bodies.len() >= 4, "expected the ok vectors addressed to Rand");
+
+    // The cases run over the first body.
+    let mu: [u8; 32] = hex::decode(bodies[0]["mu"].as_str().unwrap()).unwrap().try_into().unwrap();
+    let m = message(TEST_CHAIN_ID, &mu);
+    let case = |name: &str, expect: &str, chain_id: u64, list: Vec<Value>| {
+        json!({ "name": name, "expect": expect, "rand_chain_id": chain_id, "mu": hex::encode(mu), "pq_signatures": list })
+    };
+    let mut short = sigs(&[0, 1, 2, 3, 4], &m);
+    let full = short[4]["signature"].as_str().unwrap().to_string();
+    short[4]["signature"] = json!(full[..full.len() - 2]); // 2,419 bytes
+    let mut wrong_index = sigs(&[0, 1, 2, 3, 4], &m);
+    wrong_index[4]["signature"] = json!(sig(5, &m)); // guardian 5's signature filed under index 4
+    let mut other_mu = mu;
+    other_mu[0] ^= 1;
+    let cases = vec![
+        case("quorum_lowest_five_ok", "ok", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3, 4], &m)),
+        case("quorum_any_five_ok", "ok", TEST_CHAIN_ID, sigs(&[0, 2, 3, 4, 5], &m)),
+        case("all_six_ok", "ok", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3, 4, 5], &m)),
+        case("four_of_six", "PqNoQuorum", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3], &m)),
+        case("empty", "PqNoQuorum", TEST_CHAIN_ID, vec![]),
+        case("repeated_index", "PqIndexOrder", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3, 3], &m)),
+        case("descending_indices", "PqIndexOrder", TEST_CHAIN_ID, sigs(&[4, 3, 2, 1, 0], &m)),
+        case("index_out_of_range", "PqIndexOutOfRange", TEST_CHAIN_ID, {
+            let mut l = sigs(&[0, 1, 2, 3], &m);
+            l.push(json!({ "index": 6, "signature": sig(5, &m) }));
+            l
+        }),
+        case("signature_one_byte_short", "PqBadSignatureLength", TEST_CHAIN_ID, short),
+        case("signature_filed_under_the_wrong_index", "PqBadSignature", TEST_CHAIN_ID, wrong_index),
+        case("signed_for_another_chain_id", "PqBadSignature", TEST_CHAIN_ID + 1, sigs(&[0, 1, 2, 3, 4], &m)),
+        case("signed_over_another_mu", "PqBadSignature", TEST_CHAIN_ID, sigs(&[0, 1, 2, 3, 4], &message(TEST_CHAIN_ID, &other_mu))),
+    ];
+
+    let guardians: Vec<Value> = (0..N as u8)
+        .map(|i| json!({ "index": i, "seed": hex::encode(seed(i)), "public_key": hex::encode(keypair(i).public.to_bytes()) }))
+        .collect();
+    let file = json!({
+        "spec": "spec/PQ-COSIGNATURE.md",
+        "scheme": "Dilithium2 (round 3), crystals-dilithium 2.0 `dilithium2`, deterministic signing",
+        "domain": String::from_utf8_lossy(DOMAIN),
+        "rand_chain_id": TEST_CHAIN_ID,
+        "quorum": N * 2 / 3 + 1,
+        "pq_guardians": guardians,
+        "bodies": bodies,
+        "cases": cases,
+    });
+    let mut out = serde_json::to_string_pretty(&file).expect("json");
+    out.push('\n');
+    out
+}
+
+fn main() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/pq-cosignatures.json");
+    let rendered = render();
+    if std::env::args().any(|a| a == "--check") {
+        let on_disk = fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        assert!(on_disk == rendered, "{} is not what the generator produces", path.display());
+        println!("OK: {} matches the generator", path.display());
+        return;
+    }
+    fs::write(&path, rendered).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    println!("wrote {}", path.display());
+}

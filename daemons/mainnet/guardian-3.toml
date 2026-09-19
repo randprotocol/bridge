@@ -42,3 +42,4 @@ program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
 [guardian]
 listen = "127.0.0.1:7073"
 key_env = "GUARDIAN3_PRIV_KEY"
+pq_seed_env = "GUARDIAN3_PQ_SEED"   # set rand.chain_id too once chain 14 is cut

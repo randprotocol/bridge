@@ -10,9 +10,10 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Result};
 use bridge_codec::{quorum, Attestation, Payload, CHAIN_RAND, CHAIN_SOLANA};
 
-use crate::api::GuardianClient;
+use crate::api::{Collected, GuardianClient};
 use crate::crypto::RawSignature;
 use crate::message::Observed;
+use crate::pq::{self, PqSignature};
 use crate::sources::Source;
 use crate::store::Store;
 use crate::submit::evm::EvmSubmitter;
@@ -36,6 +37,10 @@ pub struct Done {
 pub struct GuardianSet {
     pub index: u32,
     pub keys: Vec<[u8; 20]>,
+    /// Dilithium2 keys, index-aligned with `keys`, and the Rand chain id the
+    /// co-signatures name. Empty / `None` when Rand does not require them.
+    pub pq_keys: Vec<Vec<u8>>,
+    pub rand_chain_id: Option<u64>,
 }
 
 /// Builds the attestation for `message` from whatever signatures are in
@@ -46,6 +51,33 @@ pub struct GuardianSet {
 /// transaction size leaves no slack. Indices come out strictly increasing,
 /// each signer counted once, as every verifier requires.
 pub fn assemble(
+    message: &Observed,
+    set: &GuardianSet,
+    signatures: &[([u8; 20], RawSignature)],
+) -> Option<Attestation> {
+    assemble_inner(message, set, signatures)
+}
+
+/// The Dilithium2 quorum for a message addressed to Rand: each guardian's
+/// co-signature is filed under the index its ECDSA address has in the set,
+/// verified, and exactly a quorum kept (`spec/PQ-COSIGNATURE.md` §6).
+pub fn assemble_pq(
+    message: &Observed,
+    set: &GuardianSet,
+    collected: &[Collected],
+) -> Option<Vec<PqSignature>> {
+    let chain_id = set.rand_chain_id?;
+    let found: Vec<(u8, Vec<u8>)> = collected
+        .iter()
+        .filter_map(|c| {
+            let index = set.keys.iter().position(|k| *k == c.address)?;
+            Some((index as u8, c.pq_signature.clone()?))
+        })
+        .collect();
+    pq::assemble(&found, &set.pq_keys, chain_id, &message.digest)
+}
+
+fn assemble_inner(
     message: &Observed,
     set: &GuardianSet,
     signatures: &[([u8; 20], RawSignature)],
@@ -194,11 +226,33 @@ pub async fn relay_one(
             Err(e) => tracing::warn!("{}: {e:#}", guardian.origin()),
         }
     }
-    let Some(attestation) = assemble(message, set, &signatures) else {
+    let ecdsa: Vec<([u8; 20], RawSignature)> = signatures
+        .iter()
+        .map(|c| (c.address, c.signature.clone()))
+        .collect();
+    let Some(attestation) = assemble(message, set, &ecdsa) else {
         return Ok(Progress::AwaitingQuorum {
             have: signatures.len(),
             need: quorum(set.keys.len()),
         });
+    };
+    // A Rand chain that lists PQ guardians refuses a mint without their
+    // quorum, so there is no point submitting one.
+    let pq_quorum = if to_chain == CHAIN_RAND && !set.pq_keys.is_empty() {
+        match assemble_pq(message, set, &signatures) {
+            Some(list) => Some(list),
+            None => {
+                return Ok(Progress::AwaitingQuorum {
+                    have: signatures
+                        .iter()
+                        .filter(|c| c.pq_signature.is_some())
+                        .count(),
+                    need: pq::quorum(set.pq_keys.len()),
+                })
+            }
+        }
+    } else {
+        None
     };
 
     let outcome = if to_chain == CHAIN_RAND {
@@ -208,7 +262,7 @@ pub async fn relay_one(
             .rand
             .as_ref()
             .expect("checked above")
-            .mint(&attestation, &message.digest, &to)
+            .mint(&attestation, &message.digest, &to, pq_quorum.as_deref())
             .await?
     } else if to_chain == CHAIN_SOLANA {
         destinations

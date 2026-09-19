@@ -31,6 +31,10 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   `data_dir/refused/` with the reason. **Rotations are never signed by the daemon.**
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
+- **Co-signs deposits with Dilithium2** when `GUARDIAN_PQ_SEED` and `rand.chain_id` are set
+  (`spec/PQ-COSIGNATURE.md`): a second quorum the chain-14 ledger requires on every mint, over
+  `"rand-bridge-pq-cosign-1" ‖ rand_chain_id ‖ mu`. Releases stay classical. The seed is generated on
+  the operator's host and never leaves it; only the 1,312-byte public key goes into the genesis.
 - Serves `GET /v1/signature/{chain}/{sequence}` and `GET /v1/health`. A signature carries no
   guardian index: `mu` covers the body only, so after a rotation the same signature is simply
   assembled under the new set's indices. That is all "re-signing under the current set" takes.
@@ -46,6 +50,9 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   minting seals a note to the full `rand1…` address. Whoever wants a deposit relayed registers the
   address (`POST /v1/recipients`, or `recipients_file`). The chain refuses a mint whose address does
   not hash to the lock's recipient, so a wrong registration can only fail, never misdirect.
+- For a deposit on a chain that lists `pq_guardians`, also collects the co-signatures, verifies
+  each under the key at its guardian's index, keeps exactly a quorum and hands it to the wallet
+  (`rand bridge-mint @att --pq @pq.json --to …`); short of either quorum nothing is submitted.
 - Checks `consumed(digest)` first and treats "already consumed" as done: relayers race, by design.
 
 ## Audit

@@ -14,7 +14,8 @@ for i in 1 2 3 4 5 6; do
   var="GUARDIAN${i}_PRIV_KEY"
   [[ -n "${!var:-}" ]] || { echo "error: $var is not set" >&2; exit 1; }
   # `env -i`: the child sees its own key and nothing else from this shell.
-  env -i PATH="$PATH" HOME="$HOME" "$var=${!var}" \
+  pq="GUARDIAN${i}_PQ_SEED"   # optional until chain 14 requires the co-signature
+  env -i PATH="$PATH" HOME="$HOME" "$var=${!var}" ${!pq:+"$pq=${!pq}"} \
     nohup "$bin" --config "mainnet/guardian-$i.toml" >>"data/mainnet/logs/guardian-$i.log" 2>&1 &
   echo "guardian $i: pid $! (log data/mainnet/logs/guardian-$i.log)"
 done

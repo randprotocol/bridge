@@ -28,6 +28,7 @@ anyhow = "1"
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 bs58 = "0.5"
 base64 = "0.22"
+crystals-dilithium = "2.0"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }

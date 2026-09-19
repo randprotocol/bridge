@@ -216,13 +216,13 @@ async fn lock_is_signed_and_a_burn_is_released_on_anvil() {
     let mut stores = Vec::new();
     for (i, key) in keys.iter().enumerate() {
         let store = Store::open(&tmp.path().join(format!("guardian-{i}"))).unwrap();
-        let signed = guardian::step(&EvmSource::new(&cfg).unwrap(), &store, key, &emitters)
+        let signed = guardian::step(&EvmSource::new(&cfg).unwrap(), &store, key, None, &emitters)
             .await
             .unwrap();
         assert_eq!(signed, 1, "guardian {i} signs the lock");
         // A second poll finds nothing new and signs nothing twice.
         assert_eq!(
-            guardian::step(&EvmSource::new(&cfg).unwrap(), &store, key, &emitters)
+            guardian::step(&EvmSource::new(&cfg).unwrap(), &store, key, None, &emitters)
                 .await
                 .unwrap(),
             0
@@ -287,13 +287,15 @@ async fn lock_is_signed_and_a_burn_is_released_on_anvil() {
     .unwrap();
     // Only five of the six sign: exactly a quorum.
     for (store, key) in stores.iter().zip(&keys).skip(1) {
-        assert!(guardian::sign_one(store, key, &emitters, &burn).unwrap());
+        assert!(guardian::sign_one(store, key, None, &emitters, &burn).unwrap());
     }
 
     let relayer_store = Store::open(&tmp.path().join("relayer")).unwrap();
     let set = GuardianSet {
         index: 0,
         keys: keys.iter().map(|k| k.address()).collect(),
+        pq_keys: Vec::new(),
+        rand_chain_id: None,
     };
     let mut endpoints = std::collections::BTreeMap::new();
     endpoints.insert(
@@ -350,6 +352,6 @@ async fn lock_is_signed_and_a_burn_is_released_on_anvil() {
     let mut forged = burn.decoded();
     forged.nonce = 1;
     let forged = Observed::new(forged.encode()).unwrap();
-    let err = guardian::sign_one(&stores[1], &keys[1], &emitters, &forged).unwrap_err();
+    let err = guardian::sign_one(&stores[1], &keys[1], None, &emitters, &forged).unwrap_err();
     assert!(err.downcast_ref::<guardian::Equivocation>().is_some());
 }

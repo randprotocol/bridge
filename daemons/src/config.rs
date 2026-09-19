@@ -39,6 +39,10 @@ pub struct RandConfig {
     /// First burn sequence to look at on a fresh data dir.
     #[serde(default)]
     pub start_sequence: u64,
+    /// The Rand chain's `chain_id`. Required by a guardian that co-signs
+    /// (`spec/PQ-COSIGNATURE.md`): it is part of what the co-signature is
+    /// over, and the guardian must know it without trusting an RPC node.
+    pub chain_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -107,6 +111,14 @@ pub struct GuardianConfig {
     /// Environment variable holding this guardian's secp256k1 key.
     #[serde(default = "default_guardian_key_env")]
     pub key_env: String,
+    /// Environment variable holding this guardian's 32-byte Dilithium2 seed.
+    /// When it is set the guardian co-signs every message addressed to Rand.
+    #[serde(default = "default_guardian_pq_env")]
+    pub pq_seed_env: String,
+}
+
+fn default_guardian_pq_env() -> String {
+    "GUARDIAN_PQ_SEED".into()
 }
 
 fn default_guardian_key_env() -> String {
