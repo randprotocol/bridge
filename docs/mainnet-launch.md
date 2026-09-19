@@ -92,18 +92,25 @@ runs in this order; each step that signs or broadcasts needs the owner's explici
    ```sh
    G="--rand-chain-id 14 --pq-guardians-file ~/.rand-bridge/mainnet-pq-set1/public.json \
       --seed-envs NEW_GUARDIAN1_PQ_SEED,NEW_GUARDIAN2_PQ_SEED,NEW_GUARDIAN3_PQ_SEED,NEW_GUARDIAN4_PQ_SEED,NEW_GUARDIAN5_PQ_SEED"
-   rand-bridge-gov pq-register $G --nonce 0 --name zUSD --symbol zUSD --salt <32-byte hex> \
+   rand-bridge-gov pq-register $G --nonce 0 --name "Shielded USD" --symbol zUSD \
+       --salt 27e77272ee77a47a6b66a62f3452dac66e681c79be6750d5e236e99f0d1e1d60 \
        --chain 2 --decimals 6  --token 000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7 --out zusd-0-register.json
-   rand-bridge-gov pq-list $G --nonce 1 --token-index <zUSD index> --chain 2 --decimals 6  --token 000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --out zusd-1.json   # Ethereum USDC
-   rand-bridge-gov pq-list $G --nonce 2 --token-index <zUSD index> --chain 3 --decimals 18 --token 00000000000000000000000055d398326f99059ff775485246999027b3197955 --out zusd-2.json   # BSC USDT
-   rand-bridge-gov pq-list $G --nonce 3 --token-index <zUSD index> --chain 3 --decimals 18 --token 0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d --out zusd-3.json   # BSC USDC
-   rand-bridge-gov pq-list $G --nonce 4 --token-index <zUSD index> --chain 4 --decimals 6  --token 000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c --out zusd-4.json   # Tron USDT
-   rand-bridge-gov pq-list $G --nonce 5 --token-index <zUSD index> --chain 5 --decimals 6  --token ce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264 --out zusd-5.json   # Solana USDT
-   rand-bridge-gov pq-list $G --nonce 6 --token-index <zUSD index> --chain 5 --decimals 6  --token c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61 --out zusd-6.json   # Solana USDC
+   rand-bridge-gov pq-list $G --nonce 1 --token-index 1 --chain 2 --decimals 6  --token 000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --out zusd-1.json   # Ethereum USDC
+   rand-bridge-gov pq-list $G --nonce 2 --token-index 1 --chain 3 --decimals 18 --token 00000000000000000000000055d398326f99059ff775485246999027b3197955 --out zusd-2.json   # BSC USDT
+   rand-bridge-gov pq-list $G --nonce 3 --token-index 1 --chain 3 --decimals 18 --token 0000000000000000000000008ac76a51cc950d9822d68b83fe1ad97b32cd580d --out zusd-3.json   # BSC USDC
+   rand-bridge-gov pq-list $G --nonce 4 --token-index 1 --chain 4 --decimals 6  --token 000000000000000000000000a614f803b6fd780986a42c78ec9c7f77e6ded13c --out zusd-4.json   # Tron USDT
+   rand-bridge-gov pq-list $G --nonce 5 --token-index 1 --chain 5 --decimals 6  --token ce010e60afedb22717bd63192f54145a3f965a33bb82d2c7029eb2ce1e208264 --out zusd-5.json   # Solana USDT
+   rand-bridge-gov pq-list $G --nonce 6 --token-index 1 --chain 5 --decimals 6  --token c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61 --out zusd-6.json   # Solana USDC
    ```
 
    Nonces are the ledger's `list_nonce` at the time (read `rand_getBridgeState`); a quorum for one
-   message authorises no other. Salt and the zUSD index come from the fullnode at the cut.
+   message authorises no other. The token is named **"Shielded USD"**, symbol `zUSD`; the salt is
+   `keccak256("rand-zusd-shielded-usd-chain-14")`; chain 14 lists no token in genesis, so the
+   registration takes index 1 (RAND is 0). `--decimals` is the *backing's* source decimals — zUSD
+   itself has 8 on Rand and is not in the message. The wallet then carries each file:
+   `rand token register-bridged --name "Shielded USD" --symbol zUSD --salt … --chain 2 --token … --decimals 6 --pq @zusd-0-register.json`,
+   `rand token list-backing --asset 1 --chain … --token … --decimals … --pq @zusd-N.json`,
+   and for the brake `rand bridge-pause --sig @pause.sig` / `rand bridge-unpause --pq @unpause.json`.
 6. **Only then `setToken`** on the endpoints, small caps first (list on Rand FIRST, whitelist
    SECOND — the other order strands a lock behind `UnlistedToken`), start the guardians
    (`GUARDIAN{i}_PQ_SEED` mapped from `NEW_GUARDIAN{i}_PQ_SEED`, `rand.chain_id = 14`) and a relayer,
