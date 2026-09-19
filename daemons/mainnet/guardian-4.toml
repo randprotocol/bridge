@@ -4,6 +4,7 @@ poll_secs = 15
 
 [rand]
 rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
+chain_id = 14                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
 emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
 
 [[evm]]
@@ -42,4 +43,4 @@ program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
 [guardian]
 listen = "127.0.0.1:7074"
 key_env = "GUARDIAN4_PRIV_KEY"
-pq_seed_env = "GUARDIAN4_PQ_SEED"   # set rand.chain_id too once chain 14 is cut
+pq_seed_env = "GUARDIAN4_PQ_SEED"

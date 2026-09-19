@@ -337,12 +337,12 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The shape `rand_getTokenSupply` serves (fullnode feat/rpl).
+    /// The shape `rand_getTokenSupply` serves (fullnode a2c9896: amounts are decimal strings).
     #[test]
     fn reads_the_token_supply_rows() {
         let v: serde_json::Value = serde_json::from_str(
             r#"{"total_supply":"150000000","backings":[
-                {"chain":2,"token":"000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7","decimals":6,"locked":"100000000","minted_today":"100000000","mint_day":20716},
+                {"chain":2,"token":"000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7","decimals":6,"locked":"100000000","mint_cap_per_day":"10000000000000","minted_today":"100000000","mint_day":20716},
                 {"chain":5,"token":"c6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61","decimals":6,"locked":50000000}]}"#,
         )
         .unwrap();
