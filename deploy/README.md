@@ -29,6 +29,18 @@ every chain, and `RAND_EMITTER` and `GUARDIANS` must be the values the Rand gene
 section carries: the chains have to agree on one guardian set and one Rand emitter before any of
 them can accept an attestation from the others (`README.md`, Deployment order).
 
+**Never reuse a guardian key or the Rand emitter between a testnet and mainnet.** An attestation
+does not name its network (`spec/ATTESTATION.md` §3.5): with a shared guardian set a testnet
+rotation replays on mainnet, with a shared emitter a testnet burn releases mainnet custody. Keep
+one `.env` per environment (`DEPLOY_ENV_FILE=deploy/.env.mainnet deploy/eth.sh mainnet`); the
+scripts refuse a mainnet deployment whose `GUARDIANS` or `RAND_EMITTER` appear in a testnet record
+under `deploy/deployments/`, and one with fewer than six guardians.
+
+The scripts keep every `*_PRIVATE_KEY` un-exported and hand one key to the one process that signs,
+identify the network by chain id (EVM), genesis block (Tron) or genesis hash (Solana) rather than
+by the name on the command line, and log only the origin of an RPC URL. `DEPLOY_YES=1` waives the
+prompt on testnets only; a mainnet prompt is waived by `--yes` on the command line alone.
+
 ## 2. Rehearse locally
 
 ```sh

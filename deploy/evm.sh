@@ -5,7 +5,7 @@
 #
 #   network   ethereum | sepolia | bsc | bsc-testnet | anvil
 #   --dry-run simulate only (no --broadcast)
-#   --yes     skip the confirmation prompt (or DEPLOY_YES=1)
+#   --yes     skip the confirmation prompt (DEPLOY_YES=1 does too, on testnets only)
 #   --verify  submit the source to Etherscan/BscScan afterwards
 #
 # Keys and RPC endpoints come from the environment / deploy/.env:
@@ -24,11 +24,11 @@ usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" >&2; exit 1; }
 
 network="${1:-}"; shift || true
 [[ -n "$network" ]] || usage
-dry_run=0; verify=0
+dry_run=0; verify=0; DEPLOY_YES_CLI=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=1 ;;
-    --yes) export DEPLOY_YES=1 ;;
+    --yes) DEPLOY_YES_CLI=1 ;;
     --verify) verify=1 ;;
     *) usage ;;
   esac
@@ -56,7 +56,7 @@ fi
 need_tool forge "install Foundry: https://getfoundry.sh"
 need_tool jq
 require "$key_var" "$rpc_var" ADMIN
-check_common_args
+check_common_args "$mainnet"
 is_hex_key "${!key_var}" || die "$key_var must be 0x + 64 hex"
 if [[ -z "${PAUSER:-}" ]]; then
   echo "warning: PAUSER is unset; the endpoint deploys with no pauser (only the admin can pause)" >&2
@@ -67,11 +67,17 @@ fi
 
 rpc="${!rpc_var}"
 info "network $network (bridge CHAIN=$chain, expected chain id $chain_id)"
-info "rpc $rpc"
+rpc_shown="$(redact_url "$rpc")"
+info "rpc $rpc_shown"
+
+# RPC URLs and explorer keys are secrets too (a provider URL embeds its
+# API key): cast reads ETH_RPC_URL, forge FOUNDRY_ETH_RPC_URL / ETHERSCAN_API_KEY, from the
+# environment, so neither is ever an argument.
+export ETH_RPC_URL="$rpc" FOUNDRY_ETH_RPC_URL="$rpc"
 
 # Refuse to sign against the wrong chain before forge even starts.
-actual_id="$(cast chain-id --rpc-url "$rpc")" || die "cannot reach $rpc"
-[[ "$actual_id" == "$chain_id" ]] || die "$rpc reports chain id $actual_id, expected $chain_id for $network"
+actual_id="$(cast chain-id)" || die "cannot reach $rpc_shown"
+[[ "$actual_id" == "$chain_id" ]] || die "$rpc_shown reports chain id $actual_id, expected $chain_id for $network"
 
 # The key never goes on a command line, so the deployer address is not
 # derived here: `cast wallet address` only takes a key as an argument.
@@ -79,40 +85,52 @@ actual_id="$(cast chain-id --rpc-url "$rpc")" || die "cannot reach $rpc"
 # DEPLOYER_PRIVATE_KEY environment) before it broadcasts. Set the
 # non-secret DEPLOYER_ADDRESS to get a pre-flight balance line.
 if [[ -n "${DEPLOYER_ADDRESS:-}" ]]; then
-  info "deployer $DEPLOYER_ADDRESS (balance $(cast balance --rpc-url "$rpc" --ether "$DEPLOYER_ADDRESS" 2>/dev/null || echo '?') native)"
+  info "deployer $DEPLOYER_ADDRESS (balance $(cast balance --ether "$DEPLOYER_ADDRESS" 2>/dev/null || echo '?') native)"
 fi
 
 if [[ "$dry_run" == "0" ]]; then
   confirm "$network" "$mainnet"
 fi
 
-forge_args=(script script/Deploy.s.sol:Deploy --rpc-url "$rpc" -vv)
+forge_args=(script script/Deploy.s.sol:Deploy -vv)
 if [[ "$dry_run" == "0" ]]; then
   forge_args+=(--broadcast)
 fi
 if [[ "$verify" == "1" ]]; then
   [[ -n "$scan_key_var" ]] || die "--verify is not supported on $network"
   require "$scan_key_var"
-  forge_args+=(--verify --etherscan-api-key "${!scan_key_var}")
+  forge_args+=(--verify)
+  export ETHERSCAN_API_KEY="${!scan_key_var}"
 fi
 
 cd "$BRIDGE_ROOT/evm"
-[[ -d lib/forge-std ]] || forge install foundry-rs/forge-std --no-git >/dev/null
+# Pinned: forge-std runs inside the script VM that holds the deployer key.
+[[ -d lib/forge-std ]] || forge install foundry-rs/forge-std@v1.16.2 --no-git >/dev/null
 
-# DEPLOYER_PRIVATE_KEY is read by Deploy.s.sol via vm.envUint; it is
-# exported for this one process only.
+run="broadcast/Deploy.s.sol/$chain_id/run-latest.json"
+if [[ "$dry_run" == "0" ]]; then
+  rm -f "$run"   # a stale run must never be read back as this one
+fi
+
+# DEPLOYER_PRIVATE_KEY is read by Deploy.s.sol via vm.envUint; load_env
+# keeps every key un-exported, so forge is the only process that sees it.
+forge_rc=0
 CHAIN="$chain" EXPECTED_CHAIN_ID="$chain_id" \
 ADMIN="$ADMIN" PAUSER="${PAUSER:-}" RAND_EMITTER="$RAND_EMITTER" GUARDIANS="$GUARDIANS" \
 DEPLOYER_PRIVATE_KEY="${!key_var}" \
-  forge "${forge_args[@]}"
+  forge "${forge_args[@]}" || forge_rc=$?
 
 if [[ "$dry_run" == "1" ]]; then
+  (( forge_rc == 0 )) || die "forge exited $forge_rc"
   info "dry run only; nothing was broadcast"
   exit 0
 fi
 
-run="broadcast/Deploy.s.sol/$chain_id/run-latest.json"
-[[ -f "$run" ]] || die "forge did not write $run"
+# forge also exits non-zero when only `--verify` failed, after a broadcast
+# that did land: the record is written whenever a deployment exists.
+if [[ ! -f "$run" ]]; then
+  die "forge exited $forge_rc and wrote no $run; nothing was deployed"
+fi
 address="$(jq -r '[.transactions[] | select(.transactionType == "CREATE")][0].contractAddress' "$run")"
 tx="$(jq -r '[.transactions[] | select(.transactionType == "CREATE")][0].hash' "$run")"
 [[ "$address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "could not read the deployed address from $run"
@@ -123,3 +141,6 @@ echo "tx        $tx"
 echo "emitter   $(emitter_wire_form "$address")   <- bridge.emitters[\"$( [[ $chain == bsc ]] && echo 3 || echo 2 )\"] in the Rand genesis"
 record_deployment "$network" "$chain" "$address" "$tx" \
   "$(jq -n --arg e "$(emitter_wire_form "$address")" --argjson id "$chain_id" '{emitter_wire_form:$e, chain_id:$id}')"
+if (( forge_rc != 0 )); then
+  die "forge exited $forge_rc after the broadcast (explorer verification?); the deployment above is live and recorded"
+fi

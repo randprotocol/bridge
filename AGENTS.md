@@ -6,15 +6,15 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
-## State as of 2026-09-17
+## State as of 2026-09-19
 
-- **Two internal security passes are done, no critical or high findings.** The first is
+- **Two internal security passes were done on 2026-09-17, no critical or high findings** (a third on 2026-09-19 found one high, below). The first is
   `docs/audit/2026-09-17-predeploy-audit.md`; the second (independent, covering the endpoints,
   deploy tooling and the fullnode bridge glue) landed as doc/tooling follow-ups in commit
   `e44b7b6` and filed the issue trackers below. Both are internal — mainnet still needs an
   external audit (bridge issue #4).
-- **All test suites green**: `cd evm && forge test` (38), `cd solana && cargo test` (35 incl.
-  solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (51),
+- **All test suites green**: `cd evm && forge test` (43), `cd solana && cargo test` (40 incl.
+  solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (50),
   `cd tools/vectors && cargo run --release -- --check` (both vector copies byte-identical).
 - **Progress later the same day**: fullnode issue #1 is fixed and closed (fullnode `544926c`:
   `check_bridge` now refuses a guardian set whose quorum attestation exceeds
@@ -35,6 +35,24 @@ read it before touching anything there, it is worked on by many sessions in para
   rate-limited from this IP; fund it at faucet.solana.com, then
   `SOL_KEYPAIR=deploy/keys/solana-devnet-deployer.keypair.json SOL_ADMIN=<that pubkey>
   RAND_EMITTER=... GUARDIANS=... deploy/sol.sh devnet`.
+- **Third pass, 2026-09-19** (`docs/audit/2026-09-19-reaudit.md`): one **high, fixed** — Tron
+  mainnet USDT's `transfer` moves funds and returns `false`, which `SafeTransfer` rejected, so a
+  lock would have been a one-way door; `release` now pays through `_push` (return data ignored,
+  the bridge's balance must fall by exactly the amount). Also fixed: release to `address(this)`,
+  `DecimalsChanged`, `TooManyGuardians` (> 255), and the deploy-tooling lows (keys un-exported,
+  genesis-block/genesis-hash network identification on Tron/Solana, mainnet gates, anchored
+  TronBox address, root `.gitignore`, record-before-verify, pinned forge-std). Medium, documented:
+  **an attestation does not name its network — never share a guardian key or `RAND_EMITTER`
+  between testnet and mainnet** (spec §3.5; `check_network_separation` enforces it against the
+  deployment records). Open lows O-1..O-5 in that doc (Solana `n >= 9` needs v0 tx + ALT, no
+  on-chain set-size bound, no Solana `SetPauser`, `Lock` sequence griefing, sub-unit dust).
+  Suites: forge 43, solana 40, fullnode bridge 50, vectors OK. Licence is now GPL-3.0-only
+  (`7343e2c`), matching the fullnode.
+- **Testnet deployer keys exist** (2026-09-19): `deploy/.env` (mode 600, git-ignored) holds one
+  EVM key for Sepolia + BSC testnet (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`), a Tron key
+  (`TYToFBuiEEPFasMc7NBxF54KRkQX7o79nh`) and points at the Solana devnet deployer below; addresses
+  in `deploy/keys/deployer-addresses.json`. All unfunded; `ADMIN`/`PAUSER`/`RAND_EMITTER`/
+  `GUARDIANS` are still placeholders. Testnet-only keys — mainnet uses `DEPLOY_ENV_FILE`.
 - **Issue trackers** (created 2026-09-17, both were empty before):
   - `randprotocol/bridge` #1 stale fee-floor claim in the audit doc (closed, `687ac32`) ·
     #2 testnet round trips (Tron dry-run + Solana localnet done; broadcasts blocked on keys) ·
@@ -64,7 +82,11 @@ Parity across all verifiers is the security property; change these everywhere or
 - `fee <= amount`; zero attested/denormalized amounts refused; attested amount `<= u64::MAX`
   (a Rand note's amount is a `u64`) on every lock and mint.
 - Effects before interactions on every release; custody counters bound releases to what the
-  endpoint actually holds; locks measure the received balance delta (fee-on-transfer rejected).
+  endpoint actually holds; locks measure the received balance delta (fee-on-transfer rejected),
+  and EVM/Tron releases measure the paid delta and **ignore the token's return value** (Tron USDT
+  returns `false` from a successful `transfer`).
+- Guardian keys and the Rand emitter are per network: nothing in an attestation names testnet or
+  mainnet.
 - Guardian-set size is bounded by transport, not on-chain: Solana's 1,232-byte transaction caps
   releases at `n <= 10` (rotations at `n <= 11`); the fullnode's 16 KiB attestation cap admits
   ~253. Governance keeps `n` small (launch: 6) by policy.

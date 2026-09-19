@@ -86,6 +86,10 @@ interface IRandBridge {
     error ZeroAddress();
     /// `setToken` could not read a usable `decimals()` from the token.
     error DecimalsUnavailable();
+    /// `setToken` found different `decimals()` while custody is outstanding.
+    error DecimalsChanged();
+    /// A guardian set larger than an attestation's one-byte counts can carry.
+    error TooManyGuardians();
 
     function lock(address token, uint256 amount, bytes32 randRecipient, uint256 relayerFee, uint32 nonce)
         external

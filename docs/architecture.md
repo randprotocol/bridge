@@ -75,7 +75,8 @@ that. Three independent bounds sit under the guardians on each source chain:
 - **Custody counter.** Each endpoint counts what it holds per token and never releases more,
   whatever an attestation says. A compromised committee can drain what an endpoint holds, not
   more.
-- **Release caps.** Per-transfer and rolling daily caps, on releases only. Locks are not capped:
+- **Release caps.** Per-transfer and daily caps (a fixed UTC-day window, so up to twice the cap
+  can leave across midnight), on releases only. Locks are not capped:
   releases are the loss surface.
 
 On Rand there is no custody to bound. A mint appends one deposit note of the bridged asset to
@@ -112,7 +113,7 @@ bridge/
     src/BscRandBridge.sol        chain 3, consistency 15
     src/TronRandBridge.sol       chain 4, consistency 19, fork guard off
     src/lib/Attestation.sol      parse, digest, signature verification
-    src/lib/SafeTransfer.sol     ERC20 calls tolerant of missing return values
+    src/lib/SafeTransfer.sol     ERC20 calls tolerant of missing/false return values
     src/interfaces/IRandBridge.sol
     script/Deploy.s.sol          one endpoint, chosen by CHAIN
     test/                        Foundry tests, including the shared vectors
@@ -299,8 +300,9 @@ refused on every chain.
 Only the accept/reject decision is normative across verifiers: for any attestation, all five must
 agree on whether it is valid. Which rejection is reported first is allowed to differ, and does,
 because the cost model differs. On the EVM and Solana the submitter pays for signature recovery,
-so the endpoints verify signatures early. On Rand the minimum fee for `BridgeAttest` is zero, so
-the fullnode runs every check that needs no recovery first.
+so the endpoints verify signatures early. On Rand the fee floor for `BridgeAttest` is a flat
+`BUNDLE_BASE` whatever the signature count, so the fullnode runs every check that needs no
+recovery first.
 
 | step | EVM `release` | Solana `Release` | Rand `check_attest` |
 |---|---|---|---|
@@ -857,8 +859,9 @@ fork on every bridged chain (the rename already was one: chain 10).
 - **Attestations are ECDSA**, not post-quantum. The Rand verifier is the natural place to add
   ML-DSA later.
 - **Tron and Solana are built and tested but not deployed.** Tron now compiles under TronBox
-  (`deploy/trx.sh --dry-run`); the Solana SBF build still needs the Solana CLI, which is not
-  installed on the build machine. Neither program has been deployed to any network. Tron's
+  (`deploy/trx.sh --dry-run`); the Solana program builds (`cargo build-sbf --arch v3`) and
+  was deployed end to end on a local test validator. Neither endpoint has been deployed to a
+  public network. Tron's
   endpoint is exercised only under EVM semantics in the Foundry suite: the guardian-key
   comparison assumes the TVM's `ecrecover` returns the `0x41`-prefixed address form the migration
   stores, and a failure there fails closed (every release reverts `WrongGuardian`). The Nile
@@ -866,7 +869,12 @@ fork on every bridged chain (the rename already was one: chain 10).
 - **Guardian-set size is bounded by transport, not by any verifier.** `n_sigs` is one byte (255
   max) and EVM gas is the only on-chain limit there, but a Solana release must fit a 1,232-byte
   transaction: about seven signatures with the current account list, so `n <= 10` (the rotation
-  itself fits to `n = 11`), relaxable to roughly 20 with address lookup tables. Rand's 16 KiB
+  itself fits to `n = 11`), relaxable to roughly 20 with address lookup tables. At seven
+  signatures the legacy transaction has no room left for the compute-budget instruction the
+  recoveries need (1,224 of 1,232 bytes before its 40), so `n >= 9` already requires a v0
+  transaction with a lookup table; the launch set (`n = 6`, five signatures) fits with room.
+  Nothing on-chain refuses a rotation to a set too large to ever release under: that would
+  freeze Solana custody until a program upgrade. Rand's 16 KiB
   attestation cap admits about 253. A rotation past the tightest chain's bound would be applied
   there and be unsubmittable elsewhere, so the guardian sets would diverge per chain; governance
   keeps `n` small (launch: 6) as a matter of policy.

@@ -37,12 +37,23 @@ load_env() {
       if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
         value="${BASH_REMATCH[1]}"
       fi
+      # The mainnet confirmation can only be waived on the command line.
+      [[ "$name" == "DEPLOY_YES_CLI" ]] && continue
       if [[ -z "${!name:-}" ]]; then
         export "$name=$value"
       fi
     done < "$file"
   fi
+  # Keys stay shell variables: each script hands exactly one of them to
+  # the one process that signs, so `npm`, `cargo` and `forge install`
+  # (and whatever install scripts they run) never see any of them.
+  export -n ETH_PRIVATE_KEY BSC_PRIVATE_KEY TRON_PRIVATE_KEY SOL_PRIVATE_KEY \
+    ANVIL_PRIVATE_KEY DEPLOYER_PRIVATE_KEY 2>/dev/null || true
 }
+
+# `https://host/path?key` -> `https://host`: RPC URLs often embed an API
+# key, so only the origin is ever logged.
+redact_url() { sed -E 's#^([a-zA-Z]+://)([^/@]*@)?([^/?]+).*#\1\3#' <<<"$1"; }
 
 # Fails unless every named variable is set and non-empty.
 require() {
@@ -65,21 +76,64 @@ is_evm_address() { [[ "$1" =~ ^0x[0-9a-fA-F]{40}$ ]]; }
 # chain-specific (an EVM address for the EVM/Tron scripts, a pubkey for
 # Solana), so each script requires its own.
 check_common_args() {
+  local is_mainnet="${1:-0}"
   require RAND_EMITTER GUARDIANS
   is_hex32 "$RAND_EMITTER" || die "RAND_EMITTER must be 0x + 64 hex (the 32-byte Rand burn emitter from genesis)"
   local n
   n="$(tr ',' '\n' <<<"$GUARDIANS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   (( n >= 1 )) || die "GUARDIANS must list at least one guardian address"
-  if [[ "$n" -lt 6 && "${ALLOW_SMALL_GUARDIAN_SET:-0}" != "1" ]]; then
-    die "GUARDIANS lists $n keys; the launch set is 6 (set ALLOW_SMALL_GUARDIAN_SET=1 for a testnet rehearsal)"
+  (( n <= 255 )) || die "GUARDIANS lists $n keys; a rotation's key count is one byte"
+  local g seen=""
+  while IFS= read -r g; do
+    g="$(tr -d '[:space:]' <<<"$g" | tr 'A-F' 'a-f')"
+    [[ -z "$g" ]] && die "GUARDIANS has an empty entry (it would shift every later index)"
+    is_evm_address "$g" || die "GUARDIANS entry '$g' is not 0x + 40 hex"
+    [[ "$g" != "0x0000000000000000000000000000000000000000" ]] || die "GUARDIANS has a zero key"
+    [[ "$seen" != *"$g"* ]] || die "GUARDIANS lists $g twice"
+    seen+=" $g"
+  done < <(tr ',' '\n' <<<"$GUARDIANS")
+  if [[ "$n" -lt 6 ]]; then
+    [[ "$is_mainnet" == "0" ]] || die "GUARDIANS lists $n keys; a mainnet deployment needs the launch set of 6"
+    [[ "${ALLOW_SMALL_GUARDIAN_SET:-0}" == "1" ]] \
+      || die "GUARDIANS lists $n keys; the launch set is 6 (set ALLOW_SMALL_GUARDIAN_SET=1 for a testnet rehearsal)"
+  fi
+  if [[ "$is_mainnet" == "1" ]]; then
+    check_network_separation
   fi
 }
 
-# Asks before touching a live network. `--yes` or DEPLOY_YES=1 skips it;
-# mainnets additionally require the network name to be typed back.
+# An attestation's digest covers only its body, and testnets share the
+# mainnet bridge chain ids and the governance emitter: a guardian key or a
+# Rand emitter that ever served a testnet bridge would let that testnet's
+# rotations and burns replay against mainnet. Refuse a mainnet deployment
+# that reuses anything a non-mainnet deployment record carries.
+check_network_separation() {
+  local f
+  shopt -s nullglob
+  for f in "$DEPLOYMENTS_DIR"/*.json; do
+    case "$(basename "$f" .json)" in ethereum|bsc|tron-mainnet|solana-mainnet-beta) continue ;; esac
+    local reused
+    reused="$(jq -r --arg e "$RAND_EMITTER" --arg g "$GUARDIANS" '
+      ($g | ascii_downcase | split(",") | map(gsub("\\s";""))) as $mine
+      | [ .[] | ((.guardians // []) | map(ascii_downcase)) as $theirs
+          | (if (.rand_emitter // "" | ascii_downcase) == ($e | ascii_downcase) then "RAND_EMITTER" else empty end),
+            ($mine[] | select(. as $k | $theirs | index($k))) ]
+      | unique | join(" ")' "$f")"
+    [[ -z "$reused" ]] || die "mainnet must not reuse testnet values (found in $f): $reused"
+  done
+  shopt -u nullglob
+}
+
+# Asks before touching a live network. `--yes` skips it; DEPLOY_YES=1
+# (environment or .env) skips it on testnets only, so a leftover setting
+# can never waive the mainnet prompt, which requires the network name to
+# be typed back.
 confirm() {
   local network="$1" is_mainnet="$2"
-  if [[ "${DEPLOY_YES:-0}" == "1" ]]; then
+  if [[ "${DEPLOY_YES_CLI:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$is_mainnet" == "0" && "${DEPLOY_YES:-0}" == "1" ]]; then
     return 0
   fi
   if [[ "$is_mainnet" == "1" ]]; then

@@ -83,6 +83,14 @@ Launch parameters: `n = 6`, `q = 5`.
 Ids are bridge-network ids, unrelated to EVM `chainid`. Testnets and mainnets use the same ids;
 the EVM contracts pin `block.chainid` at deployment as a fork guard (Section 5.4).
 
+Because the ids are shared and the digest covers the body alone, **nothing in an attestation names
+the network it was made for**. A testnet bridge and a mainnet bridge MUST NOT share a guardian key
+or a Rand burn emitter: with a shared guardian set, a testnet rotation (the governance emitter is
+the same constant everywhere) verifies on mainnet while the set indices line up, and with a shared
+emitter a testnet burn releases mainnet custody. For the same reason an endpoint is never
+redeployed under a guardian set and emitter that already signed burns for its predecessor: the new
+contract's consumed-digest set is empty.
+
 A governance emitter exists on chain 1 in addition to the Rand burn emitter:
 
 ```

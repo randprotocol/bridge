@@ -286,10 +286,30 @@ abstract contract RandBridgeBase is IRandBridge {
         emit Released(token, to, amount, fee, p.digest);
 
         if (fee != 0) {
-            token.safeTransfer(msg.sender, fee);
+            _push(token, msg.sender, fee);
         }
         if (amount - fee != 0) {
-            token.safeTransfer(to, amount - fee);
+            _push(token, to, amount - fee);
+        }
+    }
+
+    /// Pays exactly `amount` of `token` out of custody.
+    ///
+    /// The mirror of [_pull]: the balance delta is measured and the return
+    /// value is not consulted. Tron mainnet USDT's `transfer` moves the
+    /// funds and returns `false`, so trusting the return value would make
+    /// a lock of it a one-way door; a token that returns `false` (or
+    /// anything else) without moving exactly `amount` is caught here
+    /// instead, and the whole release reverts with its digest unspent.
+    function _push(address token, address to, uint256 amount) private {
+        // A whitelisted token can lose its code after the fact; name that
+        // failure rather than let `balanceOf` revert without data.
+        if (token.code.length == 0) revert SafeTransfer.TransferFailed();
+        uint256 balanceBefore = IERC20Metadata(token).balanceOf(address(this));
+        token.transferUnchecked(to, amount);
+        uint256 balanceAfter = IERC20Metadata(token).balanceOf(address(this));
+        if (balanceAfter > balanceBefore || balanceBefore - balanceAfter != amount) {
+            revert TransferAmountMismatch();
         }
     }
 
@@ -306,10 +326,13 @@ abstract contract RandBridgeBase is IRandBridge {
     /// A recipient on this chain must be a left-padded 20-byte address:
     /// anything in the upper 12 bytes means the payload was built for a
     /// different address space (Section 5.2).
-    function _recipient(bytes32 to) internal pure returns (address) {
+    function _recipient(bytes32 to) internal view returns (address) {
         if (uint256(to) >> 160 != 0) revert BadRecipient();
         address addr = address(uint160(uint256(to)));
         if (addr == address(0)) revert ZeroRecipient();
+        // Paying the bridge itself would draw custody down while the
+        // tokens stayed here, outside the counter, for good.
+        if (addr == address(this)) revert BadRecipient();
         return addr;
     }
 
@@ -376,6 +399,9 @@ abstract contract RandBridgeBase is IRandBridge {
     /// (which would let one key count twice towards quorum).
     function _checkKeys(address[] memory keys) internal pure {
         if (keys.length == 0) revert ZeroAddress();
+        // Signature and key counts are one byte on the wire: a larger set
+        // could be installed here but never reach quorum or be rotated.
+        if (keys.length > 255) revert TooManyGuardians();
         for (uint256 i = 0; i < keys.length; i++) {
             if (keys[i] == address(0)) revert ZeroAddress();
             for (uint256 j = i + 1; j < keys.length; j++) {
@@ -417,7 +443,12 @@ abstract contract RandBridgeBase is IRandBridge {
         // the admin most needs to switch it off. The stored decimals stay
         // as they were, so re-enabling refreshes them.
         if (enabled) {
-            cfg.decimals = _decimalsOf(token);
+            uint8 d = _decimalsOf(token);
+            // Custody is counted in native units: rescaling it under an
+            // upgradeable token whose decimals moved would misprice every
+            // outstanding note, so that needs a deliberate migration.
+            if (custody[token] != 0 && d != cfg.decimals) revert DecimalsChanged();
+            cfg.decimals = d;
         }
         cfg.perTransferCap = perTransferCap;
         cfg.dailyCap = dailyCap;

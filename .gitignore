@@ -1,1 +1,10 @@
 target/
+
+# Secrets never belong in the tree, wherever a tool drops them (Foundry auto-loads evm/.env).
+.env
+.env.*
+!.env.example
+*.keypair.json
+*-keypair.json
+id.json
+*.bak

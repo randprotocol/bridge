@@ -23,6 +23,11 @@ contract MockERC20 {
 
     /// When true, `transfer`/`transferFrom` return zero-length data.
     bool public noReturn;
+    /// When true, `transfer` moves the funds and then returns `false`
+    /// (Tron mainnet USDT); `transferFrom` still returns `true`.
+    bool public transferReturnsFalse;
+    /// When true, `transfer` returns `false` and moves nothing.
+    bool public silentFail;
     /// Fee taken from every transfer, in basis points of the amount.
     uint256 public feeBps;
 
@@ -35,8 +40,20 @@ contract MockERC20 {
         decimals = decimals_;
     }
 
+    function setDecimals(uint8 d) external {
+        decimals = d;
+    }
+
     function setNoReturn(bool on) external {
         noReturn = on;
+    }
+
+    function setTransferReturnsFalse(bool on) external {
+        transferReturnsFalse = on;
+    }
+
+    function setSilentFail(bool on) external {
+        silentFail = on;
     }
 
     function setFee(uint256 bps) external {
@@ -57,9 +74,10 @@ contract MockERC20 {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
+        if (silentFail) return false;
         _move(msg.sender, to, amount);
         _maybeReturnNothing();
-        return true;
+        return !transferReturnsFalse;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {

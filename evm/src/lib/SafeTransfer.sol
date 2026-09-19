@@ -2,7 +2,7 @@
 pragma solidity 0.8.20;
 
 /// @title SafeTransfer
-/// @notice ERC20 `transfer`/`transferFrom` that tolerates the tokens the
+/// @notice ERC20 `transferFrom` that tolerates the tokens the
 /// standard does not describe:
 ///
 /// - tokens that return nothing at all (mainnet USDT is the canonical
@@ -16,14 +16,24 @@ pragma solidity 0.8.20;
 /// [TransferFailed], so a silent failure can never be mistaken for a
 /// payout.
 ///
+/// [transferUnchecked] is the one exception: it ignores the return data
+/// entirely, for the caller that measures the balance delta itself. Tron
+/// mainnet USDT's `transfer` moves the funds and then returns `false`
+/// (its `transferFrom` returns `true`), so a payout that trusted the
+/// return value could be locked into but never released from.
+///
 /// No allowance or balance bookkeeping lives here; `RandBridgeBase`
-/// measures the balance delta itself on lock, which is what actually
-/// catches fee-on-transfer tokens.
+/// measures the balance delta itself on lock and on release, which is
+/// what actually catches fee-on-transfer tokens and silent failures.
 library SafeTransfer {
     error TransferFailed();
 
-    function safeTransfer(address token, address to, uint256 value) internal {
-        _call(token, abi.encodeWithSelector(0xa9059cbb, to, value)); // transfer(address,uint256)
+    /// `transfer` whose return data is ignored. The call must still succeed
+    /// against a target with code; the caller MUST check the balance delta.
+    function transferUnchecked(address token, address to, uint256 value) internal {
+        if (token.code.length == 0) revert TransferFailed();
+        (bool success,) = token.call(abi.encodeWithSelector(0xa9059cbb, to, value)); // transfer(address,uint256)
+        if (!success) revert TransferFailed();
     }
 
     function safeTransferFrom(address token, address from, address to, uint256 value) internal {
@@ -34,10 +44,8 @@ library SafeTransfer {
         // A call to an address with no code succeeds and returns nothing,
         // which the empty-return rule below would read as a successful
         // transfer. A whitelisted token can lose its code after the fact
-        // (SELFDESTRUCT still applies on Tron), and `release` has no
-        // balance-delta guard to catch it, so a codeless target must be a
-        // hard failure or a release would consume its digest and
-        // decrement custody while paying nobody.
+        // (SELFDESTRUCT still applies on Tron), so a codeless target must
+        // be a hard failure rather than a transfer that paid nobody.
         if (token.code.length == 0) revert TransferFailed();
 
         (bool success, bytes memory ret) = token.call(data);

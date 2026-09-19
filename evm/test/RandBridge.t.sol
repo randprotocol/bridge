@@ -497,6 +497,40 @@ contract RandBridgeTest is Test {
         assertEq(t8.balanceOf(address(this)), 10, "submitter paid the fee");
     }
 
+    function test_release_tron_usdt_style_transfer_returns_false() public {
+        // Tron mainnet USDT: `transfer` moves the funds and returns false,
+        // `transferFrom` returns true. A lock must not be a one-way door.
+        t8.setTransferReturnsFalse(true);
+
+        _lock8(1000);
+        bridge.release(_fromRand(_releasePayload(address(t8), 1000, 10)));
+
+        assertEq(t8.balanceOf(recipient), 990, "recipient paid");
+        assertEq(t8.balanceOf(address(this)), 10, "submitter paid the fee");
+        assertEq(bridge.custody(address(t8)), 0, "custody drawn down");
+    }
+
+    function test_release_rejects_transfer_that_moves_nothing() public {
+        _lock8(1000);
+        t8.setSilentFail(true);
+
+        bytes memory att = _fromRand(_releasePayload(address(t8), 1000, 10));
+        vm.expectRevert(IRandBridge.TransferAmountMismatch.selector);
+        bridge.release(att);
+        assertEq(bridge.custody(address(t8)), 1000, "custody untouched");
+
+        t8.setSilentFail(false);
+        bridge.release(att); // the digest was not burnt by the failed attempt
+        assertEq(t8.balanceOf(recipient), 990, "recipient paid");
+    }
+
+    function test_release_rejects_bridge_as_recipient() public {
+        _lock8(1000);
+        bytes memory payload = _transferPayload(1000, _word(address(t8)), 2, _word(address(bridge)), 2, 0);
+        vm.expectRevert(IRandBridge.BadRecipient.selector);
+        bridge.release(_fromRand(payload));
+    }
+
     // ------------------------------------------------------------------
     // guardian rotation
     // ------------------------------------------------------------------
@@ -789,6 +823,28 @@ contract RandBridgeTest is Test {
 
         assertEq(bridge.randEmitter(), randEmitter, "emitter registered for chain 1");
         assertEq(bridge.guardianSet(0).keys, guardians, "initial guardian set");
+    }
+
+    function test_setToken_refuses_changed_decimals_while_custody_is_outstanding() public {
+        _lock8(1000);
+        t8.setDecimals(6); // an upgradeable token changing under the bridge
+
+        vm.prank(admin);
+        vm.expectRevert(IRandBridge.DecimalsChanged.selector);
+        bridge.setToken(address(t8), true, 0, 0);
+
+        // Disabling never reads decimals, so it still works.
+        vm.prank(admin);
+        bridge.setToken(address(t8), false, 0, 0);
+    }
+
+    function test_constructor_rejects_more_guardians_than_a_rotation_can_carry() public {
+        address[] memory many = new address[](256);
+        for (uint256 i = 0; i < many.length; i++) {
+            many[i] = address(uint160(i + 1));
+        }
+        vm.expectRevert(IRandBridge.TooManyGuardians.selector);
+        new EthereumRandBridge(admin, pauser, randEmitter, many);
     }
 
     function test_constructor_rejects_zero_admin_emitter_and_empty_guardians() public {

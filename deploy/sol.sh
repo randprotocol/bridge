@@ -5,7 +5,7 @@
 #   deploy/sol.sh [devnet|testnet|mainnet-beta|localnet] [--dry-run] [--yes] [--skip-build]
 #
 #   --dry-run    build and print what would happen; no deployment
-#   --yes        skip the confirmation prompt (or DEPLOY_YES=1)
+#   --yes        skip the confirmation prompt (DEPLOY_YES=1 does too, on testnets only)
 #   --skip-build reuse solana/target/deploy/rand_bridge.so
 #
 # Environment / deploy/.env:
@@ -30,11 +30,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" >&2; exit 1; }
 
 network="${1:-devnet}"; shift || true
-dry_run=0; skip_build=0
+dry_run=0; skip_build=0; DEPLOY_YES_CLI=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=1 ;;
-    --yes) export DEPLOY_YES=1 ;;
+    --yes) DEPLOY_YES_CLI=1 ;;
     --skip-build) skip_build=1 ;;
     *) usage ;;
   esac
@@ -54,16 +54,44 @@ need_tool solana-keygen
 need_tool cargo-build-sbf "part of the Solana CLI install"
 need_tool jq
 require SOL_ADMIN RAND_EMITTER GUARDIANS
-check_common_args
+check_common_args "$mainnet"
 [[ -n "${SOL_KEYPAIR:-}" || -n "${SOL_PRIVATE_KEY:-}" ]] || die "set SOL_KEYPAIR (file) or SOL_PRIVATE_KEY (inline secret)"
 rpc="${SOL_RPC_URL:-$default_rpc}"
 export SOL_RPC_URL="$rpc"
 
+# SOL_RPC_URL overrides the cluster for whichever network was named, so
+# the cluster is identified by its genesis hash rather than by that name.
+case "$network" in
+  devnet)       want_genesis=EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG ;;
+  testnet)      want_genesis=4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY ;;
+  mainnet-beta) want_genesis=5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d ;;
+  localnet)     want_genesis= ;;
+esac
+rpc_shown="$(redact_url "$rpc")"
+got_genesis="$(solana genesis-hash --url "$rpc")" || die "cannot reach $rpc_shown"
+if [[ -n "$want_genesis" ]]; then
+  [[ "$got_genesis" == "$want_genesis" ]] || die "$rpc_shown is not $network (genesis hash $got_genesis)"
+else
+  case "$got_genesis" in
+    EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG|4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY|5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d)
+      die "$rpc_shown is a public cluster, but the network named is localnet" ;;
+  esac
+fi
+
+# The CLI reads the deployer from SOL_KEYPAIR / SOL_PRIVATE_KEY in its own
+# environment. load_env keeps the inline secret un-exported, so it is
+# exported inside this subshell only, to the built binary only (not to
+# cargo and its build scripts).
 cli_manifest="$BRIDGE_ROOT/solana/Cargo.toml"
-cli() { cargo run --quiet --release --manifest-path "$cli_manifest" -p rand-bridge-cli -- "$@"; }
+cli_bin="$BRIDGE_ROOT/solana/target/release/rand-bridge-cli"
+cli() (
+  if [[ -n "${SOL_PRIVATE_KEY:-}" ]]; then export SOL_PRIVATE_KEY; fi
+  exec "$cli_bin" "$@"
+)
 
 info "building rand-bridge-cli"
 cargo build --quiet --release --manifest-path "$cli_manifest" -p rand-bridge-cli
+[[ -x "$cli_bin" ]] || die "build did not produce $cli_bin"
 
 # The deployer keypair as a file, which `solana program deploy` needs. An
 # inline secret is written to a private temp file that is removed on exit.
@@ -76,7 +104,7 @@ else
   cli export-keypair --out "$deployer_file"
 fi
 deployer="$(cli address)"
-info "network $network (rpc $rpc)"
+info "network $network (rpc $rpc_shown)"
 info "deployer $deployer (balance $(solana balance --url "$rpc" "$deployer" 2>/dev/null || echo '?'))"
 
 # The program id is a keypair: generated once per network and kept under
@@ -99,6 +127,7 @@ if [[ "$declared" != "$program_id" ]]; then
   info "updating declare_id! in $lib_rs ($declared -> $program_id)"
   sed -i.bak -E "s/^solana_program::declare_id!\(\"[1-9A-HJ-NP-Za-km-z]+\"\);/solana_program::declare_id!(\"$program_id\");/" "$lib_rs"
   rm -f "$lib_rs.bak"
+  grep -qF "declare_id!(\"$program_id\");" "$lib_rs" || die "could not rewrite declare_id! in $lib_rs"
   echo "note: src/lib.rs now declares the $network program id; commit that change with the deployment record" >&2
   skip_build=0
 fi
@@ -127,14 +156,21 @@ solana program deploy "$so" \
   --program-id "$program_file" \
   --upgrade-authority "$deployer_file"
 
+# The program is live from here on: write the record before anything
+# else can fail, so a deployment never exists without one.
+# The emitter is the program id's 32 bytes: the second half of the keypair file.
+wire="0x$(jq -r '"0123456789abcdef" as $h | .[32:] | map($h[(. / 16 | floor):(. / 16 | floor) + 1] + $h[(. % 16):(. % 16) + 1]) | join("")' "$program_file")"
+[[ "$wire" =~ ^0x[0-9a-f]{64}$ ]] || die "could not read the program id out of $program_file"
+ADMIN="$SOL_ADMIN" PAUSER="${SOL_PAUSER:-$SOL_ADMIN}" record_deployment "solana-$network" "solana" "$program_id" "" \
+  "$(jq -n --arg e "$wire" --arg d "$deployer" '{emitter_wire_form:$e, upgrade_authority:$d}')"
+
 info "initializing (admin $SOL_ADMIN, pauser ${SOL_PAUSER:-$SOL_ADMIN})"
 cli initialize --program "$program_id" --admin "$SOL_ADMIN" ${SOL_PAUSER:+--pauser "$SOL_PAUSER"} \
   --rand-emitter "$RAND_EMITTER" --guardians "$GUARDIANS"
 
-wire="$(cli show --program "$program_id" | jq -r .program_hex)"
+shown="$(cli show --program "$program_id" | jq -r .program_hex)"
+[[ "$shown" == "$wire" ]] || die "the program reports emitter $shown, the record says $wire"
 echo
 echo "deployed  $program_id"
 echo "emitter   $wire   <- bridge.emitters[\"5\"] in the Rand genesis"
-ADMIN="$SOL_ADMIN" PAUSER="${SOL_PAUSER:-$SOL_ADMIN}" record_deployment "solana-$network" "solana" "$program_id" "" \
-  "$(jq -n --arg e "$wire" --arg d "$deployer" '{emitter_wire_form:$e, upgrade_authority:$d}')"
 echo "next: solana program set-upgrade-authority $program_id --new-upgrade-authority <MULTISIG> --url $rpc" >&2
