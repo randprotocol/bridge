@@ -66,7 +66,7 @@ read it before touching anything there, it is worked on by many sessions in para
 - **Issue trackers** (created 2026-09-17, both were empty before):
   - `randprotocol/bridge` #1 stale fee-floor claim in the audit doc (closed, `687ac32`) ·
     #2 testnet round trips (Tron dry-run + Solana localnet done; broadcasts blocked on keys) ·
-    #3 guardian + relayer daemons (not started) · #4 external-audit gate
+    #3 guardian + relayer daemons (built 2026-09-19 in `daemons/`; vectors + anvil e2e green; Tron/Solana/Rand submit paths untested) · #5 Solana open lows O-1..O-4 · #6 sub-unit dust (O-5) · #4 external-audit gate
   - `randprotocol/fullnode` #1 genesis `check_bridge` guardian-count bound (closed, `544926c`) ·
     #2 no forward bound on block timestamps · #3 deposit-note commitment front-running ·
     #4 mempool re-check gaps

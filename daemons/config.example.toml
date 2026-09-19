@@ -1,0 +1,74 @@
+# One file configures either daemon; each reads the sections it needs.
+#   rand-guardian --config guardian.toml      (needs [guardian])
+#   rand-relayer  --config relayer.toml       (needs [relayer])
+# No secret ever goes in this file: a section names the ENVIRONMENT VARIABLE
+# that holds its key, and the daemon removes it from its environment at start.
+
+data_dir = "./data/guardian-0"      # cursors, signatures, relayer progress
+poll_secs = 10
+
+[rand]
+rpc = "http://127.0.0.1:8545"
+# The 32-byte Rand burn emitter from the genesis `bridge.emitter`.
+emitter = "0000000000000000000000000000000000000000000000000000000000000000"
+start_sequence = 0
+
+# ---- source endpoints ------------------------------------------------------
+# `finality` is what the guardian waits for before it signs. A signature
+# cannot be taken back; a reorged lock can. Use the chain's real finality.
+
+[[evm]]
+name = "ethereum"
+chain = 2
+kind = "evm"
+rpc = "https://ethereum-rpc.publicnode.com"
+contract = "0x0000000000000000000000000000000000000000"
+finality = "finalized"
+start_block = 0                      # the deployment block
+
+[[evm]]
+name = "bsc"
+chain = 3
+kind = "evm"
+rpc = "https://bsc-dataseed.bnbchain.org"
+contract = "0x0000000000000000000000000000000000000000"
+finality = 15                        # confirmations behind `latest`
+start_block = 0
+
+[[evm]]
+name = "tron"
+chain = 4
+kind = "tron"
+rpc = "https://api.trongrid.io"      # the API origin; logs come from <rpc>/jsonrpc
+contract = "0x0000000000000000000000000000000000000000"   # EVM form (drop the 41 prefix)
+finality = 19                        # solidified
+start_block = 0
+max_log_range = 1000
+
+[solana]
+rpc = "https://api.mainnet-beta.solana.com"
+program = "11111111111111111111111111111111"
+start_sequence = 0
+
+# ---- guardian ----------------------------------------------------------------
+[guardian]
+listen = "127.0.0.1:7071"            # put TLS / a reverse proxy in front for remote relayers
+key_env = "GUARDIAN_KEY"             # 0x + 64 hex; one key per guardian, one guardian per host
+
+# ---- relayer -----------------------------------------------------------------
+[relayer]
+guardians = [
+  "http://127.0.0.1:7071",
+]
+# Used only when the Rand node serves no bridge state (a rehearsal):
+guardian_set_index = 0
+guardian_addresses = []
+evm_key_env = "RELAYER_EVM_KEY"      # pays gas for release() on Ethereum and BSC
+tron_key_env = "RELAYER_TRON_KEY"
+tron_fee_limit = 150000000           # sun
+min_relayer_fee = 0                  # attested (8-decimal) units; 0 relays everything
+solana_cli = "../solana/target/release/rand-bridge-cli"   # signer: SOL_KEYPAIR / SOL_PRIVATE_KEY
+rand_cli = "../../fullnode/target/release/rand"            # the wallet that pays for mints
+rand_cli_args = []
+# recipients_file = "./recipients.json"   # { "<recipient_hash hex>": "rand1…" }
+listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, address}

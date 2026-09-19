@@ -113,6 +113,19 @@ enum Command {
         #[command(flatten)]
         program: ProgramArg,
     },
+    /// Submit a guardian-signed Rand burn attestation: pays the recipient and
+    /// this signer (the relayer) out of custody. Anyone may run it.
+    Release {
+        #[command(flatten)]
+        program: ProgramArg,
+        /// A file holding the encoded attestation as hex.
+        #[arg(long)]
+        attestation_file: PathBuf,
+        /// Compute unit limit: one secp256k1 recovery per signature costs
+        /// about 25k, and the default 200k leaves a quorum of five little room.
+        #[arg(long, default_value_t = 400_000)]
+        compute_units: u32,
+    },
     /// Set the protocol fee in basis points, at most 100 (admin).
     SetProtocolFee {
         #[command(flatten)]
@@ -231,6 +244,68 @@ fn main() -> Result<()> {
             )?;
             println!("admin accepted in {sig}");
         }
+        Command::Release {
+            program,
+            attestation_file,
+            compute_units,
+        } => {
+            let kp = signer()?;
+            let text = std::fs::read_to_string(&attestation_file)
+                .with_context(|| format!("reading {}", attestation_file.display()))?;
+            let bytes = hex::decode(text.trim().trim_start_matches("0x"))
+                .context("attestation is not hex")?;
+            let attestation = bridge_codec::Attestation::decode(&bytes)
+                .map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+            let bridge_codec::Payload::Transfer(transfer) =
+                bridge_codec::Payload::decode(&attestation.body.payload)
+                    .map_err(|e| anyhow!("undecodable payload: {e:?}"))?
+            else {
+                return Err(anyhow!("not a transfer attestation"));
+            };
+            let body = bridge_codec::Attestation::body_bytes(&bytes)
+                .map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+            let digest = rand_bridge::attestation::digest(body);
+            let mint = Pubkey::new_from_array(transfer.token_address);
+            let recipient = Pubkey::new_from_array(transfer.to);
+
+            // The token accounts go first, in a transaction of their own: a
+            // five-signature release already fills most of the 1,232 bytes.
+            let client = client(&cli.rpc_url);
+            let missing: Vec<Instruction> = [recipient, kp.pubkey()]
+                .iter()
+                .filter(|wallet| {
+                    client
+                        .get_account(&ix::associated_token_address(wallet, &mint))
+                        .is_err()
+                })
+                .map(|wallet| ix::create_ata_idempotent(&kp.pubkey(), wallet, &mint))
+                .collect();
+            if !missing.is_empty() {
+                let sig = send_all(&cli.rpc_url, &kp, &missing)?;
+                eprintln!("created {} token account(s) in {sig}", missing.len());
+            }
+
+            let mut budget = vec![2u8]; // ComputeBudgetInstruction::SetComputeUnitLimit
+            budget.extend_from_slice(&compute_units.to_le_bytes());
+            let budget = Instruction {
+                program_id: "ComputeBudget111111111111111111111111111111"
+                    .parse()
+                    .expect("a pubkey"),
+                accounts: vec![],
+                data: budget,
+            };
+            let release = ix::release(
+                &program.program,
+                &kp.pubkey(),
+                &mint,
+                attestation.guardian_set_index,
+                &recipient,
+                &digest,
+                bytes,
+            );
+            let sig = send_all(&cli.rpc_url, &kp, &[budget, release])?;
+            println!("{sig}");
+        }
         Command::SetProtocolFee { program, bps } => {
             let kp = signer()?;
             let sig = send(
@@ -293,12 +368,16 @@ fn client(url: &str) -> RpcClient {
 }
 
 fn send(url: &str, payer: &Keypair, instruction: Instruction) -> Result<Signature> {
+    send_all(url, payer, &[instruction])
+}
+
+fn send_all(url: &str, payer: &Keypair, instructions: &[Instruction]) -> Result<Signature> {
     let client = client(url);
     let blockhash = client
         .get_latest_blockhash()
         .context("get_latest_blockhash")?;
     let tx = Transaction::new_signed_with_payer(
-        &[instruction],
+        instructions,
         Some(&payer.pubkey()),
         &[payer],
         blockhash,

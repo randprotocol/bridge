@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 borsh = "1"
+bridge-codec = { path = "../../../fullnode/crates/bridge-codec" }
 bs58 = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"

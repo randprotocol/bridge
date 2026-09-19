@@ -3446,6 +3446,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "borsh 1.8.1",
+ "bridge-codec",
  "bs58",
  "clap",
  "hex",

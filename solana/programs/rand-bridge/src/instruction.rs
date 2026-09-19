@@ -417,9 +417,46 @@ pub fn associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     .0
 }
 
+/// The associated-token-account program's `CreateIdempotent`: creates
+/// `wallet`'s associated token account for `mint` if it does not exist and
+/// succeeds either way. A relayer sends it ahead of a `Release` so a
+/// recipient who has never held the token can still be paid.
+///
+/// Accounts: payer (signer, writable), the ATA (writable), the wallet, the
+/// mint, the system program, the token program.
+pub fn create_ata_idempotent(payer: &Pubkey, wallet: &Pubkey, mint: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: spl_associated_token_account::id(),
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(associated_token_address(wallet, mint), false),
+            AccountMeta::new_readonly(*wallet, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ],
+        data: vec![1], // AssociatedTokenAccountInstruction::CreateIdempotent
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_ata_matches_the_spl_builder() {
+        let payer = Pubkey::new_from_array([2u8; 32]);
+        let wallet = Pubkey::new_from_array([3u8; 32]);
+        let mint = Pubkey::new_from_array([4u8; 32]);
+        let expected =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &payer,
+                &wallet,
+                &mint,
+                &spl_token::id(),
+            );
+        assert_eq!(create_ata_idempotent(&payer, &wallet, &mint), expected);
+    }
 
     #[test]
     fn matches_the_spl_helper() {

@@ -93,8 +93,8 @@ Two more rules harden against a partially compromised committee:
 - Rotations cannot skip indices, and a superseded set expires 86,400 seconds after being replaced.
 
 Every component here is reviewed internally (`docs/audit/2026-09-17-predeploy-audit.md`) but not
-externally audited, and the guardian and relayer daemons that would run the format end to end are
-not built. Nothing has watched a real chain or moved real funds.
+externally audited. The guardian and relayer daemons (`daemons/`) run the format end to end against
+the real EVM endpoint on a local node, but nothing has watched a public chain or moved real funds.
 
 ---
 
@@ -873,8 +873,15 @@ fork on every bridged chain (the rename already was one: chain 10).
 
 ## 12. Known gaps
 
-- **No guardian daemon, no relayer daemon.** The format is fixed so they can be built against it;
-  nothing runs it end to end yet.
+- **The daemons are new and only partly exercised.** `daemons/` holds `rand-guardian` (watch each
+  chain past its consistency level, check the signing policy, sign, serve signatures over HTTP)
+  and `rand-relayer` (collect a quorum, assemble, submit). Their signing and assembly reproduce
+  the shared vectors byte for byte, and a lock and a release run against the real
+  `EthereumRandBridge` on anvil. Not yet run anywhere: Tron's log facade and submitter (Nile),
+  the Solana and Rand submission paths (devnet, a bridged Rand chain). Guardian-set rotations are
+  deliberately not signed by the daemon; that governance tooling does not exist. A deposit can be
+  relayed only once its recipient's full `rand1…` address is registered with a relayer: the lock
+  carries the recipient hash alone.
 - **No relayer is paid on Rand.** The deposit is minted gross and the submitter pays a RAND fee
   bundle for the privilege; relaying to Rand is altruistic or paid out of band until the pool can
   pay an identity-less submitter.

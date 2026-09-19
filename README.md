@@ -15,9 +15,8 @@ Value flows one direction only: source chain to Rand, then Rand back to that sam
 There are no wrapped tokens on source chains and no lock-and-mint between two source chains — a
 source contract releases only tokens whose home chain is itself, and Rand mints only against a
 registered source-chain emitter. This pass ships the four custody contracts, the shared
-attestation verifier and wire format, and the Rand fullnode's minting/burning ledger extension;
-it does not ship the guardian or relayer daemons that would run the format end to end (see
-Status below).
+attestation verifier and wire format, the Rand fullnode's minting/burning ledger extension, and
+the guardian and relayer daemons that run the format end to end (`daemons/`, see Status below).
 
 ## Layout
 
