@@ -152,3 +152,8 @@ the Tron endpoint, but no endpoint has been deployed to a public network. An int
 program, and ledger change here as a reviewed but unaudited implementation of the design in
 `docs/superpowers/specs/2026-09-10-rand-bridge-design.md`, not as something ready to hold real
 value.
+
+## License
+
+GNU General Public License v3.0 (`GPL-3.0-only`) — see [LICENSE](LICENSE). Vendored dependencies
+under `evm/lib/` keep their own licenses.

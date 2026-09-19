@@ -3,7 +3,7 @@ name = "rand-bridge-cli"
 version = "0.1.0"
 edition = "2021"
 description = "Command-line client for deploying and administering the Rand bridge's Solana program"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 publish = false
 
 [[bin]]

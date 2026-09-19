@@ -3,7 +3,7 @@ name = "rand-bridge"
 version = "0.1.0"
 edition = "2021"
 description = "Rand bridge program for Solana: guardian-attested lock/release of SPL tokens"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 
 [lib]
 crate-type = ["cdylib", "lib"]
