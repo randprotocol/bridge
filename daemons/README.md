@@ -48,6 +48,14 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   not hash to the lock's recipient, so a wrong registration can only fail, never misdirect.
 - Checks `consumed(digest)` first and treats "already consumed" as done: relayers race, by design.
 
+## Audit
+
+`rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved
+backings it reads the endpoint's `custody`, its accrued protocol fees and the token balance it really
+holds, and — once the Rand node serves per-backing `locked` rows — what Rand says is outstanding. It
+checks `balance >= custody + fees` (exit code 1 otherwise) and reports `custody - locked`, which is
+zero whenever no message is in flight. Run it against mainnet with `mainnet/relayer.toml`.
+
 ## Run
 
 ```sh

@@ -18,6 +18,10 @@ path = "src/bin/guardian.rs"
 name = "rand-relayer"
 path = "src/bin/relayer.rs"
 
+[[bin]]
+name = "rand-bridge-audit"
+path = "src/bin/audit.rs"
+
 [dependencies]
 bridge-codec = { path = "../../fullnode/crates/bridge-codec" }
 anyhow = "1"
