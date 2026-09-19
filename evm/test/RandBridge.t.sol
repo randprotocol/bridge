@@ -548,36 +548,19 @@ contract RandBridgeTest is Test {
         assertEq(fresh.protocolFeeBps(), 10);
     }
 
-    function test_protocol_fee_on_lock_is_skimmed_before_custody_and_attestation() public {
+    function test_lock_is_free_of_the_protocol_fee() public {
+        // Depositing costs the user nothing: the fee is charged on the way
+        // out only, so the full amount is attested, minted and custodied.
         _feeOn();
 
         vm.expectEmit(true, true, true, true);
-        emit Locked(address(t6), user, bytes32(uint256(1)), 999_000, 99_900_000, 0);
+        emit Locked(address(t6), user, bytes32(uint256(1)), 1_000_000, 100_000_000, 0);
         vm.prank(user);
         bridge.lock(address(t6), 1_000_000, bytes32(uint256(1)), 0, 0); // 1 USDT
 
-        assertEq(t6.balanceOf(address(bridge)), 1_000_000, "the gross amount was pulled");
-        assertEq(bridge.custody(address(t6)), 999_000, "custody backs exactly what was attested");
-        assertEq(bridge.accruedFees(address(t6)), 1_000, "10 bps");
-    }
-
-    function test_protocol_fee_on_lock_18_decimals_stays_on_the_attested_grid() public {
-        _feeOn();
-        vm.prank(user);
-        bridge.lock(address(t18), 1 ether + 12_345, bytes32(uint256(1)), 0, 0);
-
-        // Sub-grid dust is never pulled; the net re-normalises exactly.
-        assertEq(t18.balanceOf(address(bridge)), 1 ether);
-        assertEq(bridge.custody(address(t18)), 0.999 ether);
-        assertEq(bridge.accruedFees(address(t18)), 0.001 ether);
-        assertEq(bridge.custody(address(t18)) % 1e10, 0, "custody is a whole number of attested units");
-    }
-
-    function test_protocol_fee_on_lock_relayer_fee_is_bounded_by_the_net_amount() public {
-        _feeOn();
-        vm.prank(user);
-        vm.expectRevert(IRandBridge.FeeExceedsAmount.selector);
-        bridge.lock(address(t8), 1000, bytes32(uint256(1)), 1000, 0); // net is 999
+        assertEq(t6.balanceOf(address(bridge)), 1_000_000);
+        assertEq(bridge.custody(address(t6)), 1_000_000, "custody is the whole deposit");
+        assertEq(bridge.accruedFees(address(t6)), 0, "no fee on a lock");
     }
 
     function test_protocol_fee_on_release() public {
@@ -628,7 +611,8 @@ contract RandBridgeTest is Test {
 
     function test_withdrawFees_pays_only_accrued_fees_never_custody() public {
         _feeOn();
-        _lock8(100_000); // fee 100, custody 99_900
+        _lock8(200_000);
+        bridge.release(_fromRand(_releasePayload(address(t8), 100_000, 0))); // fee 100
         address treasury = address(0x7EA5);
 
         vm.expectRevert(IRandBridge.NotAdmin.selector);
@@ -644,12 +628,13 @@ contract RandBridgeTest is Test {
 
         assertEq(t8.balanceOf(treasury), 60);
         assertEq(bridge.accruedFees(address(t8)), 40);
-        assertEq(bridge.custody(address(t8)), 99_900, "custody untouched");
+        assertEq(bridge.custody(address(t8)), 100_000, "custody untouched");
     }
 
     function test_withdrawFees_works_while_paused() public {
         _feeOn();
-        _lock8(100_000);
+        _lock8(200_000);
+        bridge.release(_fromRand(_releasePayload(address(t8), 100_000, 0))); // fee 100
         vm.prank(pauser);
         bridge.pause();
         vm.prank(admin);

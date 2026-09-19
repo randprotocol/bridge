@@ -218,35 +218,40 @@ amount above `u64::MAX` (`AmountTooLarge` on the EVM, `AmountOverflow` on Solana
 anything: a lock Rand could never mint would sit in custody with no burn able to release it. At 8
 decimals the bound is about 1.8 x 10^11 whole tokens per lock.
 
-### 3.5 Protocol fee
+### 3.5 Fees: nothing on the way in, two on the way out
 
-Every endpoint takes a protocol fee in the bridged token itself: **10 bps on the way in and 10 bps
-on the way out** (`protocolFeeBps` / `Config::protocol_fee_bps`, admin-settable, hard-capped at
-100 bps because the endpoints cannot be upgraded). It is an endpoint-side skim and deliberately
-not part of the attestation format, so no verifier rule changes and the verifiers stay in parity:
+**A deposit is free.** Locking USDT/USDC and receiving zUSDT/zUSDC costs the user no stablecoin
+and no RAND — only the source chain's gas. The full amount is attested, minted and custodied. A
+depositor holds no RAND until the bridge has delivered their first note, so nothing can be asked
+of them in RAND, and the bridge does not tax inflow. (The relayer who submits the `BridgeAttest`
+pays the ordinary `BUNDLE_BASE`, 0.001 RAND, like any transaction; the depositor never sees it.)
+
+**Unbridging pays twice, once in each currency:**
+
+1. **0.01 RAND on the burn** — `gas::BRIDGE_BURN_FEE`, the fee floor of a `BridgeBurn` on Rand,
+   for the validators' infrastructure. It covers the bundle base for both of the burn's bundles;
+   on a chain without aggregation the whole fee is the block proposer's, and proposers rotate
+   round-robin, so it spreads evenly over the validator set.
+2. **10 bps of the released token** — taken by the endpoint (`protocolFeeBps` /
+   `Config::protocol_fee_bps`, admin-settable, hard-capped at 100 bps because the endpoints cannot
+   be upgraded):
 
 ```
-lock:     pulled = amount less sub-grid dust          (what leaves the user)
-          locked, attested = normalise(pulled - pulled * bps / 10_000)
-          protocol fee = pulled - locked               custody += locked
 release:  amount = denormalise(attested)               custody -= amount
           protocol fee = amount * bps / 10_000
           relayer = min(relayer_fee, amount - protocol fee)
           recipient = amount - protocol fee - relayer
 ```
 
-On a lock the *net* amount is attested and minted, so custody still equals the bridged supply on
-Rand exactly. On a release the protocol fee is taken from the gross amount before the relayer
-fee: a burn that names its whole amount as the relayer fee cannot dodge it, and cannot make the
-release impossible (the burn on Rand is already final). Fees accrue per token outside the custody
-counter (`accruedFees[token]` / `TokenRegistry::accrued_fees`, held in the same contract / token
-account) and leave only through the admin's `withdrawFees` / `WithdrawFees`, which is bounded by
-the accrued amount, can never reach custody, and is not gated by the pause. A round trip of `x`
-costs about 20 bps of `x` plus the relayer fee; amounts small enough that `x * bps / 10_000`
-rounds to zero pay nothing.
-
-The RAND-denominated fee on `BridgeAttest` / `BridgeBurn` is separate and lives in the fullnode
-(`gas::fee_floor`, §8.3).
+The protocol fee is an endpoint-side skim and deliberately not part of the attestation format, so
+no verifier rule changes and the verifiers stay in parity. It is taken from the gross amount
+before the relayer fee: a burn that names its whole amount as the relayer fee cannot dodge it, and
+cannot make the release impossible (the burn on Rand is already final). The whole attested amount
+leaves custody, so custody still equals the bridged supply on Rand exactly. Fees accrue per token
+outside the custody counter (`accruedFees[token]` / `TokenRegistry::accrued_fees`, held in the same
+contract / token account) and leave only through the admin's `withdrawFees` / `WithdrawFees`,
+which is bounded by the accrued amount, can never reach custody, and is not gated by the pause.
+Amounts small enough that `amount * bps / 10_000` rounds to zero pay nothing.
 
 ---
 
@@ -409,13 +414,12 @@ day's usage. Caps are in the token's native units; 0 means unlimited.
 
 ### 6.4 `lock`
 
-1. fork guard, not paused, token enabled, `randRecipient != 0`
-2. `_lockAmounts`: normalise `amount` into `pulled`, take the protocol fee (§3.5), normalise the
-   net into `locked` / `attested`; `relayerFee <= locked`; `attested != 0`; normalise `relayerFee`
-   the same way (it rounds down with the amount, so it stays `<= attested`)
-3. pull `pulled` and measure the balance delta; a mismatch reverts `TransferAmountMismatch`, so a
+1. fork guard, not paused, token enabled, `randRecipient != 0`, `relayerFee <= amount`
+2. normalise `amount`; `attested != 0`; normalise `relayerFee` the same way (it rounds down with
+   the amount, so it stays `<= attested`). No protocol fee: a lock is free (§3.5)
+3. pull `locked` and measure the balance delta; a mismatch reverts `TransferAmountMismatch`, so a
    fee-on-transfer token is rejected rather than mis-accounted
-4. `custody[token] += locked`; `accruedFees[token] += pulled - locked`
+4. `custody[token] += locked`
 5. emit `MessagePublished(sequence, nonce, consistencyLevel, payload)` and `Locked(...)` with
    `to_chain = 1`, `token_chain = this chain`; `sequence += 1`
 

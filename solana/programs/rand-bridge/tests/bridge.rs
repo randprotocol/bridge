@@ -882,7 +882,7 @@ async fn release_pays_recipient_and_relayer() {
 }
 
 #[tokio::test]
-async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin() {
+async fn protocol_fee_is_charged_on_release_only_and_withdrawn_by_the_admin() {
     let mut b = Bridge::simple(6).await;
     let mint = b.mint;
     b.set_token(true, 0, 0).await.expect("set token");
@@ -898,31 +898,27 @@ async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin(
     );
     b.set_protocol_fee(10).await.expect("fee on");
 
-    // Lock 2 tokens: 10 bps stays behind as a fee, the net is what custody
-    // holds and what the message attests.
+    // A lock is free: the whole amount is custodied and attested.
     let holder = Keypair::new();
     b.fund(&holder.pubkey());
     let holder_ata = b.put_ata(&holder.pubkey(), 2_000_000);
-    // The relayer fee is bounded by the net amount.
-    assert_bridge_error(
-        b.lock(&holder, holder_ata, 2_000_000, [0x44; 32], 2_000_000, 0)
-            .await,
-        BridgeError::FeeExceedsAmount,
-    );
     b.lock(&holder, holder_ata, 2_000_000, [0x44; 32], 0, 1)
         .await
         .expect("lock");
-    assert_eq!(b.token(holder_ata).await.amount, 0, "the gross amount left");
     assert_eq!(b.custody_balance().await, 2_000_000);
     let registry = b.registry().await;
-    assert_eq!(registry.custody, 1_998_000);
-    assert_eq!(registry.accrued_fees, 2_000);
+    assert_eq!(registry.custody, 2_000_000);
+    assert_eq!(registry.accrued_fees, 0, "no fee on a lock");
     let posted: PostedMessage = b.state(msg_pda(&b.program, 0).0).await;
     let decoded = Body::decode(&posted.body).expect("body");
     let Payload::Transfer(t) = Payload::decode(&decoded.payload).expect("payload") else {
         panic!("not a transfer");
     };
-    assert_eq!(t.amount_u128(), Some(199_800_000), "the net amount, at 8dp");
+    assert_eq!(
+        t.amount_u128(),
+        Some(200_000_000),
+        "the full amount, at 8dp"
+    );
 
     // Release 1 token with a 0.05 relayer fee: 10 bps of the gross comes
     // off first, the relayer is paid in full, the recipient gets the rest.
@@ -948,10 +944,10 @@ async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin(
     assert_eq!(b.token(recipient_ata).await.amount, 949_000);
     let registry = b.registry().await;
     assert_eq!(
-        registry.custody, 998_000,
+        registry.custody, 1_000_000,
         "the whole attested amount left custody"
     );
-    assert_eq!(registry.accrued_fees, 3_000);
+    assert_eq!(registry.accrued_fees, 1_000);
     assert_eq!(
         b.custody_balance().await,
         1_001_000,
@@ -975,7 +971,7 @@ async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin(
         .expect("release, fee == amount");
     assert_eq!(b.token(relayer_ata).await.amount, 50_000 + 499_500);
     assert_eq!(b.token(recipient_ata).await.amount, 949_000);
-    assert_eq!(b.registry().await.accrued_fees, 3_500);
+    assert_eq!(b.registry().await.accrued_fees, 1_500);
 
     // Withdrawal: admin only, bounded by what accrued, never custody, and
     // not gated by the pause.
@@ -984,7 +980,7 @@ async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin(
     let ix = bridge_ix::withdraw_fees(&b.program, &stranger.pubkey(), &mint, &treasury_ata, 1);
     assert_bridge_error(b.send(ix, &[&stranger]).await, BridgeError::NotAdmin);
     let admin = b.admin.pubkey();
-    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 3_501);
+    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 1_501);
     assert_bridge_error(b.admin_send(ix).await, BridgeError::InsufficientFees);
     let custody = custody_pda(&b.program, &mint).0;
     let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &custody, 1);
@@ -992,13 +988,13 @@ async fn protocol_fee_is_skimmed_on_lock_and_release_and_withdrawn_by_the_admin(
 
     let ix = bridge_ix::pause(&b.program, &b.pauser.pubkey());
     b.pauser_send(ix).await.expect("pause");
-    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 3_000);
+    let ix = bridge_ix::withdraw_fees(&b.program, &admin, &mint, &treasury_ata, 1_000);
     b.admin_send(ix).await.expect("withdraw");
-    assert_eq!(b.token(treasury_ata).await.amount, 3_000);
+    assert_eq!(b.token(treasury_ata).await.amount, 1_000);
     let registry = b.registry().await;
     assert_eq!(registry.accrued_fees, 500);
-    assert_eq!(registry.custody, 498_000, "custody untouched");
-    assert_eq!(b.custody_balance().await, 498_500);
+    assert_eq!(registry.custody, 500_000, "custody untouched");
+    assert_eq!(b.custody_balance().await, 500_500);
 }
 
 #[tokio::test]

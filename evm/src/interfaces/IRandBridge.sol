@@ -34,7 +34,7 @@ interface IRandBridge {
     event AdminTransferStarted(address indexed to);
     event AdminTransferred(address indexed to);
     event PauserSet(address indexed pauser);
-    /// The protocol fee taken from one lock or release, in token units. It
+    /// The protocol fee taken from one release, in token units. It
     /// stays in the contract as `accruedFees`, outside `custody`.
     event ProtocolFeeCharged(address indexed token, uint256 fee);
     event ProtocolFeeSet(uint16 bps);

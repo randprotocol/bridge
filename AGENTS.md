@@ -13,7 +13,7 @@ read it before touching anything there, it is worked on by many sessions in para
   deploy tooling and the fullnode bridge glue) landed as doc/tooling follow-ups in commit
   `e44b7b6` and filed the issue trackers below. Both are internal — mainnet still needs an
   external audit (bridge issue #4).
-- **All test suites green**: `cd evm && forge test` (53), `cd solana && cargo test` (41 incl.
+- **All test suites green**: `cd evm && forge test` (51), `cd solana && cargo test` (41 incl.
   solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (50),
   `cd tools/vectors && cargo run --release -- --check` (both vector copies byte-identical).
 - **Progress later the same day**: fullnode issue #1 is fixed and closed (fullnode `544926c`:
@@ -48,13 +48,16 @@ read it before touching anything there, it is worked on by many sessions in para
   on-chain set-size bound, no Solana `SetPauser`, `Lock` sequence griefing, sub-unit dust).
   Suites: forge 43, solana 40, fullnode bridge 50, vectors OK. Licence is now GPL-3.0-only
   (`7343e2c`), matching the fullnode.
-- **Protocol fee added 2026-09-19** (user decision: 10 bps in USDT/USDC each way, plus a RAND fee
-  on top for validator infrastructure). The 10 bps is implemented on EVM/Tron and Solana (forge
-  53, solana 41 tests; the legacy tests run fee-free via `setProtocolFee(0)` in their setup). The
-  **RAND surcharge is not implemented**: it is a fullnode consensus change (`gas::fee_floor`, flat
-  surcharge on `BridgeAttest`/`BridgeBurn`; the whole fee already goes to the block proposer when
-  aggregation is off; no fork mechanism exists, so it ships with the chain cut that first carries
-  a `bridge` genesis section). Amount undecided; on deposits the *relayer* pays it, not the user.
+- **Fees added 2026-09-19**: 10 bps on release on EVM/Tron and Solana (forge 51, solana 41 tests;
+  the legacy tests run fee-free via `setProtocolFee(0)` in their setup); a first cut that also
+  skimmed locks (`3ad92f1`) was reverted the same day on the user's ruling that deposits are free.
+  The RAND side is fullnode branch **`bridge-burn-fee`** (worktree `/tmp/fullnode-bridge-burn-fee`,
+  off `a941774`): `BRIDGE_BURN_FEE = 10 * BUNDLE_BASE`, wallet default, docs, pinned tests — core
+  bridge/gas tests and the wallet burn tests green; the proving suites (wallet flow, cluster) not
+  run. **Not merged to fullnode `main`**: the shared checkout had another session's 143-file
+  uncommitted diff (incl. `gas.rs`). With aggregation on, the proposer keeps only `BUNDLE_BASE`
+  and the rest becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
+  chain enables aggregation. It ships with the chain cut that first carries a `bridge` section.
 - **Testnet deployer keys exist** (2026-09-19): `deploy/.env` (mode 600, git-ignored) holds one
   EVM key for Sepolia + BSC testnet (`0x278071824AD2051b8503d62Aa9c6e5eC12CE0B8D`), a Tron key
   (`TYToFBuiEEPFasMc7NBxF54KRkQX7o79nh`) and points at the Solana devnet deployer below; addresses
@@ -92,12 +95,14 @@ Parity across all verifiers is the security property; change these everywhere or
   endpoint actually holds; locks measure the received balance delta (fee-on-transfer rejected),
   and EVM/Tron releases measure the paid delta and **ignore the token's return value** (Tron USDT
   returns `false` from a successful `transfer`).
-- **Protocol fee** (10 bps default, cap 100, `docs/architecture.md` §3.5) is an endpoint-side skim
-  in the bridged token, never in the attestation: a lock attests and custodies the **net** amount
-  (custody == bridged supply stays exact), a release takes it from the gross amount **before** the
-  relayer fee (`relayer = min(fee, amount - protocol fee)`, so it can neither be dodged nor brick
-  a release). Fees live in `accruedFees` / `accrued_fees`, outside custody; `withdrawFees` can
-  never reach custody. Same arithmetic on EVM and Solana — change both or neither.
+- **Fees (user ruling 2026-09-19, `docs/architecture.md` §3.5): a deposit is free — no stablecoin,
+  no RAND; only unbridging pays.** On the burn: `gas::BRIDGE_BURN_FEE` = 0.01 RAND (the
+  `BridgeBurn` floor; `BridgeAttest` stays at `BUNDLE_BASE`, paid by the relayer). On the release:
+  10 bps of the token (default, cap 100), an endpoint-side skim that is never in the attestation,
+  taken from the gross amount **before** the relayer fee (`relayer = min(fee, amount - protocol
+  fee)`, so it can neither be dodged nor brick a release). Locks must never skim. Fees live in
+  `accruedFees` / `accrued_fees`, outside custody; `withdrawFees` can never reach custody. Same
+  arithmetic on EVM and Solana — change both or neither.
 - Guardian keys and the Rand emitter are per network: nothing in an attestation names testnet or
   mainnet.
 - Guardian-set size is bounded by transport, not on-chain: Solana's 1,232-byte transaction caps
@@ -112,7 +117,8 @@ Parity across all verifiers is the security property; change these everywhere or
   `to` is the 32-byte `recipient_hash` of the recipient's full shielded address (chain 12; chain
   11's `ReceiverId` form, resolved via `Ledger::resolve_pk`, was reverted at fullnode `17db41d`).
 - `Action` bincode tags: `BridgeAttest = 7`, `BridgeBurn = 8` (Bond/Unbond/Withdraw took 4-6).
-- Fee floors: `BridgeAttest = BUNDLE_BASE`, `BridgeBurn = 2 * BUNDLE_BASE` (two bundles).
+- Fee floors: `BridgeAttest = BUNDLE_BASE`, `BridgeBurn = 2 * BUNDLE_BASE` (two bundles) on fullnode
+  `main`; `BRIDGE_BURN_FEE` = 0.01 RAND on branch `bridge-burn-fee` (see State).
 - RPC: `rand_getBridgeState`, `rand_getAssets` (no param, registry rows), `rand_getBridgeBurn`,
   `rand_bridgeAssetId`. `rand_getAssetBalance` is **removed** (method-not-found).
 - Storage CFs: `bridge_spent`, `bridge_burns`, `meta["bridge_state"]`; no `bridge_balances`.

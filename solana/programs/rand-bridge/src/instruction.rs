@@ -83,7 +83,7 @@ pub enum BridgeInstruction {
     /// Set the protocol fee rate. Admin only, at most
     /// `MAX_PROTOCOL_FEE_BPS`.
     SetProtocolFee {
-        /// Basis points of the bridged amount, taken on lock and release.
+        /// Basis points of a released amount; a lock is free.
         bps: u16,
     },
     /// Pay accrued protocol fees out of the custody token account. Admin

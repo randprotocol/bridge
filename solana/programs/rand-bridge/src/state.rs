@@ -18,7 +18,7 @@ pub const CHAIN_ID: u16 = 5;
 pub const CONSISTENCY_LEVEL: u8 = 1;
 
 /// The protocol fee every endpoint launches with: 10 bps of the bridged
-/// token, on the way in and on the way out. Mirrors `RandBridgeBase`.
+/// token, taken on release only (a lock is free). Mirrors `RandBridgeBase`.
 pub const DEFAULT_PROTOCOL_FEE_BPS: u16 = 10;
 /// The most the admin can ever set it to (1%).
 pub const MAX_PROTOCOL_FEE_BPS: u16 = 100;
@@ -78,7 +78,7 @@ pub struct Config {
     pub sequence: u64,
     /// The config PDA's bump seed.
     pub bump: u8,
-    /// Protocol fee rate, in basis points of the bridged amount.
+    /// Protocol fee rate, in basis points of a released amount.
     pub protocol_fee_bps: u16,
 }
 

@@ -48,7 +48,8 @@ abstract contract RandBridgeBase is IRandBridge {
     uint256 internal constant MAX_ATTESTED_AMOUNT = type(uint64).max;
 
     /// The protocol fee every endpoint launches with: 10 bps of the bridged
-    /// token, on the way in and on the way out.
+    /// token, taken on release only. A lock is free: depositing costs the
+    /// user nothing beyond the source chain's gas.
     uint16 internal constant DEFAULT_PROTOCOL_FEE_BPS = 10;
     /// The most the admin can ever set it to (1%). The contract cannot be
     /// upgraded, so the rate is adjustable; the cap is what users rely on.
@@ -79,7 +80,7 @@ abstract contract RandBridgeBase is IRandBridge {
     mapping(address => TokenConfig) internal _tokenConfigs;
     mapping(address => uint256) public override custody;
 
-    /// Protocol fee rate, in basis points of the bridged amount.
+    /// Protocol fee rate, in basis points of a released amount.
     uint16 public override protocolFeeBps;
     /// Protocol fees collected per token and not yet withdrawn, in token
     /// units. Held by this contract but never part of `custody`: custody
@@ -205,9 +206,9 @@ abstract contract RandBridgeBase is IRandBridge {
         TokenConfig storage cfg = _tokenConfigs[token];
         if (!cfg.enabled) revert TokenDisabled();
         if (randRecipient == bytes32(0)) revert ZeroRecipient();
+        if (relayerFee > amount) revert FeeExceedsAmount();
 
-        (uint256 pulled, uint256 locked, uint256 attested) = _lockAmounts(amount, cfg.decimals);
-        if (relayerFee > locked) revert FeeExceedsAmount();
+        (uint256 locked, uint256 attested) = _normalize(amount, cfg.decimals);
         if (attested == 0) revert ZeroAmount();
         // Rand keeps a bridged holding in a note whose amount is a `u64`
         // and refuses a larger attestation at admission; a lock it could
@@ -215,9 +216,8 @@ abstract contract RandBridgeBase is IRandBridge {
         if (attested > MAX_ATTESTED_AMOUNT) revert AmountTooLarge();
         (, uint256 attestedFee) = _normalize(relayerFee, cfg.decimals);
 
-        _pull(token, msg.sender, pulled);
+        _pull(token, msg.sender, locked);
         custody[token] += locked;
-        _accrue(token, pulled - locked);
 
         uint64 seq = sequence;
         bytes memory payload = Attestation.encodeTransfer(
@@ -235,24 +235,6 @@ abstract contract RandBridgeBase is IRandBridge {
 
         sequence = seq + 1;
         return seq;
-    }
-
-    /// What a lock of `amount` pulls, puts in custody and attests.
-    ///
-    /// `pulled` is `amount` less any dust below one attested unit. The
-    /// protocol fee comes out of it *before* custody and before the
-    /// attestation: what is attested, minted on Rand and held in custody
-    /// is the net amount, so custody still backs the notes one for one
-    /// and no verifier sees the fee at all. The net is normalised again so
-    /// it sits on the attested grid; for a token with more than 8 decimals
-    /// the remainder joins the fee (`pulled - locked`).
-    function _lockAmounts(uint256 amount, uint8 decimals)
-        internal
-        view
-        returns (uint256 pulled, uint256 locked, uint256 attested)
-    {
-        (pulled,) = _normalize(amount, decimals);
-        (locked, attested) = _normalize(pulled - pulled * protocolFeeBps / BPS, decimals);
     }
 
     /// Books a protocol fee: it stays in the contract, outside custody.

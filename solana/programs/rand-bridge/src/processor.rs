@@ -711,23 +711,12 @@ fn process_lock(
     if rand_recipient == [0u8; 32] {
         return Err(BridgeError::ZeroRecipient.into());
     }
-
-    // `pulled` is `amount` less any dust below one attested unit. The
-    // protocol fee comes out of it *before* custody and before the
-    // attestation: what is attested, minted on Rand and held in custody
-    // is the net amount, so custody still backs the notes one for one and
-    // no verifier sees the fee at all. The net is normalised again so it
-    // sits on the attested grid; for a mint with more than 8 decimals the
-    // remainder joins the fee. Mirrors `RandBridgeBase._lockAmounts`.
-    let (pulled, _) = normalize(amount, registry.decimals)?;
-    let (locked, attested) = normalize(
-        pulled - protocol_fee_of(pulled, config.protocol_fee_bps),
-        registry.decimals,
-    )?;
-    let protocol_fee = pulled - locked;
-    if relayer_fee > locked {
+    if relayer_fee > amount {
         return Err(BridgeError::FeeExceedsAmount.into());
     }
+
+    // A lock is free of the protocol fee: that is charged on release only.
+    let (locked, attested) = normalize(amount, registry.decimals)?;
     if attested == 0 {
         return Err(BridgeError::ZeroAmount.into());
     }
@@ -762,7 +751,7 @@ fn process_lock(
             custody_account.key,
             owner.key,
             &[],
-            pulled,
+            locked,
         )?,
         &[
             owner_token_account.clone(),
@@ -772,17 +761,13 @@ fn process_lock(
         ],
     )?;
     let after = custody_state(custody_account, program_id, mint_account.key)?.amount;
-    if after.checked_sub(before) != Some(pulled) {
+    if after.checked_sub(before) != Some(locked) {
         return Err(BridgeError::TransferAmountMismatch.into());
     }
 
     registry.custody = registry
         .custody
         .checked_add(locked)
-        .ok_or(BridgeError::AmountOverflow)?;
-    registry.accrued_fees = registry
-        .accrued_fees
-        .checked_add(protocol_fee)
         .ok_or(BridgeError::AmountOverflow)?;
 
     let body = Body {
