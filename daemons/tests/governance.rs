@@ -121,7 +121,10 @@ fn refuses_what_the_verifiers_refuse() {
 
     // The vectors' own negatives for rotations are refused here too.
     let name = "upgrade_signed_by_superseded_set";
-    assert!(verify_rotation(&vector(&v, name), 1, &current).is_err(), "{name}");
+    assert!(
+        verify_rotation(&vector(&v, name), 1, &current).is_err(),
+        "{name}"
+    );
     // A transfer is not a rotation.
     assert!(verify_rotation(&vector(&v, "transfer_eth_usdt_6dp_ok"), 0, &current).is_err());
 }

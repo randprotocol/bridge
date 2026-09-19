@@ -221,6 +221,32 @@ fn guardians_cosign_deposits_only_and_the_relayer_assembles_the_pq_quorum() {
     // What the wallet will read from `--pq @file`.
     let json = serde_json::to_string(&quorum).unwrap();
     assert!(json.starts_with("[{\"index\":0,\"signature\":\""));
+    // The PQ set need not be aligned with the ECDSA set (chain 14 starts with
+    // `guardians` at set 0 and `pq_guardians` owned by set 1's operators):
+    // each co-signature is filed under the PQ key it verifies with.
+    let mut misaligned = GuardianSet {
+        index: 0,
+        keys: set.keys.clone(),
+        pq_keys: set.pq_keys.clone(),
+        rand_chain_id: Some(chain_id),
+    };
+    misaligned.keys.reverse();
+    let quorum = assemble_pq(&deposit, &misaligned, &collected).expect("still a PQ quorum");
+    assert_eq!(
+        pq::check(&quorum, &misaligned.pq_keys, chain_id, &deposit.digest),
+        Ok(())
+    );
+    let strangers = GuardianSet {
+        index: 0,
+        keys: vec![[9u8; 20]; 6],
+        pq_keys: set.pq_keys.clone(),
+        rand_chain_id: Some(chain_id),
+    };
+    assert!(
+        assemble_pq(&deposit, &strangers, &collected).is_some(),
+        "ECDSA membership is the attestation's business, not the PQ quorum's"
+    );
+
     // One guardian short of five co-signatures: no quorum, nothing submitted.
     assert!(assemble_pq(&deposit, &set, &collected[..4]).is_none());
 }

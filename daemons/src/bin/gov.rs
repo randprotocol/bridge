@@ -68,6 +68,29 @@ enum Command {
         #[arg(long)]
         attestation_file: PathBuf,
     },
+    /// Dilithium2 co-signatures over an attestation, for its submission to Rand
+    /// (`spec/PQ-COSIGNATURE.md`): a rotation needs them like any other BridgeAttest.
+    /// Writes `[{"index", "signature"}]`, what `rand bridge-mint --pq @file` reads.
+    Cosign {
+        #[arg(long)]
+        attestation_file: PathBuf,
+        /// The Rand chain id the co-signatures name.
+        #[arg(long)]
+        rand_chain_id: u64,
+        /// The chain's `pq_guardians` as a JSON file: `{"pq_guardians": ["<hex>", …]}`.
+        #[arg(long)]
+        pq_guardians_file: PathBuf,
+        /// Environment variables holding 32-byte PQ seeds (a quorum or more), comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        seed_envs: Vec<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print the Dilithium2 public key a seed derives (and its sha256 prefix), never the seed.
+    PqPublicKey {
+        #[arg(long)]
+        seed_env: String,
+    },
     SubmitEvm {
         #[arg(long)]
         rpc: String,
@@ -216,6 +239,65 @@ async fn main() -> Result<()> {
             for (i, key) in checked.new_keys.iter().enumerate() {
                 println!("new [{i}]  0x{}", hex::encode(key));
             }
+        }
+        Command::Cosign {
+            attestation_file,
+            rand_chain_id,
+            pq_guardians_file,
+            seed_envs,
+            out,
+        } => {
+            use bridge_daemons::pq;
+            let attestation = read_attestation(&attestation_file)?;
+            let mu = bridge_daemons::crypto::digest(
+                bridge_codec::Attestation::body_bytes(&attestation)
+                    .map_err(|e| anyhow!("{e:?}"))?,
+            );
+            let file: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&pq_guardians_file)?)?;
+            let pq_guardians: Vec<Vec<u8>> = file["pq_guardians"]
+                .as_array()
+                .ok_or_else(|| anyhow!("no pq_guardians array"))?
+                .iter()
+                .map(|k| hex::decode(k.as_str().unwrap_or_default()).context("pq_guardians entry"))
+                .collect::<Result<_>>()?;
+            let mut found = Vec::new();
+            for var in &seed_envs {
+                let key = pq::PqKey::from_seed_hex(&take_env(var)?)?;
+                let index = pq_guardians
+                    .iter()
+                    .position(|k| *k == key.public_key())
+                    .ok_or_else(|| anyhow!("{var} is not the seed of any key in pq_guardians"))?;
+                found.push((index as u8, key.sign(rand_chain_id, &mu)));
+            }
+            let quorum =
+                pq::assemble(&found, &pq_guardians, rand_chain_id, &mu).ok_or_else(|| {
+                    anyhow!(
+                        "{} co-signers, but {} keys need {}",
+                        found.len(),
+                        pq_guardians.len(),
+                        pq::quorum(pq_guardians.len())
+                    )
+                })?;
+            pq::check(&quorum, &pq_guardians, rand_chain_id, &mu)
+                .map_err(|e| anyhow!("self-check failed: {e:?}"))?;
+            std::fs::write(&out, serde_json::to_vec(&quorum)?)?;
+            println!(
+                "co-signed mu 0x{} for Rand chain {rand_chain_id} by PQ guardians {:?} -> {}",
+                hex::encode(mu),
+                quorum.iter().map(|s| s.index).collect::<Vec<_>>(),
+                out.display()
+            );
+        }
+        Command::PqPublicKey { seed_env } => {
+            use sha2::{Digest, Sha256};
+            let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(&seed_env)?)?;
+            let public = key.public_key();
+            println!("{}", hex::encode(&public));
+            eprintln!(
+                "sha256 prefix {}",
+                &hex::encode(Sha256::digest(&public))[..8]
+            );
         }
         Command::SubmitEvm {
             rpc,

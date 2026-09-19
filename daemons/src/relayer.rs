@@ -70,8 +70,20 @@ pub fn assemble_pq(
     let found: Vec<(u8, Vec<u8>)> = collected
         .iter()
         .filter_map(|c| {
-            let index = set.keys.iter().position(|k| *k == c.address)?;
-            Some((index as u8, c.pq_signature.clone()?))
+            let signature = c.pq_signature.clone()?;
+            // Normally a guardian's PQ key sits at the index of its ECDSA
+            // key. It need not: the PQ set does not move with an ECDSA
+            // rotation (spec §5), and chain 14 starts with `guardians` at set
+            // 0 while `pq_guardians` belongs to set 1's operators. So the
+            // index is whichever PQ key the co-signature verifies under,
+            // trying the aligned one first.
+            let aligned = set.keys.iter().position(|k| *k == c.address);
+            let index = aligned.into_iter().chain(0..set.pq_keys.len()).find(|&i| {
+                set.pq_keys
+                    .get(i)
+                    .is_some_and(|key| pq::verify(key, chain_id, &message.digest, &signature))
+            })?;
+            Some((index as u8, signature))
         })
         .collect();
     pq::assemble(&found, &set.pq_keys, chain_id, &message.digest)
