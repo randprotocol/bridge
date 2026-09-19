@@ -94,3 +94,18 @@ solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTI
 - `rand-bridge-cli` (`solana/cli`) is built by `cargo` as part of `sol.sh` and is also useful on
   its own: `initialize`, `set-token`, `pause`, `unpause`, `transfer-admin`, `accept-admin`, `show`,
   `address`, `export-keypair`.
+
+## Generating the keys
+
+`deploy/keygen.py` makes the keys locally — standard-library Python, nothing to install:
+
+    deploy/keygen.py --self-test            # known-answer tests only, generates nothing
+    deploy/keygen.py deployer               # ETH/BSC/TRON deployer keys, a Solana keypair, RAND_EMITTER
+    deploy/keygen.py guardian --index 2     # ONE guardian key — run it on that operator's host
+
+Each secret is SHA-512 over independent draws (the kernel CSPRNG, a second `/dev/random` read,
+`openssl rand`, CPU timing jitter, and optionally what you type), so no single weak source can
+weaken it. Secrets go to mode-0600 files under `~/.rand-bridge/<network>/`, never to the terminal,
+argv or the repository; only addresses are printed, derived by code that is checked against
+published vectors on every run. A key whose address appears in a testnet record is refused. Point
+the deploy scripts at the file with `DEPLOY_ENV_FILE=~/.rand-bridge/mainnet/deployer.env`.
