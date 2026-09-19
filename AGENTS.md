@@ -61,6 +61,14 @@ read it before touching anything there, it is worked on by many sessions in para
   `git pull --rebase`. With aggregation on, the proposer keeps only `BUNDLE_BASE` and the rest
   becomes the aggregator's share (`ledger/mod.rs` ~1078) — revisit if the bridge
   chain enables aggregation. It ships with the chain cut that first carries a `bridge` section.
+- **LAUNCH BLOCKER (2026-09-19, open): a Rand `BridgeBurn` can be redirected** — a transaction has
+  no signature and a bundle proof does not commit to its action, so any gossip peer can rewrite
+  `to` / `relayer_fee` and steal the release (`docs/audit/2026-09-19-reaudit.md` §5). Fix is in the
+  fullnode (action-binding public words, session `fullnode-fc`, branch `rpl`, ships with chain 14).
+  **Do not call `setToken` on any mainnet endpoint until that session reports the fix reviewed and
+  the "redirected BridgeBurn copy is refused" case passing.** The Rand side is also becoming ONE
+  pooled token, zUSD, with seven backings and per-backing `locked` counters (== endpoint custody);
+  bridged-asset transfers and per-asset supply do not exist on fullnode main yet.
 - **MAINNET ENDPOINTS ARE DEPLOYED (2026-09-19)** — addresses, tx hashes and the matching Rand
   genesis `bridge` section are in `docs/mainnet-deployment.md`. Ethereum and BSC
   `0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892`, Tron `TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU`, Solana
