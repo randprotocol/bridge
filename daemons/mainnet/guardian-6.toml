@@ -14,7 +14,7 @@ kind = "evm"
 rpc = "https://ethereum-rpc.publicnode.com"
 contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
 finality = "finalized"
-start_block = 26010199
+start_block = 26015200          # just before setToken (no lock can predate the whitelist); deployed at 26010199
 
 [[evm]]
 name = "bsc"
@@ -23,17 +23,17 @@ kind = "evm"
 rpc = "https://bsc-rpc.publicnode.com"
 contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
 finality = 15
-start_block = 122760747
+start_block = 122896000         # just before setToken; deployed at 122760747 (public RPCs refuse older logs)
 max_log_range = 1000
 
 [[evm]]
 name = "tron"
 chain = 4
 kind = "tron"
-rpc = "https://api.trongrid.io"
+rpc = "https://tron-rpc.publicnode.com"   # TronGrid rate-limits one IP without an API key
 contract = "0x0992df85dcce77ded2c0387f1fa9cf98ac859700"   # TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU
 finality = 19
-start_block = 86377422
+start_block = 86397900          # just before setToken; deployed at 86377422
 max_log_range = 1000
 
 [solana]
