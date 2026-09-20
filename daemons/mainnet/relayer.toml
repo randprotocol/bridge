@@ -53,5 +53,5 @@ guardian_addresses = [
   "0x62fA3e39F56636955DF228917EDD2e9e68F3a957", "0xb3F1409AE0D5b2467229fA74a92c51b15f980445",
 ]
 solana_cli = "../solana/target/release/rand-bridge-cli"
-rand_cli = "../../fullnode/target/release/rand"
+rand_cli = "/Users/dendisuhubdy/rand-node-a/bin-b3c594c/rand"   # the chain-14 release build (fullnode b3c594c); wallet via RAND_KEY, node via RAND_RPC
 listen = "127.0.0.1:7080"
