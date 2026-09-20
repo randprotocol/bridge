@@ -71,3 +71,13 @@ Round 1 — 1 USDT per chain to Rand chain 14 and back (relayer fee 0; release p
 
 `rand-bridge-audit` afterwards: custody 0 on all seven tokens, accrued fees exactly 10 bps of each
 release, every endpoint's balance == custody + fees, Rand total supply 0 == Σ locked.
+
+Round 2 — 9 USDT per chain, minted and **left on Rand** (the owner's ruling: the bridge is known to
+work, keep 36 zUSD against 36 USDT in custody). Locks: Ethereum
+`0xf9bb33bdc89fec2ee82b4dd02226ec9d0b63d27ae50fb341af6e8b95ec937d0a`, BSC
+`0xc329ea06440bf4a84383da39b9c67e2484ac96e168558b1a86905242c165c1ff`, Tron
+`b0fc155a2264b9dbf5b7cbeac899ae918b3a976aa7af21e003f37435eb9f3269`, Solana
+`2iAUL44wjhE7pcYeznAwGix5RMb28eTgXVwSRy7qixGASUcwqXx7EhVsrZATyNAjzAKXw2sRNXhQiaLF6ps6w6K3`.
+`rand-bridge-audit` afterwards: custody 9 USDT on each endpoint == `locked` on Rand, total supply
+3600000000 == Σ locked, custody − locked = 0. The zUSD is held by the chain-14 "tester" wallet
+(`~/.rand-chain14/wallets/`, the fullnode session's).

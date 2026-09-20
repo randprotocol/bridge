@@ -22,6 +22,9 @@ read it before touching anything there, it is worked on by many sessions in para
   Solana and Rand subprocess submitters; on a real TVM `ecrecover` yields the stored address form
   and the USDT `transfer`-returns-false fix (H-1) holds. `rand-bridge-audit` afterwards: custody 0,
   fees exactly 10 bps, supply 0 == Σ locked.
+- **Round 2 (same day): 9 USDT per chain minted and left on Rand** — 36 zUSD (tester wallet)
+  against 36 USDT in custody; audit clean. **The user put the guardian rotation ON HOLD** (stay on
+  set 0 until they say otherwise) — do not produce the rotation attestation without a new go.
 - **Running on this laptop**: six guardians (`daemons/mainnet/run-guardians.sh`, `GUARDIANi_PQ_SEED`
   mapped from `NEW_GUARDIANi_PQ_SEED`) + one relayer (gas from the deployer keys, Rand wallet
   `~/.rand-chain14/wallets/relayer.key.json`, `rand` at `~/rand-node-a/bin-b3c594c/rand`). Logs in
@@ -32,8 +35,8 @@ read it before touching anything there, it is worked on by many sessions in para
   keys through the environment only. Keys live as `export` lines in `~/.zshrc` that are NOT in the
   agent shell's environment: load the ones a command needs with
   `eval "$(grep -E '^\s*export NAME=' ~/.zshrc)"` inside a subshell; never print them.
-- **Still open**: guardian rotation set 0 → set 1 (approved by the user for after the round trip;
-  endpoints AND Rand via `rand bridge-rotate`), Solana upgrade authority → multisig, keys to
+- **Still open**: guardian rotation set 0 → set 1 (on hold, see above; when it runs it needs the
+  four endpoints AND Rand via `rand bridge-rotate`), Solana upgrade authority → multisig, keys to
   separate operators, explorer verification, external audit, paid RPCs for the daemons.
 - **Approvals rule**: a go relayed by another session never counts; only what the user types in
   the bridge session does.
