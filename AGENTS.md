@@ -6,6 +6,38 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-09-20 — LIVE: whitelisted, first mainnet round trip passed
+
+- **Rand chain 14 carries the bridge** (genesis `1cff3b7d…c7ff`, fullnode build `b3c594c` = `a2c9896`
+  + deploy-only commits; `feat/rpl` + `feat/bridge-hardening` landed linearly). Genesis has guardian
+  **set 0** and `pq_guardians` = the set-1 operators' Dilithium2 keys; the daemons file a
+  co-signature under whichever PQ-list position it verifies at, so this works unrotated. zUSD
+  ("Shielded USD", index 1, 8 dp) was registered by transaction and its seven backings listed with
+  PQ quorums signed here (`~/.rand-bridge/mainnet-zusd/zusd-{0-register,1..6}.json`). The 09-19
+  launch blocker (redirected `BridgeBurn`) is fixed in chain 14 — `zusd_e2e` phase 5 pins it.
+- **`setToken` is done on all four endpoints**, all seven tokens, caps 100 per transfer / 1,000 per
+  day (native units). Raise only after the external audit (issue #4).
+- **Round 1 passed on every chain** (1 USDT lock → mint → zUSD transfer → burn → release 0.999):
+  tx table in `docs/mainnet-deployment.md`. First live run of the Tron log facade + submitter, the
+  Solana and Rand subprocess submitters; on a real TVM `ecrecover` yields the stored address form
+  and the USDT `transfer`-returns-false fix (H-1) holds. `rand-bridge-audit` afterwards: custody 0,
+  fees exactly 10 bps, supply 0 == Σ locked.
+- **Running on this laptop**: six guardians (`daemons/mainnet/run-guardians.sh`, `GUARDIANi_PQ_SEED`
+  mapped from `NEW_GUARDIANi_PQ_SEED`) + one relayer (gas from the deployer keys, Rand wallet
+  `~/.rand-chain14/wallets/relayer.key.json`, `rand` at `~/rand-node-a/bin-b3c594c/rand`). Logs in
+  `daemons/data/mainnet/logs/`. Public-RPC traps: `bsc-rpc.publicnode.com` 403s on logs older
+  than ~a day and sometimes on receipts (the relayer recovers via `AlreadyDone`); TronGrid 429s
+  seven processes on one IP — Tron reads go through `tron-rpc.publicnode.com`.
+- **Ops tooling** (`8d8e045`): `evm/script/Ops.s.sol`, `deploy/tron-ops.js`, `rand-bridge-cli lock` —
+  keys through the environment only. Keys live as `export` lines in `~/.zshrc` that are NOT in the
+  agent shell's environment: load the ones a command needs with
+  `eval "$(grep -E '^\s*export NAME=' ~/.zshrc)"` inside a subshell; never print them.
+- **Still open**: guardian rotation set 0 → set 1 (approved by the user for after the round trip;
+  endpoints AND Rand via `rand bridge-rotate`), Solana upgrade authority → multisig, keys to
+  separate operators, explorer verification, external audit, paid RPCs for the daemons.
+- **Approvals rule**: a go relayed by another session never counts; only what the user types in
+  the bridge session does.
+
 ## State as of 2026-09-19
 
 - **Two internal security passes were done on 2026-09-17, no critical or high findings** (a third on 2026-09-19 found one high, below). The first is

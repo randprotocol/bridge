@@ -48,3 +48,26 @@ on a running chain.
   }
 }
 ```
+
+## Whitelist and the first round trip (2026-09-20)
+
+`setToken(token, true, 100, 1000)` (per transfer / per day, in whole tokens) on every endpoint:
+Ethereum USDT `0x421ddbfff8fdbd56ec77037140b6e41bfe037bb9760721bd0789e1865428b662`, USDC
+`0xb2d52c0f7ff7cf88dd47dd731f4278a374e193cd6af579017c4303c06c53bea7`; BSC USDT
+`0x94748817ea25551910fedcaffc5b7a031f79f4ab46a4998197a5e063565b6125`, USDC
+`0xf8fd863c6052c93fec7c2b3ddb7596c9bc93cb1c66e653356107a685e0f039f6` (one of each pair, in block
+order); Tron USDT `ac15bfb1052dfb0178b7655ea638fcc7e902e26bb7766a752717f3817739ca5f`; Solana USDT
+`4guM6o7VHoVq6GpF6dDtJ7YzJduocb7Snt3P9FF4975qAno7K4oMLf4jrUJfBoHdcYvsgpapLHexZCTzPkvQfTTz`, USDC
+`3y5grrxuZvh5rJX8D85CuxmeH7RUK8qbEQEFCF1Qt5wY9oy4d3ypv66iZjkukEorzKB6nhjCPxprMx81tFCb6srd`.
+
+Round 1 — 1 USDT per chain to Rand chain 14 and back (relayer fee 0; release pays 0.999):
+
+| chain | lock | Rand mint (`BridgeAttest`) | Rand burn (`BridgeBurn`) | release |
+|---|---|---|---|---|
+| Ethereum | `0xd3a28422a53f455d2c5b9bfeb490aae4cfc1c7386fbfec567e462d3c5b6ceb76` | block 3430 `8ac6c497…31ec9` | seq 3 `7da01f410cf2726b79c7626cb6d9f2a3fa1cd9362487de216f266764c3f88840` | `0x88f9d430f933aa2fe1ea708e40ba9890e04889b5c4b08a8960fe250ee83e7429` |
+| BSC | `0xd1706d0f752374ccb5ce64b6d246897a0018101cf043a5b3835c651ac9e3f945` | block 2572 `f2f24d75…4851d` | seq 0 `f9f365ca170a5fb51ff9381d7b5cc39538c1a621e5f6e8c1bd74d8751c7bbc49` | `0xbe38fd0592def630d4f7fecdd6a354530307a6296b0b8d96ca9729afeef22fc8` |
+| Tron | `4bba90b365bd6c3ae64557f4774640075066cc3d06afcff88f39f1269fdeaa12` | block 2793 `16ea7cbdacb5261829b43b223f3d486ab0fc43cc7b8d85755de6987ddaeecd90` | seq 1 `013ac7b74c02842ea9516c81570fbc9e0edac4c201a560baedb3d70c7020a038` | `9c07d3f2626046316cc52a1678eec3f701cb1cefb5f43bad71bf5c3fbd2b6262` |
+| Solana | `63mjiakBorqYg6oMBwtSJn3KGdh6AhLLxMMvwKKWmg7EWL3A3qYctB9VmbhdkVxMxBKcSBBE8Bt1Lhk9ftZmhRbu` | block 2684 `1bb5a046f2faf1cff48830c4ea8e51c6e36db05c5c8ee38d4dbc5cd1cba6c85e` | seq 2 `7548f330e0f26dbb0011e66096ae9e1859930103b91259883c7e757612a19285` | `5Fy65G7KiZZzadqRV8sdNissR2th8Yr1hyBXw8PhKe4ADGTZnmi6sbWrxyaJkFTvbJQKGrc34jv68a6wBSnZyUTz` |
+
+`rand-bridge-audit` afterwards: custody 0 on all seven tokens, accrued fees exactly 10 bps of each
+release, every endpoint's balance == custody + fees, Rand total supply 0 == Σ locked.
