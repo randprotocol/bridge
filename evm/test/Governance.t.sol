@@ -53,10 +53,23 @@ contract GovernanceTest is Test {
     address constant SAFE_130_L2 = 0x3E5c63644E683549055b9Be8653de26E0B4CD36E;
     address constant SAFE_141 = 0x41675C099F32341bf84BFc5382aF534df5C7461a;
     address constant SAFE_141_L2 = 0x29fcB43b46531BcA003ddC8FCB67FFE91900C762;
+    // The v1.3.0 eip155 singletons (same code as the canonical ones).
+    address constant SAFE_130_EIP155 = 0x69f4D1788e39c87893C980c06EdF4b7f686e2938;
+    address constant SAFE_130_L2_EIP155 = 0xfb1bffC9d739B8D520DaF37dF666da4C687191EA;
 
-    /// The handover requires both multisigs to be Safes: a proxy whose slot 0 is a canonical
-    /// singleton, with no module, a threshold of at least 2 and at least that many owners. A
-    /// `FakeSafe` answers those views; the timelock and the bridge only look at msg.sender.
+    /// Safe proxy runtime code, read from mainnet 2026-09-25 (`cast code`): v1.3.0
+    /// `GnosisSafeProxy` at 0xd55fc3fcdb59c38237948bda9f14add783619f76 (== the v1.3.0 factory's
+    /// `proxyRuntimeCode()`), v1.4.1 `SafeProxy` at 0xc0468813ee19f271768f1b53b128ae5b1e0a70c3.
+    bytes constant PROXY_130 = hex"608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea2646970667358221220d1429297349653a4918076d650332de1a1068c5f3e07c5c82360c277770b955264736f6c63430007060033";
+    bytes constant PROXY_141 = hex"608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033";
+    bytes32 constant FALLBACK_HANDLER_SLOT = keccak256("fallback_manager.handler.address");
+
+    /// The handover requires both multisigs to be Safes: the genuine Safe proxy runtime, slot 0 a
+    /// canonical singleton, no self fallback handler, no module, a threshold of at least 2 and
+    /// at least that many owners. Fork-free: the multisig address gets the REAL proxy runtime
+    /// (mainnet bytes), and the singleton address it delegates to gets `FakeSafe`'s code, which
+    /// answers the views from the proxy's storage. The timelock and the bridge only look at
+    /// msg.sender.
     function _giveMultisigsCode() internal {
         _fakeSafe(adminMs, SAFE_130_L2, 3, 5, 0);
         _fakeSafe(pauseMs, SAFE_141, 2, 5, 0);
@@ -65,7 +78,9 @@ contract GovernanceTest is Test {
     function _fakeSafe(address at, address singleton, uint256 threshold, uint256 owners, uint256 modules)
         internal
     {
-        vm.etch(at, address(new FakeSafe()).code);
+        bool v141 = singleton == SAFE_141 || singleton == SAFE_141_L2;
+        vm.etch(at, v141 ? PROXY_141 : PROXY_130);
+        vm.etch(singleton, address(new FakeSafe()).code);
         vm.store(at, bytes32(uint256(0)), bytes32(uint256(uint160(singleton))));
         vm.store(at, bytes32(uint256(1)), bytes32(threshold));
         vm.store(at, bytes32(uint256(2)), bytes32(owners));
@@ -465,12 +480,18 @@ contract GovernanceTest is Test {
 
     function test_handover_refuses_an_admin_multisig_that_is_not_a_safe() public {
         TimelockController tl = gov.deployTimelock(adminMs, DELAY);
-        vm.etch(adminMs, hex"00"); // a contract, but it answers nothing
+        vm.etch(adminMs, hex"00"); // a contract, but not the Safe proxy
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not a Safe proxy (code is not the v1.3.0/v1.4.1 proxy runtime)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        // The real proxy code with slot 0 empty.
+        vm.etch(adminMs, PROXY_130);
         vm.store(adminMs, bytes32(0), bytes32(0));
         vm.expectRevert(bytes("ADMIN_MULTISIG is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)"));
         gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
-        // A canonical singleton in slot 0 is not enough: it must answer as a Safe.
-        vm.store(adminMs, bytes32(0), bytes32(uint256(uint160(SAFE_130))));
+        // A canonical singleton in slot 0 is not enough: it must answer as a Safe (here the
+        // singleton address has no code, so the proxy's delegatecall returns nothing).
+        vm.store(adminMs, bytes32(0), bytes32(uint256(uint160(SAFE_130_EIP155))));
+        vm.etch(SAFE_130_EIP155, "");
         vm.expectRevert(bytes("ADMIN_MULTISIG: getThreshold() unanswered"));
         gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
     }
@@ -516,12 +537,50 @@ contract GovernanceTest is Test {
     }
 
     function test_handover_accepts_each_canonical_singleton() public {
-        address[4] memory singletons = [SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2];
-        for (uint256 i; i < 4; i++) {
+        address[6] memory singletons =
+            [SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2, SAFE_130_EIP155, SAFE_130_L2_EIP155];
+        for (uint256 i; i < 6; i++) {
             gov.requireSafe(adminMs, "ADMIN_MULTISIG"); // reverts on any failure
             _fakeSafe(adminMs, singletons[i], 2, 2, 0);
             gov.requireSafe(adminMs, "ADMIN_MULTISIG");
         }
+    }
+
+    /// A contract with the right slot 0 and the right answers is not a Safe unless its code is the
+    /// Safe proxy's: FakeSafe itself (the mock these tests use) must be refused.
+    function test_handover_refuses_a_look_alike_that_is_not_the_safe_proxy_code() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.etch(adminMs, address(new FakeSafe()).code); // slot 0..3 still a compliant Safe's
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not a Safe proxy (code is not the v1.3.0/v1.4.1 proxy runtime)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        _giveMultisigsCode();
+        vm.etch(pauseMs, address(new FakeSafe()).code);
+        vm.expectRevert(bytes("PAUSE_MULTISIG is not a Safe proxy (code is not the v1.3.0/v1.4.1 proxy runtime)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    /// GS400: a Safe whose fallback handler is itself exposes its internal methods.
+    function test_handover_refuses_a_safe_that_is_its_own_fallback_handler() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.store(adminMs, FALLBACK_HANDLER_SLOT, bytes32(uint256(uint160(adminMs))));
+        vm.expectRevert(bytes("ADMIN_MULTISIG: Safe fallback handler is the Safe itself (GS400)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        vm.store(adminMs, FALLBACK_HANDLER_SLOT, bytes32(0));
+        vm.store(pauseMs, FALLBACK_HANDLER_SLOT, bytes32(uint256(uint160(pauseMs))));
+        vm.expectRevert(bytes("PAUSE_MULTISIG: Safe fallback handler is the Safe itself (GS400)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        // Any other handler is fine.
+        vm.store(pauseMs, FALLBACK_HANDLER_SLOT, bytes32(uint256(uint160(makeAddr("handler")))));
+        gov.requireSafe(pauseMs, "PAUSE_MULTISIG");
+    }
+
+    function test_the_pinned_safe_proxy_hashes_and_fallback_slot() public {
+        assertEq(keccak256(PROXY_130), 0xb89c1b3bdf2cf8827818646bce9a8f6e372885f8c55e5c07acbd307cb133b000);
+        assertEq(keccak256(PROXY_141), 0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c);
+        assertEq(FALLBACK_HANDLER_SLOT, 0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5);
+        assertTrue(gov.isSafeProxyCodehash(keccak256(PROXY_130)));
+        assertTrue(gov.isSafeProxyCodehash(keccak256(PROXY_141)));
+        assertFalse(gov.isSafeProxyCodehash(keccak256(address(new FakeSafe()).code)));
     }
 
     // M2: the sender holds no role on the timelock at all.

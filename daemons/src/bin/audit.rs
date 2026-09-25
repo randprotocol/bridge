@@ -310,8 +310,21 @@ async fn safe_reads(rpc: &JsonRpc, safe: &[u8; 20]) -> SafeReads {
     let mut ten = [0u8; 32];
     ten[31] = 10;
     modules_call.extend_from_slice(&ten);
+    let fallback_handler_slot = rpc
+        .call(
+            "eth_getStorageAt",
+            json!([
+                format!("0x{}", hex::encode(safe)),
+                gov_audit::SAFE_FALLBACK_HANDLER_SLOT,
+                "latest"
+            ]),
+        )
+        .await
+        .and_then(|v| hex_data(&v))
+        .map_err(|e| format!("{e:#}"));
     SafeReads {
         singleton_slot,
+        fallback_handler_slot,
         threshold: try_call(rpc, safe, "getThreshold()").await,
         owners: try_call(rpc, safe, "getOwners()").await,
         modules: eth_call(rpc, safe, modules_call)
@@ -629,6 +642,14 @@ async fn solana_governance(
 /// can change the endpoints, not who can move custody.
 const GOVERNANCE_CAVEAT: &str = "caveat: custody is still authorised by the guardian quorum, whose keys are not yet distributed (BR-4)";
 
+/// Writes the BR-4 caveat after a `--governance` run, however it ended (an
+/// early error included), and hands the verdict back unchanged.
+fn with_caveat<T>(result: Result<T>, out: &mut dyn std::io::Write) -> Result<T> {
+    let _ = writeln!(out, "{GOVERNANCE_CAVEAT}");
+    let _ = out.flush();
+    result
+}
+
 fn render_governance(title: &str, rules: &[Rule]) -> String {
     let mut out = format!("== {title} ==\n");
     out.push_str(&format!(
@@ -700,16 +721,13 @@ async fn governance(config: &Config) -> Result<()> {
         failed += n;
         endpoints_failing += usize::from(n > 0);
     }
-    let verdict = if failed > 0 {
-        Err(anyhow!(
+    if failed > 0 {
+        return Err(anyhow!(
             "governance: {failed} rule(s) not passed on {endpoints_failing} endpoint(s)"
-        ))
-    } else {
-        println!("governance: every rule passed: no single key can change an endpoint's configuration or code");
-        Ok(())
-    };
-    println!("{GOVERNANCE_CAVEAT}");
-    verdict
+        ));
+    }
+    println!("governance: every rule passed: no single key can change an endpoint's configuration or code");
+    Ok(())
 }
 
 #[tokio::main]
@@ -717,7 +735,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
     if cli.governance {
-        return governance(&config).await;
+        let result = governance(&config).await;
+        return with_caveat(result, &mut std::io::stdout());
     }
     let mut rows = evm_rows(&config).await?;
     rows.extend(solana_rows(&config).await?);
@@ -816,6 +835,25 @@ mod tests {
             vec![(5, 5), (6, 6), (7, 7)],
             "0 is read as 1"
         );
+    }
+
+    /// The caveat is printed whatever happened, an early error included.
+    #[test]
+    fn the_br4_caveat_follows_every_governance_run() {
+        for result in [
+            Ok(()),
+            Err(anyhow!("governance: 3 rule(s) not passed")),
+            Err(anyhow!("tron contract: not an address (an early error)")),
+        ] {
+            let failed = result.is_err();
+            let mut out = Vec::new();
+            let back = with_caveat(result, &mut out);
+            assert_eq!(back.is_err(), failed, "the verdict is kept");
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                format!("{GOVERNANCE_CAVEAT}\n")
+            );
+        }
     }
 
     #[test]

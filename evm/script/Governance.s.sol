@@ -162,23 +162,57 @@ contract Governance is Script {
     /// `GnosisSafe` and `GnosisSafeL2`, v1.4.1 `Safe` and `SafeL2`, the "canonical" deployment of
     /// each in github.com/safe-global/safe-deployments (src/assets/v1.3.0/gnosis_safe.json,
     /// gnosis_safe_l2.json, v1.4.1/safe.json, safe_l2.json; all four listed for chains 1 and 56;
-    /// read 2026-09-25 at main 7b1fb6d). `rand-bridge-audit --governance` pins the same four.
+    /// read 2026-09-25 at main 7b1fb6d), plus the two v1.3.0 "eip155" deployments listed in the
+    /// same files for chains 1 and 56, whose codeHash there (and `cast codehash` on Ethereum
+    /// and BSC) equals the canonical ones'. `rand-bridge-audit --governance` pins the same six.
     function isCanonicalSafeSingleton(address singleton) public pure returns (bool) {
         return singleton == 0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552 // v1.3.0
+            || singleton == 0x69f4D1788e39c87893C980c06EdF4b7f686e2938 // v1.3.0 (eip155)
             || singleton == 0x3E5c63644E683549055b9Be8653de26E0B4CD36E // v1.3.0 L2
+            || singleton == 0xfb1bffC9d739B8D520DaF37dF666da4C687191EA // v1.3.0 L2 (eip155)
             || singleton == 0x41675C099F32341bf84BFc5382aF534df5C7461a // v1.4.1
             || singleton == 0x29fcB43b46531BcA003ddC8FCB67FFE91900C762; // v1.4.1 L2
     }
 
-    /// Reverts unless `safe` is a Safe proxy (slot 0 = a canonical singleton) with no enabled
-    /// module (a module executes without any owner signature), a threshold of at least 2, and
-    /// at least that many owners. Anything answering `getThreshold()` is not enough.
+    /// keccak256 of the Safe proxy runtime code. Proxies have no immutables, so every Safe of a
+    /// version has exactly this code. Read 2026-09-25 with `cast codehash` on Ethereum mainnet:
+    /// v1.3.0 `GnosisSafeProxy` 0xd55fc3fcdb59c38237948bda9f14add783619f76,
+    /// 0x11da15f4b1831a5119830902b14db9bf47a4fb59, 0xbf4673efcc7ad7680052d7d96a63d52338f5b2ed
+    /// (equal to keccak256 of the v1.3.0 ProxyFactory 0xa6B71E26…6AB2 `proxyRuntimeCode()`, on
+    /// Ethereum and BSC); v1.4.1 `SafeProxy` 0xc0468813ee19f271768f1b53b128ae5b1e0a70c3,
+    /// 0x43703dd614c5ba3e87ec8211c56b64af14f3bd7b (a suffix of the v1.4.1 SafeProxyFactory
+    /// 0x4e1DCf7A…ec67 `proxyCreationCode()`, on Ethereum and BSC). safe-deployments states only
+    /// the factories' own code hashes, not the proxies'. `rand-bridge-audit` pins the same two.
+    bytes32 internal constant SAFE_PROXY_130_CODEHASH =
+        0xb89c1b3bdf2cf8827818646bce9a8f6e372885f8c55e5c07acbd307cb133b000;
+    bytes32 internal constant SAFE_PROXY_141_CODEHASH =
+        0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c;
+    /// Safe FallbackManager: `keccak256("fallback_manager.handler.address")`.
+    bytes32 internal constant FALLBACK_HANDLER_SLOT =
+        0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5;
+
+    function isSafeProxyCodehash(bytes32 h) public pure returns (bool) {
+        return h == SAFE_PROXY_130_CODEHASH || h == SAFE_PROXY_141_CODEHASH;
+    }
+
+    /// Reverts unless `safe` is a genuine Safe proxy (its code the v1.3.0/v1.4.1 proxy runtime,
+    /// slot 0 a canonical singleton) whose fallback handler is not itself (GS400), with no
+    /// enabled module (a module executes without any owner signature), a threshold of at least
+    /// 2, and at least that many owners. Anything answering the views is not enough.
     function requireSafe(address safe, string memory what) public view {
         require(safe.code.length != 0, string.concat(what, " has no code"));
+        require(
+            isSafeProxyCodehash(safe.codehash),
+            string.concat(what, " is not a Safe proxy (code is not the v1.3.0/v1.4.1 proxy runtime)")
+        );
         address singleton = address(uint160(uint256(vm.load(safe, bytes32(0)))));
         require(
             isCanonicalSafeSingleton(singleton),
             string.concat(what, " is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)")
+        );
+        require(
+            address(uint160(uint256(vm.load(safe, FALLBACK_HANDLER_SLOT)))) != safe,
+            string.concat(what, ": Safe fallback handler is the Safe itself (GS400)")
         );
 
         (bool ok, bytes memory ret) = safe.staticcall(abi.encodeWithSignature("getThreshold()"));

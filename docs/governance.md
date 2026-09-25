@@ -24,10 +24,12 @@ Rules the audit enforces (`rand-bridge-audit --governance`, §5):
   delay is at least 48 h, its role history starts at its constructor (so the configured deploy
   block is right), the only proposer, executor and canceller is the admin multisig, and only the
   timelock administers itself;
-- the admin multisig and the pauser are multisigs with a threshold of at least 2 — on EVM a Safe
-  proxy whose singleton (storage slot 0) is a canonical v1.3.0 or v1.4.1 Safe (or its L2 variant),
-  with **no module enabled** (a module executes without any owner signature) and at least as many
-  owners as its threshold; on Tron a multi-signature account — and the pauser is neither the admin
+- the admin multisig and the pauser are multisigs with a threshold of at least 2 — on EVM a
+  genuine Safe proxy (its code is the v1.3.0 `GnosisSafeProxy` or v1.4.1 `SafeProxy` runtime)
+  whose singleton (storage slot 0) is a canonical v1.3.0 or v1.4.1 Safe (or its L2 variant, or a
+  v1.3.0 eip155 deployment), whose fallback handler is not the Safe itself, with **no module
+  enabled** (a module executes without any owner signature) and at least as many owners as its
+  threshold; on Tron a multi-signature account — and the pauser is neither the admin
   nor the admin multisig;
 - on Solana the admin and the upgrade authority are the vault of a Squads multisig with no
   `config_authority`, a threshold of at least 2 and a time lock of at least 48 h.
@@ -46,11 +48,22 @@ keys sit in one shell profile is still one key.
 - the owners of the admin and pause multisigs on each chain (5 addresses each is the
   recommendation), created beforehand: Safes on Ethereum and BSC at safe.global (v1.3.0 or v1.4.1,
   **no modules, no recovery or spending-limit add-ons**: the handover and the audit refuse a Safe
-  with any module; a Safe of any other version, v1.5.0 included, is refused until its singleton is
-  added to both pins, `Governance.s.sol` `isCanonicalSafeSingleton` and `gov_audit.rs`
+  with any module; a Safe of any other version, v1.5.0 included, is refused until its proxy code
+  hash and singleton are added to both pins, `Governance.s.sol` `isSafeProxyCodehash` /
+  `isCanonicalSafeSingleton` and `gov_audit.rs` `SAFE_PROXY_CODEHASHES` /
   `CANONICAL_SAFE_SINGLETONS`), native multi-signature accounts on Tron (active permission with the threshold,
   whose `operations` allow TriggerSmartContract), one Squads v4 multisig on Solana created
   **without** a config authority and with a time lock of at least 172800 s;
+- **if the Safe web app offers only a newer version**, create the Safes at v1.4.1 explicitly with
+  the Protocol Kit (`@safe-global/protocol-kit`): `Safe.init({ provider, signer, predictedSafe: {
+  safeAccountConfig: { owners, threshold }, safeDeploymentConfig: { safeVersion: '1.4.1' } } })`,
+  then `createSafeDeploymentTransaction()` and send it from any funded key; it deploys through the
+  canonical v1.4.1 SafeProxyFactory `0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67` with the
+  canonical v1.4.1 singleton (`Safe` `0x41675C09…461a` or `SafeL2` `0x29fcB43b…C762`, both
+  accepted) and the v1.4.1 CompatibilityFallbackHandler. The Safe CLI (`safe-creator`, with `--safe-contract` /
+  `--proxy-factory` set to those v1.4.1 addresses) works too. Check the result with
+  `cast codehash <safe>` (= `0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c`)
+  and `cast storage <safe> 0` (the singleton) before the handover, which re-checks both;
 - gas: a few dollars on Ethereum, cents on BSC, ~100 TRX on Tron, and SOL in the Squads vault
   (the admin pays rent when a token is listed);
 - the current admin keys (EVM `0xe49B…0d0e`, Solana admin `HLc2…dN2P2`, the Solana upgrade
@@ -199,9 +212,11 @@ warn users, move nothing through the bridge). Set up an alert, to more than one 
   `RoleGranted`/`RoleRevoked`. On Tron the same topics appear in the JSON-RPC `eth_getLogs` of the
   timelock (hex address, `41` dropped).
 - **The Safes** (admin and pause, each chain): `ExecutionSuccess`, and above all any change of
-  who signs — `AddedOwner`, `RemovedOwner`, `ChangedThreshold`, `EnabledModule`
-  (`0xecdf3a3effea5783a3c4c2140e677577666428d44ed9d474a0b3a4c9943f8440`), `ChangedGuard`. A
-  module or a threshold drop takes effect immediately, without the timelock.
+  who or what can act for them — `AddedOwner`, `RemovedOwner`, `ChangedThreshold`,
+  `EnabledModule(address)` `0xecdf3a3effea5783a3c4c2140e677577666428d44ed9d474a0b3a4c9943f8440`,
+  `ChangedFallbackHandler(address)`
+  `0x5ac6c46c93c8d0e53714ba3b53db3e7c046da994313d7ed0d192028bc7c228b0`, `ChangedGuard`. A
+  module, a fallback handler or a threshold drop takes effect immediately, without the timelock.
 - **The bridge** (each chain): `Paused`, `Unpaused`, `AdminTransferStarted`, `AdminTransferred`,
   `PauserSet`, `TokenConfigured`, `ProtocolFeeSet`, `FeesWithdrawn`.
 - **Tron multi-signature accounts**: permission updates of the admin and pause accounts

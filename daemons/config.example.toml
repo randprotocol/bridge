@@ -91,8 +91,9 @@ listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, addr
 #     late), and from them PROPOSER_ROLE, EXECUTOR_ROLE, CANCELLER_ROLE are held
 #     by admin_multisig only and DEFAULT_ADMIN_ROLE by the timelock only (a
 #     refused log range is UNKNOWN: use an archive-capable RPC);
-#     admin_multisig is a Safe: storage slot 0 a canonical v1.3.0/v1.4.1 (L2)
-#     singleton, no enabled module, getThreshold() >= min_threshold, at least
+#     admin_multisig is a Safe: code = the v1.3.0/v1.4.1 Safe proxy runtime,
+#     storage slot 0 a canonical v1.3.0/v1.4.1 (L2, or v1.3.0 eip155)
+#     singleton, fallback handler not the Safe itself, no enabled module, getThreshold() >= min_threshold, at least
 #     that many owners (Tron: an account whose owner and active permissions each
 #     need >= min_threshold keys);
 #   pauser() — != admin(), != admin_multisig; a Safe as above (Tron: a

@@ -318,8 +318,11 @@ pub const TRON_TIMELOCK_RUNTIME_KECCAK: [u8; 32] = [
 /// `gnosis_safe_l2.json`, `src/assets/v1.4.1/safe.json`, `safe_l2.json` (main
 /// at 7b1fb6d, read 2026-09-25; each lists its canonical address for chains 1
 /// and 56). `evm/script/Governance.s.sol` `isCanonicalSafeSingleton` pins the
-/// same four. Anything else answering `getThreshold()` is not trusted as a Safe.
-pub const CANONICAL_SAFE_SINGLETONS: [(&str, [u8; 20]); 4] = [
+/// same six, which include the two v1.3.0 "eip155" deployments listed in the
+/// same v1.3.0 files for chains 1 and 56 (codeHash equal to the canonical
+/// ones', there and by `cast codehash` on Ethereum and BSC). Anything else
+/// answering `getThreshold()` is not trusted as a Safe.
+pub const CANONICAL_SAFE_SINGLETONS: [(&str, [u8; 20]); 6] = [
     (
         "v1.3.0",
         [
@@ -328,10 +331,24 @@ pub const CANONICAL_SAFE_SINGLETONS: [(&str, [u8; 20]); 4] = [
         ],
     ),
     (
+        "v1.3.0 (eip155)",
+        [
+            0x69, 0xf4, 0xd1, 0x78, 0x8e, 0x39, 0xc8, 0x78, 0x93, 0xc9, 0x80, 0xc0, 0x6e, 0xdf,
+            0x4b, 0x7f, 0x68, 0x6e, 0x29, 0x38,
+        ],
+    ),
+    (
         "v1.3.0 L2",
         [
             0x3e, 0x5c, 0x63, 0x64, 0x4e, 0x68, 0x35, 0x49, 0x05, 0x5b, 0x9b, 0xe8, 0x65, 0x3d,
             0xe2, 0x6e, 0x0b, 0x4c, 0xd3, 0x6e,
+        ],
+    ),
+    (
+        "v1.3.0 L2 (eip155)",
+        [
+            0xfb, 0x1b, 0xff, 0xc9, 0xd7, 0x39, 0xb8, 0xd5, 0x20, 0xda, 0xf3, 0x7d, 0xf6, 0x66,
+            0xda, 0x4c, 0x68, 0x71, 0x91, 0xea,
         ],
     ),
     (
@@ -350,6 +367,47 @@ pub const CANONICAL_SAFE_SINGLETONS: [(&str, [u8; 20]); 4] = [
     ),
 ];
 
+/// `keccak256` of the Safe proxy runtime code: a Safe is a proxy with exactly
+/// this code (no immutables, so every proxy of a version is identical). Read
+/// 2026-09-25 with `cast codehash` on Ethereum mainnet: v1.3.0
+/// `GnosisSafeProxy` 0xd55fc3fcdb59c38237948bda9f14add783619f76,
+/// 0x11da15f4b1831a5119830902b14db9bf47a4fb59,
+/// 0xbf4673efcc7ad7680052d7d96a63d52338f5b2ed (equal to keccak256 of the
+/// v1.3.0 ProxyFactory 0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2
+/// `proxyRuntimeCode()` on Ethereum and BSC); v1.4.1 `SafeProxy`
+/// 0xc0468813ee19f271768f1b53b128ae5b1e0a70c3,
+/// 0x43703dd614c5ba3e87ec8211c56b64af14f3bd7b (a suffix of the v1.4.1
+/// SafeProxyFactory 0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67
+/// `proxyCreationCode()` on Ethereum and BSC). safe-deployments records only
+/// the factories' code hashes. The runtimes are
+/// `tests/fixtures/safe-v1.3.0-GnosisSafeProxy.runtime.hex` and
+/// `safe-v1.4.1-SafeProxy.runtime.hex`; `evm/script/Governance.s.sol`
+/// `isSafeProxyCodehash` pins the same two.
+pub const SAFE_PROXY_CODEHASHES: [(&str, [u8; 32]); 2] = [
+    (
+        "v1.3.0 GnosisSafeProxy",
+        [
+            0xb8, 0x9c, 0x1b, 0x3b, 0xdf, 0x2c, 0xf8, 0x82, 0x78, 0x18, 0x64, 0x6b, 0xce, 0x9a,
+            0x8f, 0x6e, 0x37, 0x28, 0x85, 0xf8, 0xc5, 0x5e, 0x5c, 0x07, 0xac, 0xbd, 0x30, 0x7c,
+            0xb1, 0x33, 0xb0, 0x00,
+        ],
+    ),
+    (
+        "v1.4.1 SafeProxy",
+        [
+            0xd7, 0xd4, 0x08, 0xeb, 0xcd, 0x99, 0xb2, 0xb7, 0x0b, 0xe4, 0x3e, 0x20, 0x25, 0x3d,
+            0x6d, 0x92, 0xa8, 0xea, 0x8f, 0xab, 0x29, 0xbd, 0x3b, 0xe7, 0xf5, 0x5b, 0x10, 0x03,
+            0x23, 0x31, 0xfb, 0x4c,
+        ],
+    ),
+];
+
+/// Safe's FallbackManager slot, `keccak256("fallback_manager.handler.address")`.
+/// A handler equal to the Safe itself is refused (GS400: it gives unsanctioned
+/// access to the Safe's internal methods).
+pub const SAFE_FALLBACK_HANDLER_SLOT: &str =
+    "0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5";
+
 /// Safe's ModuleManager list sentinel: `getModulesPaginated(SENTINEL, n)` is
 /// the first page.
 pub const SAFE_MODULES_SENTINEL: [u8; 20] = {
@@ -362,6 +420,8 @@ pub const SAFE_MODULES_SENTINEL: [u8; 20] = {
 #[derive(Clone, Debug)]
 pub struct SafeReads {
     pub singleton_slot: Result<Vec<u8>, String>,
+    /// Storage at `SAFE_FALLBACK_HANDLER_SLOT`.
+    pub fallback_handler_slot: Result<Vec<u8>, String>,
     pub threshold: Result<Vec<u8>, String>,
     pub owners: Result<Vec<u8>, String>,
     pub modules: Result<Vec<u8>, String>,
@@ -372,6 +432,7 @@ impl SafeReads {
     pub fn not_asked(why: &str) -> Self {
         SafeReads {
             singleton_slot: Err(why.into()),
+            fallback_handler_slot: Err(why.into()),
             threshold: Err(why.into()),
             owners: Err(why.into()),
             modules: Err(why.into()),
@@ -614,9 +675,11 @@ fn call_error(r: &Result<Vec<u8>, String>) -> String {
 /// canonical singleton (`CANONICAL_SAFE_SINGLETONS`); no enabled module (a
 /// module executes without any owner signature); `getThreshold() >=
 /// min_threshold`; `getOwners().length >= getThreshold()`.
+#[allow(clippy::too_many_arguments)]
 fn multisig_rule(
     name: String,
     who: &str,
+    address: Option<[u8; 20]>,
     code: &[u8],
     safe: &SafeReads,
     tron_signers: Option<u32>,
@@ -628,6 +691,18 @@ fn multisig_rule(
             if code.is_empty() {
                 return rule(name, false, format!("{who} has no code (a key)"));
             }
+            let code_hash = keccak(code);
+            let Some((proxy, _)) = SAFE_PROXY_CODEHASHES.iter().find(|(_, h)| *h == code_hash)
+            else {
+                return rule(
+                    name,
+                    false,
+                    format!(
+                        "{who} is not a Safe proxy (keccak256(code) = 0x{})",
+                        hex::encode(code_hash)
+                    ),
+                );
+            };
             let singleton = match &safe.singleton_slot {
                 Ok(w) => match word_address(w)
                     .and_then(|a| CANONICAL_SAFE_SINGLETONS.iter().find(|(_, s)| *s == a))
@@ -646,6 +721,29 @@ fn multisig_rule(
                 },
                 Err(e) => return rule(name, false, format!("{who} slot 0 unreadable: {e}")),
             };
+            match (&safe.fallback_handler_slot, address) {
+                (Ok(w), Some(me)) if word_address(w) == Some(me) => {
+                    return rule(
+                        name,
+                        false,
+                        format!("{who}: Safe fallback handler is the Safe itself (GS400)"),
+                    )
+                }
+                (Ok(w), Some(_)) if word_address(w).is_some() => {}
+                (Ok(w), _) => {
+                    return rule(
+                        name,
+                        false,
+                        format!(
+                            "{who} fallback handler slot 0x{} unreadable",
+                            hex::encode(w)
+                        ),
+                    )
+                }
+                (Err(e), _) => {
+                    return rule(name, false, format!("{who} fallback handler slot: {e}"))
+                }
+            }
             let Some(t) = safe.threshold.as_ref().ok().and_then(|w| word_uint(w)) else {
                 return rule(
                     name,
@@ -709,7 +807,7 @@ fn multisig_rule(
                 name,
                 t >= u128::from(policy.min_threshold),
                 format!(
-                    "{who} Safe {singleton}, getThreshold() = {t} of {} owners, no modules",
+                    "{who} {proxy} -> {singleton}, getThreshold() = {t} of {} owners, no modules",
                     owners.len()
                 ),
             )
@@ -932,6 +1030,7 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         Some(ms) => multisig_rule(
             name,
             &format!("admin multisig {}", show(&ms, flavor)),
+            Some(ms),
             &reads.admin_multisig_code,
             &reads.admin_multisig_safe,
             reads.tron_admin_multisig_signers,
@@ -979,6 +1078,7 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
                 policy.min_threshold
             ),
             &format!("pauser {}", shown(pauser)),
+            pauser,
             &reads.pauser_code,
             &reads.pauser_safe,
             None,
@@ -1410,10 +1510,25 @@ mod tests {
         out
     }
 
-    /// Canned reads of a Safe proxy: slot 0 = `singleton`.
+    /// Safe proxy runtimes read from Ethereum mainnet (see SAFE_PROXY_CODEHASHES).
+    fn proxy_130() -> Vec<u8> {
+        hex::decode(
+            include_str!("../tests/fixtures/safe-v1.3.0-GnosisSafeProxy.runtime.hex").trim(),
+        )
+        .unwrap()
+    }
+    fn proxy_141() -> Vec<u8> {
+        hex::decode(include_str!("../tests/fixtures/safe-v1.4.1-SafeProxy.runtime.hex").trim())
+            .unwrap()
+    }
+    const SAFE_130_EIP155: [u8; 20] = hex_literal("69f4d1788e39c87893c980c06edf4b7f686e2938");
+    const SAFE_130_L2_EIP155: [u8; 20] = hex_literal("fb1bffc9d739b8d520daf37df666da4c687191ea");
+
+    /// Canned reads of a Safe proxy: slot 0 = `singleton`, a fallback handler set elsewhere.
     fn safe(singleton: [u8; 20], threshold: u64, owners: u64, modules: u64) -> SafeReads {
         SafeReads {
             singleton_slot: Ok(word(&singleton)),
+            fallback_handler_slot: Ok(word(&DEPLOYER)),
             threshold: Ok(uint(threshold)),
             owners: Ok(abi_owners(owners)),
             modules: Ok(abi_modules(modules)),
@@ -1453,11 +1568,11 @@ mod tests {
             min_delay: Ok(uint(172_800)),
             roles: Ok(constructor_events()),
             admin_multisig: Some(ADMIN_SAFE),
-            admin_multisig_code: vec![0x60; 40],
+            admin_multisig_code: proxy_130(),
             admin_multisig_safe: safe(SAFE_130_L2, 3, 5, 0),
             tron_admin_multisig_signers: None,
             pauser: word(&SAFE),
-            pauser_code: vec![0x60; 50],
+            pauser_code: proxy_141(),
             pauser_safe: safe(SAFE_141, 2, 5, 0),
             pending_admin: word(&[0u8; 20]),
             tron_pauser_signers: None,
@@ -1712,9 +1827,82 @@ mod tests {
     }
 
     #[test]
-    fn the_canonical_safe_singletons_are_the_four_pinned() {
+    fn the_canonical_safe_singletons_are_the_six_pinned() {
         let got: Vec<[u8; 20]> = CANONICAL_SAFE_SINGLETONS.iter().map(|(_, a)| *a).collect();
-        assert_eq!(got, vec![SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2]);
+        assert_eq!(
+            got,
+            vec![
+                SAFE_130,
+                SAFE_130_EIP155,
+                SAFE_130_L2,
+                SAFE_130_L2_EIP155,
+                SAFE_141,
+                SAFE_141_L2
+            ]
+        );
+    }
+
+    #[test]
+    fn the_safe_proxy_pins_are_the_mainnet_runtimes() {
+        assert_eq!(
+            hex::encode(keccak(&proxy_130())),
+            "b89c1b3bdf2cf8827818646bce9a8f6e372885f8c55e5c07acbd307cb133b000"
+        );
+        assert_eq!(
+            hex::encode(keccak(&proxy_141())),
+            "d7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"
+        );
+        let pins: Vec<[u8; 32]> = SAFE_PROXY_CODEHASHES.iter().map(|(_, h)| *h).collect();
+        assert_eq!(pins, vec![keccak(&proxy_130()), keccak(&proxy_141())]);
+        assert_eq!(
+            SAFE_FALLBACK_HANDLER_SLOT,
+            format!(
+                "0x{}",
+                hex::encode(keccak(b"fallback_manager.handler.address"))
+            )
+        );
+        assert_eq!(
+            SAFE_FALLBACK_HANDLER_SLOT,
+            "0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5"
+        );
+    }
+
+    /// Right slot 0, right answers, other code: not a Safe (e.g. evm/test/mocks/FakeSafe.sol).
+    #[test]
+    fn a_look_alike_with_other_code_is_not_a_safe() {
+        let mut r = compliant_reads();
+        r.admin_multisig_code = vec![0x60; 40];
+        let rules = only_fails(&r, Flavor::Evm, ADMIN_MS);
+        assert!(
+            rules[ADMIN_MS].observed.contains("not a Safe proxy"),
+            "{rules:#?}"
+        );
+        let mut r = compliant_reads();
+        r.pauser_code[5] ^= 1;
+        only_fails(&r, Flavor::Evm, PAUSER_MS);
+        // Either proxy version passes for either role.
+        let mut r = compliant_reads();
+        std::mem::swap(&mut r.admin_multisig_code, &mut r.pauser_code);
+        assert_eq!(failures(&evm_rules(&r, Flavor::Evm, &policy())), 0);
+    }
+
+    /// GS400: a Safe that is its own fallback handler exposes its internal methods.
+    #[test]
+    fn a_safe_that_is_its_own_fallback_handler_fails() {
+        let mut r = compliant_reads();
+        r.admin_multisig_safe.fallback_handler_slot = Ok(word(&ADMIN_SAFE));
+        let rules = only_fails(&r, Flavor::Evm, ADMIN_MS);
+        assert!(rules[ADMIN_MS].observed.contains("GS400"), "{rules:#?}");
+        let mut r = compliant_reads();
+        r.pauser_safe.fallback_handler_slot = Ok(word(&SAFE));
+        only_fails(&r, Flavor::Evm, PAUSER_MS);
+        let mut r = compliant_reads();
+        r.pauser_safe.fallback_handler_slot = Err("refused".into());
+        only_fails(&r, Flavor::Evm, PAUSER_MS);
+        // No handler at all is fine.
+        let mut r = compliant_reads();
+        r.admin_multisig_safe.fallback_handler_slot = Ok(vec![0; 32]);
+        assert_eq!(failures(&evm_rules(&r, Flavor::Evm, &policy())), 0);
     }
 
     #[test]
@@ -1787,7 +1975,14 @@ mod tests {
             check(&|s| s.modules = Ok(uint(0)));
         }
         // Each canonical singleton passes.
-        for singleton in [SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2] {
+        for singleton in [
+            SAFE_130,
+            SAFE_130_EIP155,
+            SAFE_130_L2,
+            SAFE_130_L2_EIP155,
+            SAFE_141,
+            SAFE_141_L2,
+        ] {
             let mut r = compliant_reads();
             r.admin_multisig_safe = safe(singleton, 2, 2, 0);
             r.pauser_safe = safe(singleton, 2, 3, 0);
