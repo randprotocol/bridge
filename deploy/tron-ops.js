@@ -16,7 +16,8 @@
 //   OPS_PRIVATE_KEY=... node deploy/tron-ops.js transfer-admin <timelock> [--bridge T...] [--yes]
 //                       node deploy/tron-ops.js timelock-schedule-accept <timelock> --from <adminMultisig>
 //                       node deploy/tron-ops.js timelock-execute-accept <timelock> --from <adminMultisig>
-//       (both also take [--bridge T...] [--salt 0x<32 bytes>] [--permission-id 2] [--expire-hours 23])
+//       (both also take [--bridge T...] [--salt 0x<32 bytes>] [--permission-id 2] [--expire-hours 23];
+//        execute refuses unless the operation is pending, and prints whether it is ready and from when)
 //
 // The first three are signed by OPS_PRIVATE_KEY (the current bridge admin for set-pauser and
 // transfer-admin): each prints the transaction it built and signs and broadcasts it only when
@@ -160,6 +161,27 @@ async function bridgeRoles(tronWeb, bridge) {
   return { admin: wordAddress(tronWeb, admin), pendingAdmin: wordAddress(tronWeb, pending), pauser: wordAddress(tronWeb, pauser) };
 }
 
+/// The acceptAdmin operation's id (the timelock's own hashOperation), which must be pending
+/// (scheduled, not yet executed or cancelled); whether it is ready, and when it becomes so.
+async function checkExecutable(tronWeb, o) {
+  const [idWord] = await view(tronWeb, o.timelock, 'hashOperation(address,uint256,bytes,bytes32,bytes32)', [
+    { type: 'address', value: o.bridge },
+    { type: 'uint256', value: 0 },
+    { type: 'bytes', value: ACCEPT_ADMIN },
+    { type: 'bytes32', value: ZERO32 },
+    { type: 'bytes32', value: o.salt },
+  ]);
+  const id = '0x' + idWord;
+  const arg = [{ type: 'bytes32', value: id }];
+  const [pending] = await view(tronWeb, o.timelock, 'isOperationPending(bytes32)', arg);
+  if (wordUint(pending) !== 1n) {
+    throw new Error(`operation ${id} is not pending on ${o.timelock} (never scheduled with this salt, cancelled, or done)`);
+  }
+  const [ready] = await view(tronWeb, o.timelock, 'isOperationReady(bytes32)', arg);
+  const [ts] = await view(tronWeb, o.timelock, 'getTimestamp(bytes32)', arg);
+  return { id, ready: wordUint(ready) === 1n, timestamp: wordUint(ts) };
+}
+
 function same(tronWeb, a, b) {
   return tronWeb.address.toHex(a) === tronWeb.address.toHex(b);
 }
@@ -248,6 +270,12 @@ async function governance(tronWeb, command, argv, key) {
       [{ type: 'bytes32', value: '0x' + roleWord }, { type: 'address', value: from }]);
     if (wordUint(has) !== 1n) throw new Error(`${from} does not hold ${role} on the timelock`);
 
+    if (which === 'execute') {
+      const op = await checkExecutable(tronWeb, { timelock, bridge, salt });
+      const when = new Date(Number(op.timestamp) * 1000).toISOString();
+      console.log(`operation ${op.id}: pending, ${op.ready ? 'READY to execute' : 'NOT ready yet'} ` +
+        `(executable from ${when}, timestamp ${op.timestamp})`);
+    }
     let tx = await buildTimelockAcceptTx(tronWeb, which, { timelock, bridge, salt, delay: delay.toString(), from, permissionId });
     tx = await tronWeb.transactionBuilder.extendExpiration(tx, Math.floor(expireHours * 3600) - 60, { txLocal: true });
     const summary = which === 'schedule'
@@ -319,4 +347,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e.message || e); process.exit(1); });
 }
 
-module.exports = { timelockConstructorParams, buildTimelockDeployTx, buildTimelockAcceptTx, parseFlags, TRON_ZERO_HEX, ACCEPT_ADMIN };
+module.exports = { timelockConstructorParams, buildTimelockDeployTx, buildTimelockAcceptTx, checkExecutable, parseFlags, TRON_ZERO_HEX, ACCEPT_ADMIN };

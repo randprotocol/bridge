@@ -5,6 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {IRandBridge} from "../src/interfaces/IRandBridge.sol";
+import {GovernancePins} from "./GovernancePins.sol";
 
 interface IBridgeRoles {
     function admin() external view returns (address);
@@ -26,9 +27,11 @@ interface IBridgeRoles {
 /// ADMIN_MULTISIG=0x... [MIN_DELAY=172800] forge script script/Governance.s.sol:Governance \
 ///     --sig "deployTimelock()" --rpc-url $RPC --account deployer [--broadcast]
 ///
-/// # 2+3. setPauser + transferAdmin, from the CURRENT bridge admin
-/// BRIDGE=0x... TIMELOCK=0x... PAUSE_MULTISIG=0x... forge script script/Governance.s.sol:Governance \
-///     --sig "handover()" --rpc-url $RPC --account bridge-admin [--broadcast]
+/// # 2+3. setPauser + transferAdmin, from the CURRENT bridge admin. `--sender` MUST be that
+/// #      admin: the checks (and the broadcast) are made for msg.sender, which is --sender.
+/// BRIDGE=0x... TIMELOCK=0x... ADMIN_MULTISIG=0x... PAUSE_MULTISIG=0x... \
+///     forge script script/Governance.s.sol:Governance --sig "handover()" --rpc-url $RPC \
+///     --sender <current admin> --account bridge-admin [--broadcast]
 ///
 /// # 4+5. the Safe batches for the admin multisig (no transaction is sent)
 /// BRIDGE=0x... TIMELOCK=0x... CHAIN_ID=1 [SALT=0x...] forge script script/Governance.s.sol:Governance \
@@ -63,14 +66,23 @@ contract Governance is Script {
         require(adminMultisig != address(0), "ADMIN_MULTISIG unset");
         require(minDelay >= MIN_ALLOWED_DELAY, "MIN_DELAY < 86400");
 
+        bytes32 codeHash = keccak256(type(TimelockController).runtimeCode);
+        require(
+            codeHash == GovernancePins.TIMELOCK_RUNTIME_CODEHASH,
+            "compiled TimelockController != pinned OZ v5.0.2 (wrong lib checkout or profile?)"
+        );
+
         address[] memory holders = new address[](1);
         holders[0] = adminMultisig;
 
         vm.startBroadcast();
         tl = new TimelockController(minDelay, holders, holders, address(0));
         vm.stopBroadcast();
+        require(address(tl).codehash == codeHash, "deployed code != pinned code");
 
         console2.log("TimelockController", address(tl));
+        console2.log("  runtime code hash");
+        console2.logBytes32(codeHash);
         console2.log("  minDelay (s)     ", minDelay);
         console2.log("  proposer/executor/canceller", adminMultisig);
     }
@@ -79,17 +91,49 @@ contract Governance is Script {
     // 2 + 3. handover
     // ------------------------------------------------------------------
 
-    /// Broadcast by the current bridge admin: forge runs the entry point with
-    /// `msg.sender` = the `--sender` / the single wallet given.
+    /// Broadcast by the current bridge admin, which must be passed as `--sender <current admin>`:
+    /// forge runs the entry point with `msg.sender` = `--sender`. It refuses a timelock that is
+    /// not the pinned OZ code, has a delay under 24 h, lets anyone execute, is administered or
+    /// proposed to by the sender, or is not proposed to and executed by ADMIN_MULTISIG (a
+    /// contract); and a pauser that is not a contract or is the sender, the timelock or
+    /// ADMIN_MULTISIG.
     function handover() external {
-        handoverFrom(msg.sender, vm.envAddress("BRIDGE"), vm.envAddress("TIMELOCK"), vm.envAddress("PAUSE_MULTISIG"));
+        handoverFrom(
+            msg.sender,
+            vm.envAddress("BRIDGE"),
+            vm.envAddress("TIMELOCK"),
+            vm.envAddress("ADMIN_MULTISIG"),
+            vm.envAddress("PAUSE_MULTISIG")
+        );
     }
 
-    function handoverFrom(address sender, address bridge, address timelock, address pauseMultisig) public {
+    /// Every check that the handover leaves no single key in control, then the two calls.
+    function handoverFrom(address sender, address bridge, address timelock, address adminMultisig, address pauseMultisig)
+        public
+    {
+        // The timelock: the pinned OZ code, a real delay, driven by the admin multisig only.
         require(timelock.code.length != 0, "TIMELOCK has no code");
-        require(TimelockController(payable(timelock)).getMinDelay() >= MIN_ALLOWED_DELAY, "TIMELOCK delay < 86400");
+        require(
+            timelock.codehash == GovernancePins.TIMELOCK_RUNTIME_CODEHASH,
+            "TIMELOCK code hash != pinned OZ v5.0.2 TimelockController"
+        );
+        TimelockController tl = TimelockController(payable(timelock));
+        require(tl.getMinDelay() >= MIN_ALLOWED_DELAY, "TIMELOCK delay < 86400");
+        require(adminMultisig != address(0), "ADMIN_MULTISIG unset");
+        require(adminMultisig.code.length != 0, "ADMIN_MULTISIG has no code");
+        require(tl.hasRole(tl.PROPOSER_ROLE(), adminMultisig), "ADMIN_MULTISIG is not TIMELOCK proposer");
+        require(tl.hasRole(tl.EXECUTOR_ROLE(), adminMultisig), "ADMIN_MULTISIG is not TIMELOCK executor");
+        require(!tl.hasRole(tl.EXECUTOR_ROLE(), address(0)), "TIMELOCK lets anyone execute");
+        require(!tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), sender), "sender is TIMELOCK admin");
+        require(!tl.hasRole(tl.PROPOSER_ROLE(), sender), "sender is TIMELOCK proposer");
+
+        // The pauser: a second multisig, neither the old key nor the admin multisig.
         require(pauseMultisig != address(0), "PAUSE_MULTISIG unset");
         require(pauseMultisig != timelock, "PAUSE_MULTISIG == TIMELOCK");
+        require(pauseMultisig != sender, "PAUSE_MULTISIG == sender");
+        require(pauseMultisig != adminMultisig, "PAUSE_MULTISIG == ADMIN_MULTISIG");
+        require(pauseMultisig.code.length != 0, "PAUSE_MULTISIG has no code");
+
         require(IBridgeRoles(bridge).admin() == sender, "broadcaster is not the bridge admin");
 
         vm.startBroadcast(sender);

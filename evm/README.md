@@ -21,6 +21,11 @@ git -C lib/openzeppelin-contracts rev-parse HEAD   # must print dbb6104c...
 ```
 
 `foundry.toml` remaps `@openzeppelin/contracts/` to `lib/openzeppelin-contracts/contracts/`.
+Remappings are explicit (`auto_detect_remappings = false`): they are part of the metadata, hence
+of the `TimelockController` runtime code hash pinned in `script/GovernancePins.sol`
+(`0x0d2bd8c8…0bac3`, default profile only). `test_timelock_runtime_code_is_pinned` fails and
+`deployTimelock()` refuses if the local checkout or build settings produce anything else. Run the
+governance tests, fork variant included, in the default profile, not `FOUNDRY_PROFILE=fork`.
 
 (or simply re-run `forge build` / `forge test`, which will report a missing
 remapping if `lib/forge-std` is absent).

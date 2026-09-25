@@ -6,7 +6,15 @@ solc = "0.8.20"
 evm_version = "paris"
 optimizer = true
 optimizer_runs = 200
-remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+# Explicit and complete: the remappings are part of every contract's metadata, hence of its
+# runtime code hash, and GovernancePins pins the TimelockController's. Auto-detection would
+# let any new directory under lib/ change that hash.
+auto_detect_remappings = false
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+]
 # `script/Governance.s.sol` writes Safe Transaction Builder batches to
 # ../deploy/governance; the tests write theirs under ./cache (git-ignored).
 fs_permissions = [

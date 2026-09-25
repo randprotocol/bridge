@@ -8,6 +8,7 @@ import {IRandBridge} from "../src/interfaces/IRandBridge.sol";
 import {RandBridgeBase} from "../src/RandBridgeBase.sol";
 import {EthereumRandBridge} from "../src/EthereumRandBridge.sol";
 import {Governance} from "../script/Governance.s.sol";
+import {GovernancePins} from "../script/GovernancePins.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// BR-3: the admin role of an EVM endpoint handed to an OpenZeppelin
@@ -19,7 +20,11 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 /// The fork variant runs the same handover against the live Ethereum and BSC
 /// bridges, pranking (broadcasting as) the current admin EOA:
 ///
-///   FOUNDRY_PROFILE=fork ETH_FORK_URL=... BSC_FORK_URL=... forge test --match-contract Governance
+///   ETH_FORK_URL=... BSC_FORK_URL=... forge test --match-contract Governance
+///
+/// in the DEFAULT profile (paris), not `fork`: the timelock's runtime code hash is pinned
+/// (`GovernancePins`) for the paris build, and a cancun build of it is refused by design. The
+/// live bridge is paris code, so the default profile executes it as deployed.
 contract GovernanceTest is Test {
     uint256 constant DELAY = 172_800;
     bytes32 constant SALT = keccak256("br3-accept-admin");
@@ -39,6 +44,32 @@ contract GovernanceTest is Test {
         guardians[0] = vm.addr(1);
         bridge = new EthereumRandBridge(eoa, eoa, keccak256("rand-emitter-test"), guardians);
         token = new MockERC20("USD Tether", "USDT", 6);
+        _giveMultisigsCode();
+    }
+
+    /// The handover requires both multisigs to be contracts (Safes on mainnet); a STOP is enough
+    /// here, the timelock and the bridge only look at msg.sender.
+    function _giveMultisigsCode() internal {
+        vm.etch(adminMs, hex"00");
+        vm.etch(pauseMs, hex"00");
+    }
+
+    function _timelock(address[] memory proposers, address[] memory executors, address tlAdmin)
+        internal
+        returns (TimelockController)
+    {
+        return new TimelockController(DELAY, proposers, executors, tlAdmin);
+    }
+
+    function _one(address a) internal pure returns (address[] memory r) {
+        r = new address[](1);
+        r[0] = a;
+    }
+
+    function _two(address a, address b) internal pure returns (address[] memory r) {
+        r = new address[](2);
+        r[0] = a;
+        r[1] = b;
     }
 
     // ------------------------------------------------------------------
@@ -48,7 +79,7 @@ contract GovernanceTest is Test {
     /// Steps 1-3: deploy the timelock, then setPauser + transferAdmin from the EOA.
     function _deployAndHandOver(RandBridgeBase b, address from) internal returns (TimelockController tl) {
         tl = gov.deployTimelock(adminMs, DELAY);
-        gov.handoverFrom(from, address(b), address(tl), pauseMs);
+        gov.handoverFrom(from, address(b), address(tl), adminMs, pauseMs);
     }
 
     function _schedule(TimelockController tl, address target, bytes memory data, bytes32 salt) internal {
@@ -309,12 +340,27 @@ contract GovernanceTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // the OZ pin
+    // ------------------------------------------------------------------
+
+    /// The TimelockController this project compiles (default profile: solc 0.8.20, optimizer
+    /// 200, paris) is exactly OZ v5.0.2's; a different local checkout fails here.
+    function test_timelock_runtime_code_is_pinned() public {
+        assertEq(keccak256(type(TimelockController).runtimeCode), GovernancePins.TIMELOCK_RUNTIME_CODEHASH);
+    }
+
+    function test_deployTimelock_deploys_the_pinned_code() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        assertEq(address(tl).codehash, GovernancePins.TIMELOCK_RUNTIME_CODEHASH);
+    }
+
+    // ------------------------------------------------------------------
     // handover preconditions
     // ------------------------------------------------------------------
 
     function test_handover_refuses_a_timelock_without_code() public {
         vm.expectRevert(bytes("TIMELOCK has no code"));
-        gov.handoverFrom(eoa, address(bridge), makeAddr("not-deployed"), pauseMs);
+        gov.handoverFrom(eoa, address(bridge), makeAddr("not-deployed"), adminMs, pauseMs);
     }
 
     function test_handover_refuses_a_short_timelock() public {
@@ -322,21 +368,85 @@ contract GovernanceTest is Test {
         ms[0] = adminMs;
         TimelockController short = new TimelockController(3600, ms, ms, address(0));
         vm.expectRevert(bytes("TIMELOCK delay < 86400"));
-        gov.handoverFrom(eoa, address(bridge), address(short), pauseMs);
+        gov.handoverFrom(eoa, address(bridge), address(short), adminMs, pauseMs);
     }
 
     function test_handover_refuses_a_bad_pause_multisig() public {
         TimelockController tl = gov.deployTimelock(adminMs, DELAY);
         vm.expectRevert(bytes("PAUSE_MULTISIG unset"));
-        gov.handoverFrom(eoa, address(bridge), address(tl), address(0));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, address(0));
         vm.expectRevert(bytes("PAUSE_MULTISIG == TIMELOCK"));
-        gov.handoverFrom(eoa, address(bridge), address(tl), address(tl));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, address(tl));
+    }
+
+    function test_handover_refuses_a_timelock_that_is_not_the_pinned_oz_code() public {
+        address fake = makeAddr("fake-timelock");
+        vm.etch(fake, address(bridge).code);
+        vm.expectRevert(bytes("TIMELOCK code hash != pinned OZ v5.0.2 TimelockController"));
+        gov.handoverFrom(eoa, address(bridge), fake, adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_open_execution() public {
+        TimelockController tl = _timelock(_one(adminMs), _two(adminMs, address(0)), address(0));
+        vm.expectRevert(bytes("TIMELOCK lets anyone execute"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_timelock_the_sender_administers() public {
+        TimelockController tl = _timelock(_one(adminMs), _one(adminMs), eoa);
+        vm.expectRevert(bytes("sender is TIMELOCK admin"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_timelock_the_sender_proposes_to() public {
+        TimelockController tl = _timelock(_two(adminMs, eoa), _one(adminMs), address(0));
+        vm.expectRevert(bytes("sender is TIMELOCK proposer"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_when_the_admin_multisig_cannot_propose() public {
+        TimelockController tl = _timelock(_one(stranger), _one(adminMs), address(0));
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not TIMELOCK proposer"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_when_the_admin_multisig_cannot_execute() public {
+        TimelockController tl = _timelock(_one(adminMs), _one(stranger), address(0));
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not TIMELOCK executor"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_an_admin_multisig_without_code() public {
+        address keyOnly = makeAddr("admin-key");
+        TimelockController tl = gov.deployTimelock(keyOnly, DELAY);
+        vm.expectRevert(bytes("ADMIN_MULTISIG has no code"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), keyOnly, pauseMs);
+        vm.expectRevert(bytes("ADMIN_MULTISIG unset"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), address(0), pauseMs);
+    }
+
+    function test_handover_refuses_the_sender_as_pauser() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.expectRevert(bytes("PAUSE_MULTISIG == sender"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, eoa);
+    }
+
+    function test_handover_refuses_the_admin_multisig_as_pauser() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.expectRevert(bytes("PAUSE_MULTISIG == ADMIN_MULTISIG"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, adminMs);
+    }
+
+    function test_handover_refuses_a_pauser_without_code() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.expectRevert(bytes("PAUSE_MULTISIG has no code"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, makeAddr("pause-key"));
     }
 
     function test_handover_refuses_a_broadcaster_that_is_not_admin() public {
         TimelockController tl = gov.deployTimelock(adminMs, DELAY);
         vm.expectRevert(bytes("broadcaster is not the bridge admin"));
-        gov.handoverFrom(stranger, address(bridge), address(tl), pauseMs);
+        gov.handoverFrom(stranger, address(bridge), address(tl), adminMs, pauseMs);
     }
 
     // ------------------------------------------------------------------
@@ -421,6 +531,7 @@ contract GovernanceTest is Test {
         vm.createSelectFork(url);
         assertEq(block.chainid, chainId, "forked the intended chain");
         gov = new Governance(); // contracts from before the fork do not exist on it
+        _giveMultisigsCode();
         RandBridgeBase live = RandBridgeBase(LIVE_BRIDGE);
         assertEq(live.admin(), LIVE_ADMIN, "live admin is the EOA");
         assertEq(live.pendingAdmin(), address(0), "no live transfer outstanding");
