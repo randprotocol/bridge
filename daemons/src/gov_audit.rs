@@ -544,7 +544,7 @@ pub fn solana_rules(reads: &SolanaReads, policy: &GovernanceConfig) -> Vec<Rule>
         (Some(a), Some(v)) if a == v => rule(
             "upgrade authority is the vault",
             true,
-            format!("{}", b58(&a)),
+            b58(&a),
         ),
         (Some(a), _) => rule(
             "upgrade authority is the vault",
