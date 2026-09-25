@@ -24,6 +24,9 @@ pub struct Config {
     pub solana: Option<SolanaConfig>,
     pub guardian: Option<GuardianConfig>,
     pub relayer: Option<RelayerConfig>,
+    /// The policy `rand-bridge-audit --governance` holds the endpoints to
+    /// (BR-3). Optional: absent, the defaults below apply.
+    pub governance: Option<GovernanceConfig>,
 }
 
 fn default_poll_secs() -> u64 {
@@ -177,7 +180,49 @@ fn default_tron_fee_limit() -> u64 {
     150_000_000
 }
 
+/// What `rand-bridge-audit --governance` requires of every endpoint's admin.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GovernanceConfig {
+    /// Least timelock delay the admin must impose, in seconds (48 h).
+    #[serde(default = "default_min_delay_secs")]
+    pub min_delay_secs: u64,
+    /// Least number of signers a multisig must require.
+    #[serde(default = "default_min_threshold")]
+    pub min_threshold: u32,
+    /// The Squads v4 multisig whose vault must be the Solana admin and
+    /// upgrade authority, base58. Unset, the Solana rules fail.
+    pub solana_multisig: Option<String>,
+    /// Which of that multisig's vaults.
+    #[serde(default)]
+    pub solana_vault_index: u8,
+}
+
+fn default_min_delay_secs() -> u64 {
+    172_800
+}
+
+fn default_min_threshold() -> u32 {
+    2
+}
+
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        GovernanceConfig {
+            min_delay_secs: default_min_delay_secs(),
+            min_threshold: default_min_threshold(),
+            solana_multisig: None,
+            solana_vault_index: 0,
+        }
+    }
+}
+
 impl Config {
+    /// The `[governance]` section, or its defaults when there is none.
+    pub fn governance_policy(&self) -> GovernanceConfig {
+        self.governance.clone().unwrap_or_default()
+    }
+
     pub fn load(path: &Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -210,6 +255,14 @@ impl Config {
         }
         if let Some(s) = &self.solana {
             pubkey32(&s.program).context("solana.program")?;
+        }
+        if let Some(g) = &self.governance {
+            if g.min_threshold == 0 {
+                bail!("governance.min_threshold must be at least 1");
+            }
+            if let Some(ms) = &g.solana_multisig {
+                pubkey32(ms).context("governance.solana_multisig")?;
+            }
         }
         Ok(())
     }

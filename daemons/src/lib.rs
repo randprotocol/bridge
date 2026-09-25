@@ -11,6 +11,7 @@
 pub mod api;
 pub mod config;
 pub mod crypto;
+pub mod gov_audit;
 pub mod governance;
 pub mod guardian;
 pub mod message;
