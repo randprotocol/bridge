@@ -65,8 +65,13 @@ remove this problem.
   projects. The laptop's `rand_guardian_ed25519` key reaches every droplet as root. So the laptop
   plus that key, or the DO account alone, still reaches six keys, which is a quorum. The next steps
   are, in order:
-  1. put a passphrase on the SSH key, or remove it from the droplets and keep DO console access
-     behind 2FA;
+  1. lock the SSH key down **before mainnet beta** (deferred by the owner on 2026-09-25). This is
+     half prepared. Each droplet already has a `tunnel` user whose `authorized_keys` entry
+     (`restrict,port-forwarding,permitopen="127.0.0.1:7071"`) admits only
+     `~/.ssh/rand_guardian_tunnel_ed25519`, which nothing uses yet. To finish:
+     - point `guardian-tunnels.sh` at `tunnel@` with that key, and check the relayer reaches all eight;
+     - the owner puts a passphrase on the root key (`ssh-keygen -p -f ~/.ssh/rand_guardian_ed25519`);
+     - maintenance then goes through `ssh-add`.
   2. move droplets to a second provider;
   3. hand droplets to separate operators, who re-key by rotation.
 - **Dilithium2.** The laptop still holds all six chain-14 PQ seeds (`NEW_GUARDIAN<i>_PQ_SEED`), and

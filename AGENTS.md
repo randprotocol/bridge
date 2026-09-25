@@ -21,7 +21,7 @@ read it before touching anything there, it is worked on by many sessions in para
 - **publicnode log windows:** BSC is about 1 h, Ethereum about 1 day. The set-0 guardians and the
   relayer were stuck on Ethereum/BSC from about 09-21 to 09-25 (403s). Nothing was missed, because
   `sequence()` stayed at 2. Moving a cursor forward is safe only after that check.
-- BR-4 is still open: one DO account, one laptop SSH key reaches every droplet, and the laptop holds
+- BR-4 is still open: one DO account, one laptop SSH key reaches every droplet (lock-down deferred by the user to before mainnet beta, `tunnel` user already prepared, see `docs/guardian-hosts.md`), and the laptop holds
   all six chain-14 PQ seeds. BR-3 (multisig signers) is on hold until the user decides who holds the Ledgers.
 
 ## State as of 2026-09-20 — LIVE: whitelisted, first mainnet round trip passed
