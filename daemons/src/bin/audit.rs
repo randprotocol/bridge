@@ -13,19 +13,21 @@
 //! difference, which is reported rather than hidden. Exits non-zero when an
 //! endpoint is insolvent.
 //!
-//! `--governance` instead checks that no single key controls any endpoint
-//! (BR-3): the admin the pinned OZ timelock, its roles held only by the
-//! configured admin multisig (read from its role logs), the pauser a separate
-//! multisig, the Solana admin and upgrade authority an autonomous Squads
-//! vault. Read-only; exits non-zero when any rule is FAIL or UNKNOWN. The
-//! rules live in `bridge_daemons::gov_audit`.
+//! `--governance` instead checks that no single key can change an endpoint's
+//! configuration or code (BR-3): the admin the pinned OZ timelock, its roles
+//! held only by the configured admin multisig (read from its role logs), that
+//! multisig and the pauser module-free canonical Safes (or Tron
+//! multi-signature accounts), the Solana admin and upgrade authority an
+//! autonomous Squads vault. It does not cover custody, which the guardian
+//! quorum authorises (BR-4). Read-only; exits non-zero when any rule is FAIL
+//! or UNKNOWN. The rules live in `bridge_daemons::gov_audit`.
 
 use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use bridge_daemons::config::{address20, pubkey32, Config, EvmConfig, EvmKind, GovernanceConfig};
-use bridge_daemons::gov_audit::{self, EvmReads, Flavor, Rule, SolanaReads, Status};
+use bridge_daemons::gov_audit::{self, EvmReads, Flavor, Rule, SafeReads, SolanaReads, Status};
 use bridge_daemons::rpc::{hex_data, quantity, JsonRpc};
 use bridge_daemons::sources::solana::find_program_address;
 use bridge_daemons::submit::selector;
@@ -289,6 +291,35 @@ fn word_to_address(w: &[u8]) -> Option<[u8; 20]> {
     (w.len() == 32).then(|| w[12..].try_into().expect("20"))
 }
 
+/// What makes a contract a Safe for the audit: its storage slot 0 (the proxy's
+/// singleton), `getThreshold()`, `getOwners()` and the first page of
+/// `getModulesPaginated(SENTINEL, 10)`. Every failure is data for the rule.
+async fn safe_reads(rpc: &JsonRpc, safe: &[u8; 20]) -> SafeReads {
+    let singleton_slot = rpc
+        .call(
+            "eth_getStorageAt",
+            json!([format!("0x{}", hex::encode(safe)), "0x0", "latest"]),
+        )
+        .await
+        .and_then(|v| hex_data(&v))
+        .map_err(|e| format!("{e:#}"));
+    let mut modules_call = call_with_address(
+        "getModulesPaginated(address,uint256)",
+        &gov_audit::SAFE_MODULES_SENTINEL,
+    );
+    let mut ten = [0u8; 32];
+    ten[31] = 10;
+    modules_call.extend_from_slice(&ten);
+    SafeReads {
+        singleton_slot,
+        threshold: try_call(rpc, safe, "getThreshold()").await,
+        owners: try_call(rpc, safe, "getOwners()").await,
+        modules: eth_call(rpc, safe, modules_call)
+            .await
+            .map_err(|e| format!("{e:#}")),
+    }
+}
+
 /// Tron `wallet/getaccount`: how many signatures the account needs, or
 /// `None` when the API is not served (or the account does not exist).
 async fn tron_signers(api: &str, address: &[u8; 20]) -> Option<u32> {
@@ -365,7 +396,7 @@ async fn role_history(
             .ok_or_else(|| unknown(format!("eth_getLogs [{lo}, {hi}]: not an array")))?;
         logs.extend(batch.iter().cloned());
     }
-    gov_audit::role_events_from_logs(&logs)
+    gov_audit::role_events_from_logs(&logs, timelock)
         .map_err(|e| (Status::Unknown, format!("role logs: {e:#}")))
 }
 
@@ -444,19 +475,22 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
     };
 
     let admin_multisig = policy.admin_multisig20(endpoint.chain)?;
-    let (mut admin_multisig_code, mut admin_multisig_threshold, mut tron_admin_multisig_signers) =
-        (Vec::new(), Ok(Vec::new()), None);
+    let (mut admin_multisig_code, mut admin_multisig_safe, mut tron_admin_multisig_signers) = (
+        Vec::new(),
+        SafeReads::not_asked("no admin multisig configured"),
+        None,
+    );
     if let Some(ms) = &admin_multisig {
         admin_multisig_code = eth_get_code(&rpc, ms)
             .await
             .context("eth_getCode(admin multisig)")?;
         match flavor {
             Flavor::Evm if !admin_multisig_code.is_empty() => {
-                admin_multisig_threshold = try_call(&rpc, ms, "getThreshold()").await;
+                admin_multisig_safe = safe_reads(&rpc, ms).await;
             }
-            Flavor::Evm => {}
+            Flavor::Evm => admin_multisig_safe = SafeReads::not_asked("no code"),
             Flavor::Tron => {
-                admin_multisig_threshold = Err("not asked on Tron".into());
+                admin_multisig_safe = SafeReads::not_asked("not asked on Tron");
                 if admin_multisig_code.is_empty() {
                     tron_admin_multisig_signers = tron_signers(&endpoint.rpc, ms).await;
                 }
@@ -464,13 +498,11 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
         }
     }
 
-    let (pauser_threshold, tron_pauser_signers) = match flavor {
-        Flavor::Evm if !pauser_code.is_empty() => {
-            (try_call(&rpc, &pauser20, "getThreshold()").await, None)
-        }
-        Flavor::Evm => (Ok(Vec::new()), None),
+    let (pauser_safe, tron_pauser_signers) = match flavor {
+        Flavor::Evm if !pauser_code.is_empty() => (safe_reads(&rpc, &pauser20).await, None),
+        Flavor::Evm => (SafeReads::not_asked("no code"), None),
         Flavor::Tron => (
-            Err("not asked on Tron".into()),
+            SafeReads::not_asked("not asked on Tron"),
             if pauser_code.is_empty() {
                 tron_signers(&endpoint.rpc, &pauser20).await
             } else {
@@ -486,11 +518,11 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
         roles,
         admin_multisig,
         admin_multisig_code,
-        admin_multisig_threshold,
+        admin_multisig_safe,
         tron_admin_multisig_signers,
         pauser,
         pauser_code,
-        pauser_threshold,
+        pauser_safe,
         pending_admin,
         tron_pauser_signers,
     };
@@ -593,6 +625,10 @@ async fn solana_governance(
     Ok(gov_audit::solana_rules(&reads, policy))
 }
 
+/// Printed after every `--governance` run, pass or fail: the audit covers who
+/// can change the endpoints, not who can move custody.
+const GOVERNANCE_CAVEAT: &str = "caveat: custody is still authorised by the guardian quorum, whose keys are not yet distributed (BR-4)";
+
 fn render_governance(title: &str, rules: &[Rule]) -> String {
     let mut out = format!("== {title} ==\n");
     out.push_str(&format!(
@@ -664,13 +700,16 @@ async fn governance(config: &Config) -> Result<()> {
         failed += n;
         endpoints_failing += usize::from(n > 0);
     }
-    if failed > 0 {
-        return Err(anyhow!(
+    let verdict = if failed > 0 {
+        Err(anyhow!(
             "governance: {failed} rule(s) not passed on {endpoints_failing} endpoint(s)"
-        ));
-    }
-    println!("governance: every rule passed");
-    Ok(())
+        ))
+    } else {
+        println!("governance: every rule passed: no single key can change an endpoint's configuration or code");
+        Ok(())
+    };
+    println!("{GOVERNANCE_CAVEAT}");
+    verdict
 }
 
 #[tokio::main]

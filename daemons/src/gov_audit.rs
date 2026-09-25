@@ -4,16 +4,20 @@
 //! decision about PASS or FAIL is made here, from bytes, so it is tested
 //! without a network.
 //!
-//! The rules, per endpoint (a PASS on every row means no single key controls it):
+//! The rules, per endpoint (a PASS on every row means no single key can
+//! change the endpoint's configuration or code; custody itself is still
+//! released by the guardian quorum, whose keys are BR-4's concern):
 //! - EVM / Tron admin: has code; is not an EIP-1967 proxy; its code hashes to
-//!   the pinned OZ v5.0.2 `TimelockController` (EVM only: Tron's tronbox build
-//!   differs, the row says EXEMPT); `getMinDelay() >= min_delay_secs`; from its
-//!   `RoleGranted` / `RoleRevoked` logs, PROPOSER, EXECUTOR and CANCELLER are
-//!   held by the configured admin multisig only, DEFAULT_ADMIN by the timelock
-//!   only; the admin multisig is a Safe with `getThreshold() >= min_threshold`
-//!   (EVM) or a Tron account needing that many signatures.
-//! - EVM / Tron pauser: `!= admin`; a Safe with `getThreshold() >=
-//!   min_threshold` (EVM) or a contract / multi-signature account (Tron).
+//!   the pinned OZ v5.0.2 `TimelockController` (the forge build on EVM, the
+//!   tronbox build on Tron); `getMinDelay() >= min_delay_secs`; its
+//!   `RoleGranted` / `RoleRevoked` logs start with the constructor's
+//!   self-grant of DEFAULT_ADMIN, and from them PROPOSER, EXECUTOR and
+//!   CANCELLER are held by the configured admin multisig only, DEFAULT_ADMIN by
+//!   the timelock only; the admin multisig is a Safe (slot 0 a canonical
+//!   singleton, no module, `getThreshold() >= min_threshold`, at least that
+//!   many owners) on EVM, or a Tron account needing that many signatures.
+//! - EVM / Tron pauser: `!= admin`, `!=` the admin multisig; a Safe as above
+//!   (EVM) or a contract / multi-signature account (Tron).
 //!   `pendingAdmin()` is zero.
 //! - Solana: `Config::admin` is the configured Squads v4 vault; no
 //!   `pending_admin`; the multisig is autonomous (`config_authority` default),
@@ -263,7 +267,9 @@ pub fn keccak(data: &[u8]) -> [u8; 32] {
 /// `lib/openzeppelin-contracts/contracts/governance/TimelockController.sol`,
 /// remappings `@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/`,
 /// `forge-std/=lib/forge-std/src/`, `openzeppelin-contracts/=lib/openzeppelin-contracts/`
-/// (the last two auto-detected by forge 1.5.1 from `lib/`). The trailing
+/// (all three listed explicitly in `evm/foundry.toml`, with
+/// `auto_detect_remappings = false`, so a new directory under `lib/` cannot
+/// change them). The trailing
 /// CBOR metadata hashes the settings, remappings included: a build with other
 /// remappings or another profile (e.g. `fork`, cancun) gives another hash, and
 /// then the deployed timelock fails this rule. The contract has no immutables,
@@ -279,6 +285,131 @@ pub const TIMELOCK_RUNTIME_KECCAK: [u8; 32] = [
     0x0d, 0x2b, 0xd8, 0xc8, 0xc0, 0x35, 0x57, 0xdf, 0xa0, 0xcf, 0x0c, 0x98, 0xe0, 0x3a, 0x94, 0xe3,
     0x7f, 0x30, 0x96, 0xa2, 0x3c, 0xdb, 0xfd, 0xa0, 0x3a, 0xb5, 0x54, 0x1f, 0x4f, 0xd0, 0xba, 0xc3,
 ];
+
+/// `keccak256` of the runtime code of the same OZ v5.0.2 `TimelockController`
+/// as tronbox builds it for Tron: the vendored, unmodified copy under
+/// `tron/contracts/governance/openzeppelin/` compiled by `npm run compile` in
+/// `tron/` (tronbox 4.x, Tron's solc 0.8.20 fork, optimizer on, 200 runs,
+/// evmVersion paris, per `tron/tronbox.js`), i.e. `deployedBytecode` of
+/// `tron/build/contracts/TimelockController.json`. Tron's solc writes a
+/// `tron` (not `ipfs`) key into the CBOR metadata, hence a hash different from
+/// the EVM pin. The contract has no immutables, so a timelock deployed by
+/// `deploy/tron-ops.js deploy-timelock` has exactly this runtime code, which
+/// the Tron JSON-RPC `eth_getCode` returns (checked 2026-09-25: for the live
+/// bridge `TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU` it returns the same 12110 bytes
+/// as `wallet/getcontractinfo`'s `runtimecode`, and those match a fresh
+/// tronbox build of `TronRandBridge` byte for byte outside its immutables,
+/// metadata hash included).
+///
+/// Produced 2026-09-25 by `npm run compile` in `tron/` of branch
+/// feat/br3-governance, twice from a clean `build/` with the same result. The
+/// code is `tests/fixtures/oz-v5.0.2-TimelockController.tronbox.runtime.hex`;
+/// the ignored test `the_pinned_tron_timelock_hash_matches_the_tronbox_build`
+/// rechecks it against `tron/build`. `deploy/tron-ops.js` pins the same value.
+pub const TRON_TIMELOCK_RUNTIME_KECCAK: [u8; 32] = [
+    0xfc, 0xb7, 0xfa, 0x62, 0xda, 0xf4, 0x0b, 0x05, 0x60, 0x72, 0x9b, 0xeb, 0x39, 0xf3, 0xca, 0x1d,
+    0x92, 0x24, 0xed, 0x0b, 0xba, 0x6c, 0x07, 0x9b, 0x6f, 0xd2, 0xca, 0xb2, 0x5f, 0xc5, 0x5d, 0x5b,
+];
+
+/// The Safe singletons (mastercopies) a genuine Safe proxy points at, in its
+/// storage slot 0: the "canonical" deployment of v1.3.0 `GnosisSafe` and
+/// `GnosisSafeL2` and of v1.4.1 `Safe` and `SafeL2`, from
+/// github.com/safe-global/safe-deployments `src/assets/v1.3.0/gnosis_safe.json`,
+/// `gnosis_safe_l2.json`, `src/assets/v1.4.1/safe.json`, `safe_l2.json` (main
+/// at 7b1fb6d, read 2026-09-25; each lists its canonical address for chains 1
+/// and 56). `evm/script/Governance.s.sol` `isCanonicalSafeSingleton` pins the
+/// same four. Anything else answering `getThreshold()` is not trusted as a Safe.
+pub const CANONICAL_SAFE_SINGLETONS: [(&str, [u8; 20]); 4] = [
+    (
+        "v1.3.0",
+        [
+            0xd9, 0xdb, 0x27, 0x0c, 0x1b, 0x5e, 0x3b, 0xd1, 0x61, 0xe8, 0xc8, 0x50, 0x3c, 0x55,
+            0xce, 0xab, 0xee, 0x70, 0x95, 0x52,
+        ],
+    ),
+    (
+        "v1.3.0 L2",
+        [
+            0x3e, 0x5c, 0x63, 0x64, 0x4e, 0x68, 0x35, 0x49, 0x05, 0x5b, 0x9b, 0xe8, 0x65, 0x3d,
+            0xe2, 0x6e, 0x0b, 0x4c, 0xd3, 0x6e,
+        ],
+    ),
+    (
+        "v1.4.1",
+        [
+            0x41, 0x67, 0x5c, 0x09, 0x9f, 0x32, 0x34, 0x1b, 0xf8, 0x4b, 0xfc, 0x53, 0x82, 0xaf,
+            0x53, 0x4d, 0xf5, 0xc7, 0x46, 0x1a,
+        ],
+    ),
+    (
+        "v1.4.1 L2",
+        [
+            0x29, 0xfc, 0xb4, 0x3b, 0x46, 0x53, 0x1b, 0xca, 0x00, 0x3d, 0xdc, 0x8f, 0xcb, 0x67,
+            0xff, 0xe9, 0x19, 0x00, 0xc7, 0x62,
+        ],
+    ),
+];
+
+/// Safe's ModuleManager list sentinel: `getModulesPaginated(SENTINEL, n)` is
+/// the first page.
+pub const SAFE_MODULES_SENTINEL: [u8; 20] = {
+    let mut a = [0u8; 20];
+    a[19] = 1;
+    a
+};
+
+/// What the binary read from a would-be Safe (EVM): its storage slot 0 and three views.
+#[derive(Clone, Debug)]
+pub struct SafeReads {
+    pub singleton_slot: Result<Vec<u8>, String>,
+    pub threshold: Result<Vec<u8>, String>,
+    pub owners: Result<Vec<u8>, String>,
+    pub modules: Result<Vec<u8>, String>,
+}
+
+impl SafeReads {
+    /// Not asked: a Tron account, or an address without code.
+    pub fn not_asked(why: &str) -> Self {
+        SafeReads {
+            singleton_slot: Err(why.into()),
+            threshold: Err(why.into()),
+            owners: Err(why.into()),
+            modules: Err(why.into()),
+        }
+    }
+}
+
+/// The `address[]` a call returns as its first value, when the return has
+/// `head_words` head words (1 for `getOwners()`, 2 for
+/// `getModulesPaginated(address,uint256)`'s `(address[], address)`): exactly
+/// the encoding solc produces, the offset pointing right past the head and
+/// nothing after the items. `None` for anything else.
+fn decode_address_array_in(ret: &[u8], head_words: usize) -> Option<Vec<[u8; 20]>> {
+    let word = |i: usize| ret.get(i..i.checked_add(32)?);
+    let offset = usize::try_from(word_uint(word(0)?)?).ok()?;
+    if offset != 32 * head_words {
+        return None;
+    }
+    let len = usize::try_from(word_uint(word(offset)?)?).ok()?;
+    if len > ret.len() / 32 || ret.len() != offset + 32 * (len + 1) {
+        return None;
+    }
+    (0..len)
+        .map(|i| word(offset + 32 * (i + 1)).and_then(word_address))
+        .collect()
+}
+
+/// `getOwners()` return data -> the owners.
+pub fn decode_owners(ret: &[u8]) -> Option<Vec<[u8; 20]>> {
+    decode_address_array_in(ret, 1)
+}
+
+/// `getModulesPaginated(SENTINEL, n)` return data -> the page of modules.
+pub fn decode_modules_page(ret: &[u8]) -> Option<Vec<[u8; 20]>> {
+    let modules = decode_address_array_in(ret, 2)?;
+    word_address(ret.get(32..64)?)?; // `next` is an address
+    Some(modules)
+}
 
 /// EIP-1967 `bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)`.
 pub const EIP1967_IMPLEMENTATION_SLOT: &str =
@@ -348,10 +479,31 @@ fn hex_u64(v: &serde_json::Value) -> Result<u64> {
 /// `eth_getLogs` entries (topic0 RoleGranted or RoleRevoked) -> events in
 /// chain order (block, then log index). Anything else is an error: the
 /// caller asked only for these two topics.
-pub fn role_events_from_logs(logs: &[serde_json::Value]) -> Result<Vec<RoleEvent>> {
+///
+/// A log the node marks `removed: true` (reorged out) is skipped. A log whose
+/// `address` is not `timelock` is an error: the filter asked for the
+/// timelock's logs only, so an RPC that serves others is not trusted.
+pub fn role_events_from_logs(
+    logs: &[serde_json::Value],
+    timelock: &[u8; 20],
+) -> Result<Vec<RoleEvent>> {
     let (granted, revoked) = (role_granted_topic(), role_revoked_topic());
     let mut keyed = Vec::with_capacity(logs.len());
     for log in logs {
+        if log["removed"].as_bool() == Some(true) {
+            continue;
+        }
+        let from: Option<[u8; 20]> = log["address"]
+            .as_str()
+            .and_then(|a| hex::decode(a.trim_start_matches("0x")).ok())
+            .and_then(|b| b.try_into().ok());
+        if from != Some(*timelock) {
+            bail!(
+                "a role log from {} is not the timelock's (0x{}): {log}",
+                log["address"],
+                hex::encode(timelock)
+            );
+        }
         let topics = log["topics"]
             .as_array()
             .filter(|t| t.len() == 4)
@@ -398,14 +550,14 @@ pub struct EvmReads {
     /// `[governance].admin_multisig` for this chain.
     pub admin_multisig: Option<[u8; 20]>,
     pub admin_multisig_code: Vec<u8>,
-    /// `admin_multisig.getThreshold()` (EVM only).
-    pub admin_multisig_threshold: Result<Vec<u8>, String>,
+    /// The admin multisig's Safe reads (EVM only).
+    pub admin_multisig_safe: SafeReads,
     /// Tron: signatures the admin multisig account needs; `None` unknown.
     pub tron_admin_multisig_signers: Option<u32>,
     pub pauser: Vec<u8>,
     pub pauser_code: Vec<u8>,
-    /// `pauser.getThreshold()` (EVM only).
-    pub pauser_threshold: Result<Vec<u8>, String>,
+    /// The pauser's Safe reads (EVM only).
+    pub pauser_safe: SafeReads,
     pub pending_admin: Vec<u8>,
     /// Tron: signatures the pauser account needs (`wallet/getaccount`);
     /// `None` when the RPC does not serve it.
@@ -458,12 +610,15 @@ fn call_error(r: &Result<Vec<u8>, String>) -> String {
 }
 
 /// A Safe (EVM) or a native multi-signature account (Tron) that needs at
-/// least `policy.min_threshold` signatures.
+/// least `policy.min_threshold` signatures. On EVM a Safe is: code; slot 0 a
+/// canonical singleton (`CANONICAL_SAFE_SINGLETONS`); no enabled module (a
+/// module executes without any owner signature); `getThreshold() >=
+/// min_threshold`; `getOwners().length >= getThreshold()`.
 fn multisig_rule(
     name: String,
     who: &str,
     code: &[u8],
-    threshold: &Result<Vec<u8>, String>,
+    safe: &SafeReads,
     tron_signers: Option<u32>,
     flavor: Flavor,
     policy: &GovernanceConfig,
@@ -473,21 +628,86 @@ fn multisig_rule(
             if code.is_empty() {
                 return rule(name, false, format!("{who} has no code (a key)"));
             }
-            match threshold.as_ref().ok().and_then(|w| word_uint(w)) {
-                Some(t) => rule(
-                    name,
-                    t >= u128::from(policy.min_threshold),
-                    format!("{who} getThreshold() = {t}"),
-                ),
-                None => rule(
+            let singleton = match &safe.singleton_slot {
+                Ok(w) => match word_address(w)
+                    .and_then(|a| CANONICAL_SAFE_SINGLETONS.iter().find(|(_, s)| *s == a))
+                {
+                    Some((version, _)) => *version,
+                    None => {
+                        return rule(
+                            name,
+                            false,
+                            format!(
+                                "{who} is not a canonical Safe (slot 0 = 0x{})",
+                                hex::encode(w)
+                            ),
+                        )
+                    }
+                },
+                Err(e) => return rule(name, false, format!("{who} slot 0 unreadable: {e}")),
+            };
+            let Some(t) = safe.threshold.as_ref().ok().and_then(|w| word_uint(w)) else {
+                return rule(
                     name,
                     false,
                     format!(
                         "{who} is not a Safe (getThreshold(): {})",
-                        call_error(threshold)
+                        call_error(&safe.threshold)
                     ),
-                ),
+                );
+            };
+            let Some(owners) = safe.owners.as_ref().ok().and_then(|r| decode_owners(r))
+            else {
+                return rule(
+                    name,
+                    false,
+                    format!("{who} is not a Safe (getOwners(): {})", call_error(&safe.owners)),
+                );
+            };
+            let Some(modules) = safe
+                .modules
+                .as_ref()
+                .ok()
+                .and_then(|r| decode_modules_page(r))
+            else {
+                return rule(
+                    name,
+                    false,
+                    format!(
+                        "{who} is not a Safe (getModulesPaginated(0x1, 10): {})",
+                        call_error(&safe.modules)
+                    ),
+                );
+            };
+            if !modules.is_empty() {
+                let listed: Vec<String> = modules
+                    .iter()
+                    .map(|m| format!("0x{}", hex::encode(m)))
+                    .collect();
+                return rule(
+                    name,
+                    false,
+                    format!(
+                        "{who}: Safe has modules: a module acts without signatures ({})",
+                        listed.join(", ")
+                    ),
+                );
             }
+            if (owners.len() as u128) < t {
+                return rule(
+                    name,
+                    false,
+                    format!("{who} getThreshold() = {t} but only {} owner(s)", owners.len()),
+                );
+            }
+            rule(
+                name,
+                t >= u128::from(policy.min_threshold),
+                format!(
+                    "{who} Safe {singleton}, getThreshold() = {t} of {} owners, no modules",
+                    owners.len()
+                ),
+            )
         }
         Flavor::Tron => {
             if !code.is_empty() {
@@ -566,25 +786,22 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         }
     });
 
-    // 3. Its code is the pinned OZ v5.0.2 TimelockController.
+    // 3. Its code is the pinned OZ v5.0.2 TimelockController (the forge build
+    //    on EVM, the tronbox build on Tron).
     let name = "admin code is OZ v5.0.2 TimelockController";
-    rules.push(match flavor {
-        Flavor::Tron => Rule {
-            name: name.into(),
-            status: Status::Exempt,
-            observed:
-                "not checked on Tron: tronbox compiler settings differ from the pinned forge build"
-                    .into(),
-        },
-        Flavor::Evm if !admin_has_code => rule(name, false, no_code()),
-        Flavor::Evm => {
-            let hash = keccak(&reads.admin_code);
-            rule(
-                name,
-                hash == TIMELOCK_RUNTIME_KECCAK,
-                format!("keccak256(code) = 0x{}", hex::encode(hash)),
-            )
-        }
+    let pinned = match flavor {
+        Flavor::Evm => TIMELOCK_RUNTIME_KECCAK,
+        Flavor::Tron => TRON_TIMELOCK_RUNTIME_KECCAK,
+    };
+    rules.push(if !admin_has_code {
+        rule(name, false, no_code())
+    } else {
+        let hash = keccak(&reads.admin_code);
+        rule(
+            name,
+            hash == pinned,
+            format!("keccak256(code) = 0x{}", hex::encode(hash)),
+        )
     });
 
     // 4. With a long enough delay.
@@ -607,7 +824,45 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         },
     );
 
-    // 5-8. Who holds the timelock's roles.
+    // 5. The role history read is the timelock's whole history: OZ v5's
+    //    constructor first grants DEFAULT_ADMIN_ROLE to the timelock itself, so
+    //    that must be the earliest event. Otherwise the deploy block is after the
+    //    deployment (earlier grants unseen) or the timelock was not freshly
+    //    deployed.
+    let name = "role history starts at the timelock constructor";
+    rules.push(match (&reads.roles, admin) {
+        (Err((status, why)), _) => Rule {
+            name: name.into(),
+            status: *status,
+            observed: why.clone(),
+        },
+        (Ok(_), None) => rule(name, false, "admin(): unreadable"),
+        (Ok(events), Some(timelock)) => match events.first() {
+            Some(e) if e.granted && e.role == [0u8; 32] && e.account == timelock => rule(
+                name,
+                true,
+                format!("first event RoleGranted(DEFAULT_ADMIN_ROLE, {})", show(&timelock, flavor)),
+            ),
+            first => rule(
+                name,
+                false,
+                format!(
+                    "deploy block too late or timelock not freshly deployed (first role event: {})",
+                    match first {
+                        None => "none".to_string(),
+                        Some(e) => format!(
+                            "{} 0x{}.. {}",
+                            if e.granted { "RoleGranted" } else { "RoleRevoked" },
+                            hex::encode(&e.role[..4]),
+                            show(&e.account, flavor)
+                        ),
+                    }
+                ),
+            ),
+        },
+    });
+
+    // 6-9. Who holds the timelock's roles.
     let ms = reads.admin_multisig;
     for role in [
         "PROPOSER_ROLE",
@@ -653,7 +908,7 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         });
     }
 
-    // 9. The admin multisig is one.
+    // 10. The admin multisig is one.
     let name = format!(
         "admin multisig needs >= {} signatures",
         policy.min_threshold
@@ -668,14 +923,14 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
             name,
             &format!("admin multisig {}", show(&ms, flavor)),
             &reads.admin_multisig_code,
-            &reads.admin_multisig_threshold,
+            &reads.admin_multisig_safe,
             reads.tron_admin_multisig_signers,
             flavor,
             policy,
         ),
     });
 
-    // 10. The pauser is someone else.
+    // 11. The pauser is someone else.
     rules.push(match (admin, pauser) {
         (Some(a), Some(p)) if a != p => {
             rule("pauser != admin", true, format!("pauser {}", shown(pauser)))
@@ -688,7 +943,25 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         _ => rule("pauser != admin", false, "admin() or pauser(): unreadable"),
     });
 
-    // 11. The pauser is a multisig.
+    // 12. ... and not the admin multisig: one set of signers would both pause
+    //     and drive the timelock.
+    let name = "pauser != admin multisig";
+    rules.push(match (pauser, ms) {
+        (_, None) => rule(
+            name,
+            false,
+            "no [governance].admin_multisig configured for this chain",
+        ),
+        (None, _) => rule(name, false, "pauser(): unreadable"),
+        (Some(p), Some(m)) if p == m => rule(
+            name,
+            false,
+            format!("pauser == admin multisig == {}", show(&m, flavor)),
+        ),
+        (Some(p), Some(_)) => rule(name, true, format!("pauser {}", show(&p, flavor))),
+    });
+
+    // 13. The pauser is a multisig.
     rules.push(match flavor {
         Flavor::Evm => multisig_rule(
             format!(
@@ -697,7 +970,7 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
             ),
             &format!("pauser {}", shown(pauser)),
             &reads.pauser_code,
-            &reads.pauser_threshold,
+            &reads.pauser_safe,
             None,
             flavor,
             policy,
@@ -716,7 +989,7 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         }
     });
 
-    // 12. No admin transfer in flight.
+    // 14. No admin transfer in flight.
     rules.push(match word_address(&reads.pending_admin) {
         Some(p) if p == [0u8; 20] => rule("no pendingAdmin", true, "none"),
         Some(p) => rule(
@@ -1094,6 +1367,49 @@ mod tests {
         ]
     }
 
+    const SAFE_130: [u8; 20] = hex_literal("d9db270c1b5e3bd161e8c8503c55ceabee709552");
+    const SAFE_130_L2: [u8; 20] = hex_literal("3e5c63644e683549055b9be8653de26e0b4cd36e");
+    const SAFE_141: [u8; 20] = hex_literal("41675c099f32341bf84bfc5382af534df5c7461a");
+    const SAFE_141_L2: [u8; 20] = hex_literal("29fcb43b46531bca003ddc8fcb67ffe91900c762");
+    const SENTINEL: [u8; 20] = hex_literal("0000000000000000000000000000000000000001");
+
+    fn addr(i: u64) -> [u8; 20] {
+        let mut a = [0u8; 20];
+        a[12..].copy_from_slice(&i.to_be_bytes());
+        a
+    }
+
+    /// ABI `address[]` as the only return value (`getOwners()`).
+    fn abi_owners(n: u64) -> Vec<u8> {
+        let mut out = uint(0x20);
+        out.extend(uint(n));
+        for i in 0..n {
+            out.extend(word(&addr(0x5afe_0000 + i)));
+        }
+        out
+    }
+
+    /// ABI `(address[], address)` (`getModulesPaginated(SENTINEL, 10)`).
+    fn abi_modules(n: u64) -> Vec<u8> {
+        let mut out = uint(0x40);
+        out.extend(word(&SENTINEL));
+        out.extend(uint(n));
+        for i in 0..n {
+            out.extend(word(&addr(0x3d_0000 + i)));
+        }
+        out
+    }
+
+    /// Canned reads of a Safe proxy: slot 0 = `singleton`.
+    fn safe(singleton: [u8; 20], threshold: u64, owners: u64, modules: u64) -> SafeReads {
+        SafeReads {
+            singleton_slot: Ok(word(&singleton)),
+            threshold: Ok(uint(threshold)),
+            owners: Ok(abi_owners(owners)),
+            modules: Ok(abi_modules(modules)),
+        }
+    }
+
     /// The Ethereum / BSC bridge today: admin = pauser = one EOA; no
     /// [governance] tables configured.
     fn eoa_reads() -> EvmReads {
@@ -1109,11 +1425,11 @@ mod tests {
             )),
             admin_multisig: None,
             admin_multisig_code: vec![],
-            admin_multisig_threshold: Ok(vec![]),
+            admin_multisig_safe: SafeReads::not_asked("no admin multisig configured"),
             tron_admin_multisig_signers: None,
             pauser: word(&EOA),
             pauser_code: vec![],
-            pauser_threshold: Ok(vec![]),
+            pauser_safe: SafeReads::not_asked("no code"),
             pending_admin: word(&[0u8; 20]),
             tron_pauser_signers: None,
         }
@@ -1128,29 +1444,31 @@ mod tests {
             roles: Ok(constructor_events()),
             admin_multisig: Some(ADMIN_SAFE),
             admin_multisig_code: vec![0x60; 40],
-            admin_multisig_threshold: Ok(uint(3)),
+            admin_multisig_safe: safe(SAFE_130_L2, 3, 5, 0),
             tron_admin_multisig_signers: None,
             pauser: word(&SAFE),
             pauser_code: vec![0x60; 50],
-            pauser_threshold: Ok(uint(2)),
+            pauser_safe: safe(SAFE_141, 2, 5, 0),
             pending_admin: word(&[0u8; 20]),
             tron_pauser_signers: None,
         }
     }
 
-    const N_EVM: usize = 12;
+    const N_EVM: usize = 14;
     // Row indices.
     const NO_PROXY: usize = 1;
     const CODE_HASH: usize = 2;
     const MIN_DELAY: usize = 3;
-    const PROPOSERS: usize = 4;
-    const EXECUTORS: usize = 5;
-    const CANCELLERS: usize = 6;
-    const ADMINS: usize = 7;
-    const ADMIN_MS: usize = 8;
-    const PAUSER_NE: usize = 9;
-    const PAUSER_MS: usize = 10;
-    const PENDING: usize = 11;
+    const HISTORY: usize = 4;
+    const PROPOSERS: usize = 5;
+    const EXECUTORS: usize = 6;
+    const CANCELLERS: usize = 7;
+    const ADMINS: usize = 8;
+    const ADMIN_MS: usize = 9;
+    const PAUSER_NE: usize = 10;
+    const PAUSER_NE_MS: usize = 11;
+    const PAUSER_MS: usize = 12;
+    const PENDING: usize = 13;
 
     #[test]
     fn the_pinned_timelock_hash_is_the_fixture_s() {
@@ -1236,13 +1554,14 @@ mod tests {
         );
         let proposer = format!("0x{}", hex::encode(role_id("PROPOSER_ROLE")));
         let topic = |a: &[u8; 20]| format!("0x{}{}", "00".repeat(12), hex::encode(a));
+        let at = format!("0x{}", hex::encode(TIMELOCK));
         // Served out of order: the revoke (block 11) after the grant (block 10, index 3).
         let logs: Vec<serde_json::Value> = vec![
-            serde_json::json!({"topics": [revoked, proposer, topic(&EOA), topic(&TIMELOCK)], "blockNumber": "0xb", "logIndex": "0x0", "data": "0x"}),
-            serde_json::json!({"topics": [granted, proposer, topic(&EOA), topic(&DEPLOYER)], "blockNumber": "0xa", "logIndex": "0x3", "data": "0x"}),
-            serde_json::json!({"topics": [granted, proposer, topic(&ADMIN_SAFE), topic(&DEPLOYER)], "blockNumber": "0xa", "logIndex": "0x1", "data": "0x"}),
+            serde_json::json!({"address": at, "topics": [revoked, proposer, topic(&EOA), topic(&TIMELOCK)], "blockNumber": "0xb", "logIndex": "0x0", "data": "0x"}),
+            serde_json::json!({"address": at, "topics": [granted, proposer, topic(&EOA), topic(&DEPLOYER)], "blockNumber": "0xa", "logIndex": "0x3", "data": "0x"}),
+            serde_json::json!({"address": at, "topics": [granted, proposer, topic(&ADMIN_SAFE), topic(&DEPLOYER)], "blockNumber": "0xa", "logIndex": "0x1", "data": "0x"}),
         ];
-        let events = role_events_from_logs(&logs).unwrap();
+        let events = role_events_from_logs(&logs, &TIMELOCK).unwrap();
         assert_eq!(
             events,
             vec![
@@ -1253,10 +1572,10 @@ mod tests {
         );
         let mut bad = logs.clone();
         bad[0]["topics"][0] = serde_json::json!(format!("0x{}", "ab".repeat(32)));
-        assert!(role_events_from_logs(&bad).is_err(), "not a role event");
+        assert!(role_events_from_logs(&bad, &TIMELOCK).is_err(), "not a role event");
         let mut bad = logs;
         bad[1]["topics"][2] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
-        assert!(role_events_from_logs(&bad).is_err(), "not an address topic");
+        assert!(role_events_from_logs(&bad, &TIMELOCK).is_err(), "not an address topic");
     }
 
     #[test]
@@ -1359,19 +1678,209 @@ mod tests {
             ADMINS,
         );
         with(&|r| r.admin_multisig_code.clear(), ADMIN_MS);
-        with(&|r| r.admin_multisig_threshold = Ok(uint(1)), ADMIN_MS);
+        with(&|r| r.admin_multisig_safe.threshold = Ok(uint(1)), ADMIN_MS);
         with(
-            &|r| r.admin_multisig_threshold = Err("execution reverted".into()),
+            &|r| r.admin_multisig_safe.threshold = Err("execution reverted".into()),
             ADMIN_MS,
         );
         with(&|r| r.pauser = word(&TIMELOCK), PAUSER_NE);
-        with(&|r| r.pauser_threshold = Ok(uint(1)), PAUSER_MS);
+        // The pauser is the admin multisig: one Safe both pauses and drives the timelock.
+        with(&|r| r.pauser = word(&ADMIN_SAFE), PAUSER_NE_MS);
+        with(&|r| r.pauser_safe.threshold = Ok(uint(1)), PAUSER_MS);
         with(
-            &|r| r.pauser_threshold = Err("execution reverted".into()),
+            &|r| r.pauser_safe.threshold = Err("execution reverted".into()),
             PAUSER_MS,
         );
-        with(&|r| r.pauser_threshold = Ok(vec![]), PAUSER_MS);
+        with(&|r| r.pauser_safe.threshold = Ok(vec![]), PAUSER_MS);
         with(&|r| r.pending_admin = word(&EOA), PENDING);
+    }
+
+
+    #[test]
+    fn the_canonical_safe_singletons_are_the_four_pinned() {
+        let got: Vec<[u8; 20]> = CANONICAL_SAFE_SINGLETONS.iter().map(|(_, a)| *a).collect();
+        assert_eq!(got, vec![SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2]);
+    }
+
+    #[test]
+    fn decodes_abi_address_arrays() {
+        assert_eq!(decode_owners(&abi_owners(0)), Some(vec![]));
+        assert_eq!(
+            decode_owners(&abi_owners(3)),
+            Some(vec![addr(0x5afe_0000), addr(0x5afe_0001), addr(0x5afe_0002)])
+        );
+        assert_eq!(decode_modules_page(&abi_modules(0)), Some(vec![]));
+        assert_eq!(
+            decode_modules_page(&abi_modules(2)),
+            Some(vec![addr(0x3d_0000), addr(0x3d_0001)])
+        );
+        // The two shapes are not interchangeable.
+        assert_eq!(decode_owners(&abi_modules(0)), None);
+        assert_eq!(decode_modules_page(&abi_owners(0)), None);
+        // Not an array: empty, a bare word (a zero word is not an empty list),
+        // a length past the data, trailing bytes, a dirty address word.
+        assert_eq!(decode_owners(&[]), None);
+        assert_eq!(decode_owners(&uint(3)), None);
+        assert_eq!(decode_modules_page(&uint(0)), None);
+        let mut short = abi_owners(3);
+        short.truncate(short.len() - 32);
+        assert_eq!(decode_owners(&short), None);
+        let mut long = abi_owners(1);
+        long.extend(uint(0));
+        assert_eq!(decode_owners(&long), None);
+        let mut dirty = abi_owners(1);
+        dirty[64] = 1;
+        assert_eq!(decode_owners(&dirty), None);
+        let mut far = abi_owners(1);
+        far[..32].copy_from_slice(&uint(u64::MAX));
+        assert_eq!(decode_owners(&far), None);
+    }
+
+    #[test]
+    fn each_safe_check_fails_on_its_own() {
+        let admin = |f: &dyn Fn(&mut SafeReads)| {
+            let mut r = compliant_reads();
+            f(&mut r.admin_multisig_safe);
+            only_fails(&r, Flavor::Evm, ADMIN_MS)
+        };
+        let pauser = |f: &dyn Fn(&mut SafeReads)| {
+            let mut r = compliant_reads();
+            f(&mut r.pauser_safe);
+            only_fails(&r, Flavor::Evm, PAUSER_MS)
+        };
+        for check in [admin, pauser] {
+            // A module is enabled: it executes without any owner signature.
+            let rules = check(&|s| s.modules = Ok(abi_modules(1)));
+            assert!(rules
+                .iter()
+                .any(|r| r.observed.contains("Safe has modules: a module acts without signatures")));
+            // Slot 0 is not a canonical singleton: a look-alike answering the same views.
+            let rules = check(&|s| s.singleton_slot = Ok(word(&DEPLOYER)));
+            assert!(rules.iter().any(|r| r.observed.contains("not a canonical Safe")));
+            check(&|s| s.singleton_slot = Ok(vec![0; 32]));
+            check(&|s| s.singleton_slot = Err("refused".into()));
+            // More signatures required than there are owners.
+            check(&|s| s.owners = Ok(abi_owners(1)));
+            check(&|s| s.owners = Err("execution reverted".into()));
+            check(&|s| s.modules = Err("execution reverted".into()));
+            check(&|s| s.modules = Ok(uint(0)));
+        }
+        // Each canonical singleton passes.
+        for singleton in [SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2] {
+            let mut r = compliant_reads();
+            r.admin_multisig_safe = safe(singleton, 2, 2, 0);
+            r.pauser_safe = safe(singleton, 2, 3, 0);
+            assert_eq!(failures(&evm_rules(&r, Flavor::Evm, &policy())), 0);
+        }
+    }
+
+    #[test]
+    fn the_role_history_must_start_at_the_timelock_constructor() {
+        // A deploy block after the constructor: the first grants are missing.
+        let mut r = compliant_reads();
+        r.roles.as_mut().unwrap().remove(0);
+        let rules = evm_rules(&r, Flavor::Evm, &policy());
+        assert_eq!(rules[HISTORY].status, Status::Fail, "{rules:#?}");
+        assert!(rules[HISTORY]
+            .observed
+            .contains("deploy block too late or timelock not freshly deployed"));
+        // The constructor's self-grant is there but not first.
+        let mut r = compliant_reads();
+        r.roles.as_mut().unwrap().swap(0, 1);
+        only_fails(&r, Flavor::Evm, HISTORY);
+        // No event at all.
+        let mut r = compliant_reads();
+        r.roles = Ok(vec![]);
+        assert_eq!(evm_rules(&r, Flavor::Evm, &policy())[HISTORY].status, Status::Fail);
+        // The first grant of DEFAULT_ADMIN_ROLE to someone else: not this timelock's constructor.
+        let mut r = compliant_reads();
+        r.roles.as_mut().unwrap()[0] = grant("DEFAULT_ADMIN_ROLE", DEPLOYER);
+        r.roles.as_mut().unwrap().push(grant("DEFAULT_ADMIN_ROLE", TIMELOCK));
+        r.roles.as_mut().unwrap().push(revoke("DEFAULT_ADMIN_ROLE", DEPLOYER));
+        only_fails(&r, Flavor::Evm, HISTORY);
+    }
+
+    #[test]
+    fn tron_pins_the_tronbox_timelock_build() {
+        assert_eq!(keccak(&tron_timelock_code()), TRON_TIMELOCK_RUNTIME_KECCAK);
+        assert_eq!(
+            hex::encode(TRON_TIMELOCK_RUNTIME_KECCAK),
+            "fcb7fa62daf40b0560729beb39f3ca1d9224ed0bba6c079b6fd2cab25fc55d5b"
+        );
+        let rules = evm_rules(&tron_compliant(), Flavor::Tron, &policy());
+        assert_eq!(rules[CODE_HASH].status, Status::Pass, "{rules:#?}");
+        assert_eq!(failures(&rules), 0, "{rules:#?}");
+        // The forge build is not the Tron timelock, nor is any other code.
+        let mut r = tron_compliant();
+        r.admin_code = timelock_code();
+        only_fails(&r, Flavor::Tron, CODE_HASH);
+        let mut r = tron_compliant();
+        r.admin_code[200] ^= 1;
+        only_fails(&r, Flavor::Tron, CODE_HASH);
+        // ... and the tronbox build is not the EVM one.
+        let mut r = compliant_reads();
+        r.admin_code = tron_timelock_code();
+        only_fails(&r, Flavor::Evm, CODE_HASH);
+    }
+
+    /// After `npm run compile` in tron/, the build must give the pinned hash:
+    /// `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_pinned_tron_timelock_hash_matches_the_tronbox_build() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tron/build/contracts/TimelockController.json"
+        );
+        let Ok(text) = std::fs::read_to_string(path) else {
+            eprintln!("{path} not built; nothing to compare");
+            return;
+        };
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let code = hex::decode(
+            json["deployedBytecode"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        assert_eq!(
+            keccak(&code),
+            TRON_TIMELOCK_RUNTIME_KECCAK,
+            "tron/ builds a different TimelockController"
+        );
+    }
+
+    #[test]
+    fn role_logs_that_were_removed_or_are_not_the_timelock_s_are_not_trusted() {
+        let granted = format!("0x{}", hex::encode(role_granted_topic()));
+        let proposer = format!("0x{}", hex::encode(role_id("PROPOSER_ROLE")));
+        let topic = |a: &[u8; 20]| format!("0x{}{}", "00".repeat(12), hex::encode(a));
+        let at = format!("0x{}", hex::encode(TIMELOCK));
+        let log = |account: &[u8; 20], index: &str| {
+            serde_json::json!({"address": at, "topics": [granted, proposer, topic(account), topic(&DEPLOYER)],
+                "blockNumber": "0xa", "logIndex": index, "data": "0x", "removed": false})
+        };
+        let mut reorged = log(&EOA, "0x2");
+        reorged["removed"] = serde_json::json!(true);
+        let logs = vec![log(&ADMIN_SAFE, "0x1"), reorged];
+        assert_eq!(
+            role_events_from_logs(&logs, &TIMELOCK).unwrap(),
+            vec![grant("PROPOSER_ROLE", ADMIN_SAFE)],
+            "a removed (reorged-out) log is skipped"
+        );
+        let mut foreign = log(&EOA, "0x2");
+        foreign["address"] = serde_json::json!(format!("0x{}", hex::encode(DEPLOYER)));
+        let err = role_events_from_logs(&[log(&ADMIN_SAFE, "0x1"), foreign], &TIMELOCK)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not the timelock"), "{err}");
+        let mut upper = log(&ADMIN_SAFE, "0x1");
+        upper["address"] = serde_json::json!(format!("0x{}", hex::encode_upper(TIMELOCK)));
+        assert_eq!(role_events_from_logs(&[upper], &TIMELOCK).unwrap().len(), 1);
+        let mut missing = log(&ADMIN_SAFE, "0x1");
+        missing.as_object_mut().unwrap().remove("address");
+        assert!(role_events_from_logs(&[missing], &TIMELOCK).is_err());
     }
 
     #[test]
@@ -1405,11 +1914,11 @@ mod tests {
             "eth_getLogs refused; use an archive-capable RPC".into(),
         ));
         let rules = evm_rules(&r, Flavor::Evm, &policy());
-        for i in [PROPOSERS, EXECUTORS, CANCELLERS, ADMINS] {
+        for i in [HISTORY, PROPOSERS, EXECUTORS, CANCELLERS, ADMINS] {
             assert_eq!(rules[i].status, Unknown);
             assert!(rules[i].observed.contains("archive-capable RPC"));
         }
-        assert_eq!(failures(&rules), 4, "UNKNOWN counts as a failure");
+        assert_eq!(failures(&rules), 5, "UNKNOWN counts as a failure");
     }
 
     #[test]
@@ -1426,22 +1935,32 @@ mod tests {
         assert_eq!(fails, vec![MIN_DELAY, PAUSER_MS]);
     }
 
+    /// OZ v5.0.2 `TimelockController` runtime code as tronbox builds it, per the
+    /// `TRON_TIMELOCK_RUNTIME_KECCAK` doc comment.
+    fn tron_timelock_code() -> Vec<u8> {
+        hex::decode(
+            include_str!("../tests/fixtures/oz-v5.0.2-TimelockController.tronbox.runtime.hex")
+                .trim()
+                .trim_start_matches("0x"),
+        )
+        .unwrap()
+    }
+
     fn tron_compliant() -> EvmReads {
         let mut r = compliant_reads();
-        r.admin_code = vec![0x60; 3000]; // tronbox build: a different hash
+        r.admin_code = tron_timelock_code();
         r.admin_multisig_code.clear();
-        r.admin_multisig_threshold = Err("not asked on Tron".into());
+        r.admin_multisig_safe = SafeReads::not_asked("not asked on Tron");
         r.tron_admin_multisig_signers = Some(3);
-        r.pauser_threshold = Err("not asked on Tron".into());
+        r.pauser_safe = SafeReads::not_asked("not asked on Tron");
         r
     }
 
     #[test]
-    fn tron_is_exempt_from_the_code_hash_only() {
+    fn tron_runs_every_rule() {
         let rules = evm_rules(&tron_compliant(), Flavor::Tron, &policy());
-        assert_eq!(rules[CODE_HASH].status, Status::Exempt, "{rules:#?}");
-        assert!(rules[CODE_HASH].observed.contains("tronbox"));
         assert_eq!(failures(&rules), 0, "{rules:#?}");
+        assert!(rules.iter().all(|r| r.status == Status::Pass), "{rules:#?}");
         // The admin multisig is a native multi-signature account.
         let mut r = tron_compliant();
         r.tron_admin_multisig_signers = Some(1);
@@ -1493,8 +2012,8 @@ mod tests {
         eoa.tron_pauser_signers = Some(1);
         eoa.tron_admin_multisig_signers = None;
         let rules = evm_rules(&eoa, Flavor::Tron, &p);
-        assert_eq!(rules[CODE_HASH].status, Exempt);
-        assert_eq!(failures(&rules), N_EVM - 2);
+        assert_eq!(rules[CODE_HASH].status, Fail);
+        assert_eq!(failures(&rules), N_EVM - 1, "all but no-pendingAdmin");
     }
 
     #[test]
