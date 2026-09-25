@@ -1,3 +1,6 @@
 build/
 node_modules/
-contracts/
+# contracts/ is a generated mirror of ../evm/src (see README), except governance/: the
+# vendored OpenZeppelin TimelockController for BR-3, which is tracked.
+contracts/*
+!contracts/governance/
