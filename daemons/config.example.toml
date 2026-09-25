@@ -78,13 +78,31 @@ rand_cli_args = []
 listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, address}
 
 # ---- governance policy (rand-bridge-audit --governance, BR-3) ------------------
-# Optional; absent, the defaults below apply. The audit fails unless every
-# endpoint's admin is a timelock with at least `min_delay_secs` behind a
-# multisig of at least `min_threshold`, the pauser is a separate multisig, and
-# on Solana the admin and the upgrade authority are the vault of the Squads v4
-# multisig named here.
+# Optional section; absent, the defaults apply and the per-chain tables are empty
+# (so the role rules fail). Floors: min_delay_secs >= 86400, min_threshold >= 2.
+# Every bridge chain 2, 3, 4 ([[evm]]) and 5 ([solana]) must be configured. Per
+# endpoint the audit fails (non-zero exit; UNKNOWN counts as a failure) unless:
+#   EVM / Tron admin() — has code; is not an EIP-1967 proxy (implementation and
+#     admin slots zero); on Ethereum/BSC its code hash is OpenZeppelin v5.0.2
+#     TimelockController as evm/ builds it (Tron: EXEMPT, tronbox differs);
+#     getMinDelay() >= min_delay_secs; from its RoleGranted/RoleRevoked logs
+#     since timelock_deploy_block, PROPOSER_ROLE, EXECUTOR_ROLE, CANCELLER_ROLE
+#     are held by admin_multisig only and DEFAULT_ADMIN_ROLE by the timelock only
+#     (a refused log range is UNKNOWN: use an archive-capable RPC);
+#     admin_multisig is a Safe with getThreshold() >= min_threshold (Tron: an
+#     account whose owner and active permissions each need >= min_threshold keys);
+#   pauser() — != admin(); a Safe with getThreshold() >= min_threshold (Tron: a
+#     contract, or an account needing >= min_threshold signatures);
+#   pendingAdmin() — zero;
+#   Solana — Config.admin is the vault ["multisig", solana_multisig, "vault",
+#     solana_vault_index] of Squads v4; no pending_admin; the multisig is
+#     autonomous (config_authority default), threshold >= min_threshold,
+#     time_lock >= min_delay_secs; the program's upgrade authority is the same
+#     vault; pauser != admin.
 # [governance]
 # min_delay_secs = 172800             # 48 h
 # min_threshold = 2
+# timelock_deploy_block = { 2 = 0, 3 = 0, 4 = 0 }   # per bridge chain: where the role logs start
+# admin_multisig = { 2 = "0x…", 3 = "0x…", 4 = "T…" } # per bridge chain: the timelock's only proposer/executor/canceller
 # solana_multisig = "<Squads v4 multisig account, base58>"
 # solana_vault_index = 0

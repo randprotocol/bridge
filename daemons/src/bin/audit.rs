@@ -13,11 +13,12 @@
 //! difference, which is reported rather than hidden. Exits non-zero when an
 //! endpoint is insolvent.
 //!
-//! `--governance` instead checks who controls each endpoint (BR-3): the admin
-//! behind a timelock and a multisig, the pauser a separate multisig, the
-//! Solana upgrade authority the admin's Squads vault. Read-only; exits
-//! non-zero when any rule does not pass. The rules live in
-//! `bridge_daemons::gov_audit`.
+//! `--governance` instead checks that no single key controls any endpoint
+//! (BR-3): the admin the pinned OZ timelock, its roles held only by the
+//! configured admin multisig (read from its role logs), the pauser a separate
+//! multisig, the Solana admin and upgrade authority an autonomous Squads
+//! vault. Read-only; exits non-zero when any rule is FAIL or UNKNOWN. The
+//! rules live in `bridge_daemons::gov_audit`.
 
 use std::path::PathBuf;
 
@@ -25,7 +26,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use bridge_daemons::config::{address20, pubkey32, Config, EvmConfig, EvmKind, GovernanceConfig};
 use bridge_daemons::gov_audit::{self, EvmReads, Flavor, Rule, SolanaReads, Status};
-use bridge_daemons::rpc::{hex_data, JsonRpc};
+use bridge_daemons::rpc::{hex_data, quantity, JsonRpc};
 use bridge_daemons::sources::solana::find_program_address;
 use bridge_daemons::submit::selector;
 use clap::Parser;
@@ -309,6 +310,65 @@ async fn tron_signers(api: &str, address: &[u8; 20]) -> Option<u32> {
     gov_audit::tron_min_signers(&account)
 }
 
+/// `[from, to]` in inclusive chunks of at most `max` blocks.
+fn log_ranges(from: u64, to: u64, max: u64) -> Vec<(u64, u64)> {
+    let step = max.max(1);
+    let mut out = Vec::new();
+    let mut start = from;
+    while start <= to {
+        let end = to.min(start.saturating_add(step - 1));
+        out.push((start, end));
+        if end == u64::MAX {
+            break;
+        }
+        start = end + 1;
+    }
+    out
+}
+
+/// The timelock's RoleGranted / RoleRevoked history since its deployment.
+async fn role_history(
+    rpc: &JsonRpc,
+    timelock: &[u8; 20],
+    from: u64,
+    max_range: u64,
+) -> Result<Vec<gov_audit::RoleEvent>, (Status, String)> {
+    let unknown = |why: String| {
+        (
+            Status::Unknown,
+            format!("{why}; use an archive-capable RPC that serves eth_getLogs over this range"),
+        )
+    };
+    let head = rpc
+        .call("eth_blockNumber", json!([]))
+        .await
+        .and_then(|v| quantity(&v))
+        .map_err(|e| unknown(format!("eth_blockNumber: {e:#}")))?;
+    let topics = json!([[
+        format!("0x{}", hex::encode(gov_audit::role_granted_topic())),
+        format!("0x{}", hex::encode(gov_audit::role_revoked_topic())),
+    ]]);
+    let mut logs = Vec::new();
+    for (lo, hi) in log_ranges(from, head, max_range) {
+        let filter = json!([{
+            "address": format!("0x{}", hex::encode(timelock)),
+            "fromBlock": format!("0x{lo:x}"),
+            "toBlock": format!("0x{hi:x}"),
+            "topics": topics,
+        }]);
+        let result = rpc
+            .call("eth_getLogs", filter)
+            .await
+            .map_err(|e| unknown(format!("eth_getLogs [{lo}, {hi}] refused: {e:#}")))?;
+        let batch = result
+            .as_array()
+            .ok_or_else(|| unknown(format!("eth_getLogs [{lo}, {hi}]: not an array")))?;
+        logs.extend(batch.iter().cloned());
+    }
+    gov_audit::role_events_from_logs(&logs)
+        .map_err(|e| (Status::Unknown, format!("role logs: {e:#}")))
+}
+
 async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Result<Vec<Rule>> {
     let (url, flavor) = match endpoint.kind {
         EvmKind::Evm => (endpoint.rpc.clone(), Flavor::Evm),
@@ -336,12 +396,74 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
     let pauser_code = eth_get_code(&rpc, &pauser20)
         .await
         .context("eth_getCode(pauser)")?;
-    // An account without code answers any call with empty data; only ask a contract.
-    let min_delay = if admin_code.is_empty() {
-        Ok(Vec::new())
+    let has_code = !admin_code.is_empty();
+
+    // An account without code answers any call with empty data and has no
+    // storage or logs of its own; only ask a contract.
+    let proxy_slots = if has_code {
+        let slot = |s: &'static str| {
+            let rpc = rpc.clone();
+            async move {
+                rpc.call(
+                    "eth_getStorageAt",
+                    json!([format!("0x{}", hex::encode(admin20)), s, "latest"]),
+                )
+                .await
+                .and_then(|v| hex_data(&v))
+                .map_err(|e| format!("{e:#}"))
+            }
+        };
+        match (
+            slot(gov_audit::EIP1967_IMPLEMENTATION_SLOT).await,
+            slot(gov_audit::EIP1967_ADMIN_SLOT).await,
+        ) {
+            (Ok(i), Ok(a)) => Ok((i, a)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
     } else {
-        try_call(&rpc, &admin20, "getMinDelay()").await
+        Ok((vec![0; 32], vec![0; 32]))
     };
+    let min_delay = if has_code {
+        try_call(&rpc, &admin20, "getMinDelay()").await
+    } else {
+        Ok(Vec::new())
+    };
+    let roles = match policy.deploy_block(endpoint.chain) {
+        None => Err((
+            Status::Fail,
+            format!(
+                "no [governance].timelock_deploy_block for chain {}",
+                endpoint.chain
+            ),
+        )),
+        Some(_) if !has_code => Err((
+            Status::Fail,
+            "admin has no code: no timelock roles to read".to_string(),
+        )),
+        Some(from) => role_history(&rpc, &admin20, from, endpoint.max_log_range).await,
+    };
+
+    let admin_multisig = policy.admin_multisig20(endpoint.chain)?;
+    let (mut admin_multisig_code, mut admin_multisig_threshold, mut tron_admin_multisig_signers) =
+        (Vec::new(), Ok(Vec::new()), None);
+    if let Some(ms) = &admin_multisig {
+        admin_multisig_code = eth_get_code(&rpc, ms)
+            .await
+            .context("eth_getCode(admin multisig)")?;
+        match flavor {
+            Flavor::Evm if !admin_multisig_code.is_empty() => {
+                admin_multisig_threshold = try_call(&rpc, ms, "getThreshold()").await;
+            }
+            Flavor::Evm => {}
+            Flavor::Tron => {
+                admin_multisig_threshold = Err("not asked on Tron".into());
+                if admin_multisig_code.is_empty() {
+                    tron_admin_multisig_signers = tron_signers(&endpoint.rpc, ms).await;
+                }
+            }
+        }
+    }
+
     let (pauser_threshold, tron_pauser_signers) = match flavor {
         Flavor::Evm if !pauser_code.is_empty() => {
             (try_call(&rpc, &pauser20, "getThreshold()").await, None)
@@ -359,7 +481,13 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
     let reads = EvmReads {
         admin,
         admin_code,
+        proxy_slots,
         min_delay,
+        roles,
+        admin_multisig,
+        admin_multisig_code,
+        admin_multisig_threshold,
+        tron_admin_multisig_signers,
         pauser,
         pauser_code,
         pauser_threshold,
@@ -468,12 +596,12 @@ async fn solana_governance(
 fn render_governance(title: &str, rules: &[Rule]) -> String {
     let mut out = format!("== {title} ==\n");
     out.push_str(&format!(
-        "  {:<50} {:<8} {}\n",
+        "  {:<54} {:<8} {}\n",
         "rule", "status", "observed"
     ));
     for r in rules {
         out.push_str(&format!(
-            "  {:<50} {:<8} {}\n",
+            "  {:<54} {:<8} {}\n",
             r.name,
             r.status.label(),
             r.observed
@@ -493,14 +621,23 @@ fn unreadable(e: anyhow::Error) -> Vec<Rule> {
 async fn governance(config: &Config) -> Result<()> {
     let policy = config.governance_policy();
     println!(
-        "governance policy: min_delay_secs = {}, min_threshold = {}, solana_multisig = {}, solana_vault_index = {}\n",
+        "governance policy: min_delay_secs = {}, min_threshold = {}, solana_multisig = {}, solana_vault_index = {}, timelock_deploy_block = {:?}, admin_multisig = {:?}\n",
         policy.min_delay_secs,
         policy.min_threshold,
         policy.solana_multisig.as_deref().unwrap_or("(unset)"),
-        policy.solana_vault_index
+        policy.solana_vault_index,
+        policy.timelock_deploy_block,
+        policy.admin_multisig
     );
     let mut failed = 0;
     let mut endpoints_failing = 0;
+    let chains: Vec<u16> = config.evm.iter().map(|e| e.chain).collect();
+    let coverage = gov_audit::endpoint_coverage(&chains, config.solana.is_some());
+    if !coverage.is_empty() {
+        print!("{}", render_governance("bridge chains", &coverage));
+        println!();
+        failed += gov_audit::failures(&coverage);
+    }
     for endpoint in &config.evm {
         let rules = evm_governance(endpoint, &policy)
             .await
@@ -623,6 +760,25 @@ mod tests {
     use super::*;
 
     /// The shape `rand_getTokenSupply` serves (fullnode a2c9896: amounts are decimal strings).
+    #[test]
+    fn chunks_the_role_log_scan_by_max_log_range() {
+        assert_eq!(log_ranges(100, 100, 1000), vec![(100, 100)]);
+        assert_eq!(
+            log_ranges(0, 2499, 1000),
+            vec![(0, 999), (1000, 1999), (2000, 2499)]
+        );
+        assert_eq!(
+            log_ranges(10, 9, 1000),
+            Vec::<(u64, u64)>::new(),
+            "deployed after the head"
+        );
+        assert_eq!(
+            log_ranges(5, 7, 0),
+            vec![(5, 5), (6, 6), (7, 7)],
+            "0 is read as 1"
+        );
+    }
+
     #[test]
     fn renders_a_governance_table() {
         use bridge_daemons::gov_audit::{Rule, Status};

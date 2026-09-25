@@ -77,3 +77,51 @@ fn the_mainnet_configs_still_parse() {
         Config::load(&path).unwrap_or_else(|e| panic!("{name}: {e:#}"));
     }
 }
+
+#[test]
+fn the_governance_policy_has_floors() {
+    // The deploy script refuses a delay under 24 h; the audit refuses a laxer policy.
+    assert!(load(&format!("{MINIMAL}\n[governance]\nmin_delay_secs = 86399\n")).is_err());
+    assert!(load(&format!("{MINIMAL}\n[governance]\nmin_delay_secs = 86400\n")).is_ok());
+    assert!(load(&format!("{MINIMAL}\n[governance]\nmin_threshold = 1\n")).is_err());
+}
+
+#[test]
+fn the_governance_section_names_the_timelock_and_admin_multisig_per_chain() {
+    let config = load(&format!(
+        "{MINIMAL}\n[governance]\n\
+         timelock_deploy_block = {{ 2 = 26100000, 3 = 123000000, 4 = 86500000 }}\n\
+         admin_multisig = {{ 2 = \"0x1111111111111111111111111111111111111111\", \
+         3 = \"0x2222222222222222222222222222222222222222\", \
+         4 = \"TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU\" }}\n"
+    ))
+    .unwrap();
+    let policy = config.governance_policy();
+    assert_eq!(policy.deploy_block(2), Some(26_100_000));
+    assert_eq!(policy.deploy_block(4), Some(86_500_000));
+    assert_eq!(policy.deploy_block(5), None);
+    assert_eq!(policy.admin_multisig20(2).unwrap(), Some([0x11; 20]));
+    // A Tron multisig may be given in its T… form.
+    assert_eq!(
+        policy.admin_multisig20(4).unwrap().map(hex::encode).as_deref(),
+        Some("0992df85dcce77ded2c0387f1fa9cf98ac859700")
+    );
+    assert_eq!(config.governance_policy().admin_multisig20(5).unwrap(), None);
+    // Unset, both tables are empty.
+    let empty = load(MINIMAL).unwrap().governance_policy();
+    assert_eq!((empty.deploy_block(2), empty.admin_multisig20(2).unwrap()), (None, None));
+
+    for bad in [
+        "timelock_deploy_block = { 7 = 1 }",
+        "timelock_deploy_block = { eth = 1 }",
+        "admin_multisig = { 2 = \"0x11\" }",
+        "admin_multisig = { 2 = \"TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU\" }",
+        "admin_multisig = { 4 = \"TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkV\" }",
+        "admin_multisig = { 6 = \"0x1111111111111111111111111111111111111111\" }",
+    ] {
+        assert!(
+            load(&format!("{MINIMAL}\n[governance]\n{bad}\n")).is_err(),
+            "{bad} must be refused"
+        );
+    }
+}
