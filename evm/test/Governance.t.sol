@@ -10,6 +10,7 @@ import {EthereumRandBridge} from "../src/EthereumRandBridge.sol";
 import {Governance} from "../script/Governance.s.sol";
 import {GovernancePins} from "../script/GovernancePins.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {FakeSafe} from "./mocks/FakeSafe.sol";
 
 /// BR-3: the admin role of an EVM endpoint handed to an OpenZeppelin
 /// `TimelockController` (48 h, proposers = executors = cancellers = the admin
@@ -20,7 +21,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 /// The fork variant runs the same handover against the live Ethereum and BSC
 /// bridges, pranking (broadcasting as) the current admin EOA:
 ///
-///   ETH_FORK_URL=... BSC_FORK_URL=... forge test --match-contract Governance
+///   ETH_FORK_URL=... BSC_FORK_URL=... forge test --match-contract GovernanceTest --match-test test_fork
 ///
 /// in the DEFAULT profile (paris), not `fork`: the timelock's runtime code hash is pinned
 /// (`GovernancePins`) for the paris build, and a cancun build of it is refused by design. The
@@ -47,11 +48,28 @@ contract GovernanceTest is Test {
         _giveMultisigsCode();
     }
 
-    /// The handover requires both multisigs to be contracts (Safes on mainnet); a STOP is enough
-    /// here, the timelock and the bridge only look at msg.sender.
+    // The canonical Safe singletons (github.com/safe-global/safe-deployments, src/assets).
+    address constant SAFE_130 = 0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552;
+    address constant SAFE_130_L2 = 0x3E5c63644E683549055b9Be8653de26E0B4CD36E;
+    address constant SAFE_141 = 0x41675C099F32341bf84BFc5382aF534df5C7461a;
+    address constant SAFE_141_L2 = 0x29fcB43b46531BcA003ddC8FCB67FFE91900C762;
+
+    /// The handover requires both multisigs to be Safes: a proxy whose slot 0 is a canonical
+    /// singleton, with no module, a threshold of at least 2 and at least that many owners. A
+    /// `FakeSafe` answers those views; the timelock and the bridge only look at msg.sender.
     function _giveMultisigsCode() internal {
-        vm.etch(adminMs, hex"00");
-        vm.etch(pauseMs, hex"00");
+        _fakeSafe(adminMs, SAFE_130_L2, 3, 5, 0);
+        _fakeSafe(pauseMs, SAFE_141, 2, 5, 0);
+    }
+
+    function _fakeSafe(address at, address singleton, uint256 threshold, uint256 owners, uint256 modules)
+        internal
+    {
+        vm.etch(at, address(new FakeSafe()).code);
+        vm.store(at, bytes32(uint256(0)), bytes32(uint256(uint160(singleton))));
+        vm.store(at, bytes32(uint256(1)), bytes32(threshold));
+        vm.store(at, bytes32(uint256(2)), bytes32(owners));
+        vm.store(at, bytes32(uint256(3)), bytes32(modules));
     }
 
     function _timelock(address[] memory proposers, address[] memory executors, address tlAdmin)
@@ -441,6 +459,85 @@ contract GovernanceTest is Test {
         TimelockController tl = gov.deployTimelock(adminMs, DELAY);
         vm.expectRevert(bytes("PAUSE_MULTISIG has no code"));
         gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, makeAddr("pause-key"));
+    }
+
+    // The multisigs must be Safes (I2): canonical singleton, no module, threshold >= 2.
+
+    function test_handover_refuses_an_admin_multisig_that_is_not_a_safe() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        vm.etch(adminMs, hex"00"); // a contract, but it answers nothing
+        vm.store(adminMs, bytes32(0), bytes32(0));
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        // A canonical singleton in slot 0 is not enough: it must answer as a Safe.
+        vm.store(adminMs, bytes32(0), bytes32(uint256(uint160(SAFE_130))));
+        vm.expectRevert(bytes("ADMIN_MULTISIG: getThreshold() unanswered"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_non_canonical_singleton() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        _fakeSafe(adminMs, makeAddr("look-alike-singleton"), 3, 5, 0);
+        vm.expectRevert(bytes("ADMIN_MULTISIG is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        _giveMultisigsCode();
+        _fakeSafe(pauseMs, makeAddr("look-alike-singleton"), 2, 5, 0);
+        vm.expectRevert(bytes("PAUSE_MULTISIG is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_safe_with_a_module() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        _fakeSafe(adminMs, SAFE_130, 3, 5, 1);
+        vm.expectRevert(bytes("ADMIN_MULTISIG: Safe has modules: a module acts without signatures"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        _giveMultisigsCode();
+        _fakeSafe(pauseMs, SAFE_130, 2, 5, 2);
+        vm.expectRevert(bytes("PAUSE_MULTISIG: Safe has modules: a module acts without signatures"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_one_of_n_safe() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        _fakeSafe(adminMs, SAFE_141_L2, 1, 5, 0);
+        vm.expectRevert(bytes("ADMIN_MULTISIG: Safe threshold < 2"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+        _giveMultisigsCode();
+        _fakeSafe(pauseMs, SAFE_141_L2, 1, 5, 0);
+        vm.expectRevert(bytes("PAUSE_MULTISIG: Safe threshold < 2"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_safe_with_fewer_owners_than_its_threshold() public {
+        TimelockController tl = gov.deployTimelock(adminMs, DELAY);
+        _fakeSafe(adminMs, SAFE_130_L2, 3, 2, 0);
+        vm.expectRevert(bytes("ADMIN_MULTISIG: Safe has fewer owners than its threshold"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_accepts_each_canonical_singleton() public {
+        address[4] memory singletons = [SAFE_130, SAFE_130_L2, SAFE_141, SAFE_141_L2];
+        for (uint256 i; i < 4; i++) {
+            gov.requireSafe(adminMs, "ADMIN_MULTISIG"); // reverts on any failure
+            _fakeSafe(adminMs, singletons[i], 2, 2, 0);
+            gov.requireSafe(adminMs, "ADMIN_MULTISIG");
+        }
+    }
+
+    // M2: the sender holds no role on the timelock at all.
+
+    function test_handover_refuses_a_timelock_the_sender_executes_on() public {
+        TimelockController tl = _timelock(_one(adminMs), _two(adminMs, eoa), address(0));
+        vm.expectRevert(bytes("sender is TIMELOCK executor"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
+    }
+
+    function test_handover_refuses_a_timelock_the_sender_can_cancel_on() public {
+        TimelockController tl = _timelock(_one(adminMs), _one(adminMs), address(this));
+        tl.grantRole(tl.CANCELLER_ROLE(), eoa);
+        tl.renounceRole(tl.DEFAULT_ADMIN_ROLE(), address(this));
+        vm.expectRevert(bytes("sender is TIMELOCK canceller"));
+        gov.handoverFrom(eoa, address(bridge), address(tl), adminMs, pauseMs);
     }
 
     function test_handover_refuses_a_broadcaster_that_is_not_admin() public {

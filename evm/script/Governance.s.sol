@@ -93,10 +93,10 @@ contract Governance is Script {
 
     /// Broadcast by the current bridge admin, which must be passed as `--sender <current admin>`:
     /// forge runs the entry point with `msg.sender` = `--sender`. It refuses a timelock that is
-    /// not the pinned OZ code, has a delay under 24 h, lets anyone execute, is administered or
-    /// proposed to by the sender, or is not proposed to and executed by ADMIN_MULTISIG (a
-    /// contract); and a pauser that is not a contract or is the sender, the timelock or
-    /// ADMIN_MULTISIG.
+    /// not the pinned OZ code, has a delay under 24 h, lets anyone execute, gives the sender any
+    /// role (admin, proposer, executor, canceller), or is not proposed to and executed by
+    /// ADMIN_MULTISIG; and a pauser that is the sender, the timelock or ADMIN_MULTISIG. Both
+    /// multisigs must pass `requireSafe` (canonical singleton, no module, threshold >= 2).
     function handover() external {
         handoverFrom(
             msg.sender,
@@ -120,19 +120,21 @@ contract Governance is Script {
         TimelockController tl = TimelockController(payable(timelock));
         require(tl.getMinDelay() >= MIN_ALLOWED_DELAY, "TIMELOCK delay < 86400");
         require(adminMultisig != address(0), "ADMIN_MULTISIG unset");
-        require(adminMultisig.code.length != 0, "ADMIN_MULTISIG has no code");
+        requireSafe(adminMultisig, "ADMIN_MULTISIG");
         require(tl.hasRole(tl.PROPOSER_ROLE(), adminMultisig), "ADMIN_MULTISIG is not TIMELOCK proposer");
         require(tl.hasRole(tl.EXECUTOR_ROLE(), adminMultisig), "ADMIN_MULTISIG is not TIMELOCK executor");
         require(!tl.hasRole(tl.EXECUTOR_ROLE(), address(0)), "TIMELOCK lets anyone execute");
         require(!tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), sender), "sender is TIMELOCK admin");
         require(!tl.hasRole(tl.PROPOSER_ROLE(), sender), "sender is TIMELOCK proposer");
+        require(!tl.hasRole(tl.EXECUTOR_ROLE(), sender), "sender is TIMELOCK executor");
+        require(!tl.hasRole(tl.CANCELLER_ROLE(), sender), "sender is TIMELOCK canceller");
 
         // The pauser: a second multisig, neither the old key nor the admin multisig.
         require(pauseMultisig != address(0), "PAUSE_MULTISIG unset");
         require(pauseMultisig != timelock, "PAUSE_MULTISIG == TIMELOCK");
         require(pauseMultisig != sender, "PAUSE_MULTISIG == sender");
         require(pauseMultisig != adminMultisig, "PAUSE_MULTISIG == ADMIN_MULTISIG");
-        require(pauseMultisig.code.length != 0, "PAUSE_MULTISIG has no code");
+        requireSafe(pauseMultisig, "PAUSE_MULTISIG");
 
         require(IBridgeRoles(bridge).admin() == sender, "broadcaster is not the bridge admin");
 
@@ -145,6 +147,55 @@ contract Governance is Script {
         console2.log("pauser   -> ", pauseMultisig);
         console2.log("pending  -> ", IBridgeRoles(bridge).pendingAdmin());
         console2.log("admin (until the timelock accepts)", IBridgeRoles(bridge).admin());
+    }
+
+    // ------------------------------------------------------------------
+    // The multisigs are Safes
+    // ------------------------------------------------------------------
+
+    /// A Safe with fewer signers than this is a key.
+    uint256 public constant MIN_SAFE_THRESHOLD = 2;
+    /// Safe's ModuleManager list sentinel: the first page of `getModulesPaginated` starts here.
+    address internal constant SAFE_SENTINEL = address(0x1);
+
+    /// The canonical Safe singletons (mastercopies) a Safe proxy may point at: v1.3.0
+    /// `GnosisSafe` and `GnosisSafeL2`, v1.4.1 `Safe` and `SafeL2`, the "canonical" deployment of
+    /// each in github.com/safe-global/safe-deployments (src/assets/v1.3.0/gnosis_safe.json,
+    /// gnosis_safe_l2.json, v1.4.1/safe.json, safe_l2.json; all four listed for chains 1 and 56;
+    /// read 2026-09-25 at main 7b1fb6d). `rand-bridge-audit --governance` pins the same four.
+    function isCanonicalSafeSingleton(address singleton) public pure returns (bool) {
+        return singleton == 0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552 // v1.3.0
+            || singleton == 0x3E5c63644E683549055b9Be8653de26E0B4CD36E // v1.3.0 L2
+            || singleton == 0x41675C099F32341bf84BFc5382aF534df5C7461a // v1.4.1
+            || singleton == 0x29fcB43b46531BcA003ddC8FCB67FFE91900C762; // v1.4.1 L2
+    }
+
+    /// Reverts unless `safe` is a Safe proxy (slot 0 = a canonical singleton) with no enabled
+    /// module (a module executes without any owner signature), a threshold of at least 2, and
+    /// at least that many owners. Anything answering `getThreshold()` is not enough.
+    function requireSafe(address safe, string memory what) public view {
+        require(safe.code.length != 0, string.concat(what, " has no code"));
+        address singleton = address(uint160(uint256(vm.load(safe, bytes32(0)))));
+        require(
+            isCanonicalSafeSingleton(singleton),
+            string.concat(what, " is not a canonical Safe (slot 0 is not a v1.3.0/v1.4.1 singleton)")
+        );
+
+        (bool ok, bytes memory ret) = safe.staticcall(abi.encodeWithSignature("getThreshold()"));
+        require(ok && ret.length == 32, string.concat(what, ": getThreshold() unanswered"));
+        uint256 threshold = abi.decode(ret, (uint256));
+        require(threshold >= MIN_SAFE_THRESHOLD, string.concat(what, ": Safe threshold < 2"));
+
+        (ok, ret) = safe.staticcall(abi.encodeWithSignature("getOwners()"));
+        require(ok && ret.length >= 64, string.concat(what, ": getOwners() unanswered"));
+        address[] memory owners = abi.decode(ret, (address[]));
+        require(owners.length >= threshold, string.concat(what, ": Safe has fewer owners than its threshold"));
+
+        (ok, ret) =
+            safe.staticcall(abi.encodeWithSignature("getModulesPaginated(address,uint256)", SAFE_SENTINEL, 10));
+        require(ok && ret.length >= 96, string.concat(what, ": getModulesPaginated() unanswered"));
+        (address[] memory modules,) = abi.decode(ret, (address[], address));
+        require(modules.length == 0, string.concat(what, ": Safe has modules: a module acts without signatures"));
     }
 
     // ------------------------------------------------------------------
