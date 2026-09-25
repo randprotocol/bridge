@@ -40,6 +40,12 @@ struct Cli {
     /// Signer keypair file (solana-keygen JSON). Alternatively set SOL_PRIVATE_KEY.
     #[arg(long, env = keys::KEYPAIR_ENV, global = true)]
     keypair: Option<PathBuf>,
+    /// Build the admin instruction with VAULT (a Squads vault) as the signing
+    /// admin and print it for a Squads vault transaction; nothing is signed or
+    /// sent and no keypair is read. Only for accept-admin, unpause, set-token,
+    /// set-protocol-fee, withdraw-fees and transfer-admin.
+    #[arg(long = "as", value_name = "VAULT", global = true)]
+    as_admin: Option<Pubkey>,
     #[command(subcommand)]
     command: Command,
 }
@@ -180,10 +186,12 @@ enum Command {
         #[command(flatten)]
         program: ProgramArg,
     },
-    /// BR-3: hand the program's upgrade authority to a new key (a Squads
-    /// vault, in production), via the BPF Upgradeable Loader's unchecked
-    /// `SetAuthority` (the new authority, a PDA, cannot co-sign offline).
-    /// Signed by the *current* upgrade authority. Refuses without `--yes`.
+    /// BR-3, the LAST step: hand the program's upgrade authority to the
+    /// vault of an autonomous Squads v4 multisig (threshold at least 2, time
+    /// lock at least 48 h) that is already the bridge's admin, via the BPF
+    /// Upgradeable Loader's unchecked `SetAuthority` (the new authority, a
+    /// PDA, cannot co-sign offline). Signed by the *current* upgrade
+    /// authority. Refuses without `--yes`.
     SetUpgradeAuthority {
         #[command(flatten)]
         program: ProgramArg,
@@ -193,10 +201,12 @@ enum Command {
         /// Repeated so a typo cannot silently hand authority to the wrong key.
         #[arg(long)]
         confirm_new: Pubkey,
-        /// If given (with --vault-index), refuse unless --new is exactly
-        /// this Squads v4 multisig's vault PDA.
+        /// The Squads v4 multisig whose vault (--vault-index) --new must be.
+        /// Required: it is read and must be autonomous (no config_authority),
+        /// threshold >= 2 and time_lock >= 172800 s, and the bridge's admin
+        /// must already be that vault with no pending admin.
         #[arg(long)]
-        squads_multisig: Option<Pubkey>,
+        squads_multisig: Pubkey,
         /// The Squads vault index of --squads-multisig.
         #[arg(long, default_value_t = 0)]
         vault_index: u8,
@@ -213,6 +223,13 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(vault) = cli.as_admin {
+        let instruction = admin_instruction(&cli.command, &vault).ok_or_else(|| {
+            anyhow!("--as applies only to accept-admin, unpause, set-token, set-protocol-fee, withdraw-fees and transfer-admin")
+        })?;
+        print!("{}", render_instruction(&instruction));
+        return Ok(());
+    }
     let secret = std::env::var(keys::SECRET_ENV).ok();
     let signer = || keys::load_keypair(cli.keypair.as_deref(), secret.as_deref());
 
@@ -299,7 +316,10 @@ fn main() -> Result<()> {
                 nonce,
             );
             let sig = send(&cli.rpc_url, &kp, instruction)?;
-            println!("locked {amount} of {mint} as sequence {} in {sig}", config.sequence);
+            println!(
+                "locked {amount} of {mint} as sequence {} in {sig}",
+                config.sequence
+            );
         }
         Command::Pause { program } => {
             let kp = signer()?;
@@ -522,17 +542,28 @@ fn main() -> Result<()> {
             if !allow_on_curve {
                 upgrade_authority::check_not_on_curve(&new)?;
             }
-            if let Some(ms) = squads_multisig {
-                let vault = upgrade_authority::squads_vault_pda(&ms, vault_index);
-                if vault != new {
-                    bail!(
-                        "--new ({new}) is not the vault (index {vault_index}) of --squads-multisig {ms}; expected {vault}"
-                    );
-                }
+            let ms = squads_multisig;
+            let vault = upgrade_authority::squads_vault_pda(&ms, vault_index);
+            if vault != new {
+                bail!(
+                    "--new ({new}) is not the vault (index {vault_index}) of --squads-multisig {ms}; expected {vault}"
+                );
             }
 
-            let kp = signer()?;
             let client = client(&cli.rpc_url);
+            // The multisig behind the vault, as it is on chain now.
+            let account = client
+                .get_account(&ms)
+                .with_context(|| format!("reading the Squads multisig {ms}"))?;
+            let multisig = upgrade_authority::check_squads_multisig(&account.owner, &account.data)
+                .with_context(|| format!("--squads-multisig {ms}"))?;
+            // The admin handover must be finished: this is the last step.
+            let config_key = config_pda(&program).0;
+            let data = client.get_account_data(&config_key).with_context(|| {
+                format!("no config at {config_key}; is the program initialized?")
+            })?;
+            let config = Config::load(&data).map_err(|e| anyhow!("config account: {e}"))?;
+            upgrade_authority::check_admin_handed_over(&config, &new)?;
             let program_data = upgrade_authority::program_data_address(&program);
             let data = client.get_account_data(&program_data).with_context(|| {
                 format!("no ProgramData account at {program_data}; is {program} deployed under the upgradeable loader?")
@@ -542,6 +573,7 @@ fn main() -> Result<()> {
                 anyhow!("{program} is already immutable: its upgrade authority is None")
             })?;
 
+            let kp = signer()?;
             if current_authority != kp.pubkey() {
                 bail!(
                     "signer {} is not the current upgrade authority ({current_authority})",
@@ -559,6 +591,10 @@ fn main() -> Result<()> {
             println!("program data:       {program_data}");
             println!("current authority:  {current_authority}");
             println!("new authority:      {new}");
+            println!(
+                "squads multisig:    {ms} (threshold {} of {}, time_lock {} s, autonomous); bridge admin already the vault",
+                multisig.threshold, multisig.members, multisig.time_lock
+            );
             println!(
                 "instruction:        program_id={} accounts=[{}] data=0x{}",
                 instruction.program_id,
@@ -596,6 +632,70 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The instruction an admin command stands for, with `admin` (a Squads
+/// vault, for `--as`) as the signing admin; `None` for any other command.
+fn admin_instruction(command: &Command, admin: &Pubkey) -> Option<Instruction> {
+    Some(match command {
+        Command::AcceptAdmin { program } => ix::accept_admin(&program.program, admin),
+        Command::Unpause { program } => ix::unpause(&program.program, admin),
+        Command::SetToken {
+            program,
+            mint,
+            enabled,
+            per_transfer_cap,
+            daily_cap,
+        } => ix::set_token(
+            &program.program,
+            admin,
+            mint,
+            *enabled,
+            *per_transfer_cap,
+            *daily_cap,
+        ),
+        Command::SetProtocolFee { program, bps } => {
+            ix::set_protocol_fee(&program.program, admin, *bps)
+        }
+        Command::WithdrawFees {
+            program,
+            mint,
+            to,
+            amount,
+        } => ix::withdraw_fees(&program.program, admin, mint, to, *amount),
+        Command::TransferAdmin { program, to } => ix::transfer_admin(&program.program, admin, to),
+        _ => return None,
+    })
+}
+
+/// An instruction as a Squads vault transaction needs it: program id, each
+/// account with its signer / writable flags, and the data (hex, base58,
+/// base64). Nothing is signed or sent.
+fn render_instruction(instruction: &Instruction) -> String {
+    use base64::Engine;
+    let mut out = format!("program_id: {}\naccounts:\n", instruction.program_id);
+    for (i, m) in instruction.accounts.iter().enumerate() {
+        let flags = match (m.is_signer, m.is_writable) {
+            (true, true) => "signer writable",
+            (true, false) => "signer",
+            (false, true) => "writable",
+            (false, false) => "readonly",
+        };
+        out.push_str(&format!("  {i}: {} {flags}\n", m.pubkey));
+    }
+    out.push_str(&format!("data (hex): {}\n", hex::encode(&instruction.data)));
+    out.push_str(&format!(
+        "data (base58): {}\n",
+        bs58::encode(&instruction.data).into_string()
+    ));
+    out.push_str(&format!(
+        "data (base64): {}\n",
+        base64::engine::general_purpose::STANDARD.encode(&instruction.data)
+    ));
+    out.push_str(
+        "nothing was signed or sent: add this instruction to a Squads vault transaction; the vault signs it once the multisig approves and its time lock has passed\n",
+    );
+    out
 }
 
 fn client(url: &str) -> RpcClient {
@@ -666,6 +766,105 @@ mod tests {
         assert_eq!(g, vec![[0xaa; 20], [0xbb; 20]]);
         assert!(parse_guardians(&["0x12".into()]).is_err());
         assert!(parse_guardians(&[]).is_err());
+    }
+
+    const ADMIN_COMMANDS: [&str; 6] = [
+        "accept-admin",
+        "unpause",
+        "set-token",
+        "set-protocol-fee",
+        "withdraw-fees",
+        "transfer-admin",
+    ];
+
+    fn parse(vault: &Pubkey, program: &Pubkey, command: &str) -> Cli {
+        let (v, p) = (vault.to_string(), program.to_string());
+        let (mint, to) = (
+            Pubkey::new_unique().to_string(),
+            Pubkey::new_unique().to_string(),
+        );
+        let mut args = vec!["rand-bridge-cli", "--as", &v, command, "--program", &p];
+        match command {
+            "set-token" => args.extend(["--mint", &mint, "--per-transfer-cap", "5"]),
+            "set-protocol-fee" => args.extend(["--bps", "20"]),
+            "withdraw-fees" => args.extend(["--mint", &mint, "--to", &to, "--amount", "7"]),
+            "transfer-admin" => args.extend(["--to", &to]),
+            _ => {}
+        }
+        Cli::try_parse_from(args).unwrap()
+    }
+
+    #[test]
+    fn as_vault_builds_each_admin_instruction_with_the_vault_as_signing_admin() {
+        let vault = Pubkey::new_unique();
+        let program = rand_bridge::id();
+        for command in ADMIN_COMMANDS {
+            let cli = parse(&vault, &program, command);
+            assert_eq!(cli.as_admin, Some(vault));
+            let built = admin_instruction(&cli.command, &vault)
+                .unwrap_or_else(|| panic!("{command}: no admin instruction"));
+            assert_eq!(built.program_id, program, "{command}");
+            assert_eq!(built.accounts[0].pubkey, vault, "{command}: admin meta");
+            assert!(built.accounts[0].is_signer, "{command}: the vault signs");
+            assert!(
+                built.accounts[1..].iter().all(|m| !m.is_signer),
+                "{command}: the vault is the only signer"
+            );
+            assert_eq!(
+                built.accounts[1].pubkey,
+                config_pda(&program).0,
+                "{command}"
+            );
+        }
+        // The same instruction the program's own builders make.
+        let cli = parse(&vault, &program, "unpause");
+        assert_eq!(
+            admin_instruction(&cli.command, &vault).unwrap(),
+            ix::unpause(&program, &vault)
+        );
+        let cli = parse(&vault, &program, "set-protocol-fee");
+        assert_eq!(
+            admin_instruction(&cli.command, &vault).unwrap(),
+            ix::set_protocol_fee(&program, &vault, 20)
+        );
+        // Not an admin command: nothing to print.
+        let p = program.to_string();
+        let v = vault.to_string();
+        let cli =
+            Cli::try_parse_from(["rand-bridge-cli", "--as", &v, "pause", "--program", &p]).unwrap();
+        assert!(admin_instruction(&cli.command, &vault).is_none());
+    }
+
+    #[test]
+    fn prints_the_instruction_for_a_squads_vault_transaction() {
+        use base64::Engine;
+        let vault = Pubkey::new_unique();
+        let program = rand_bridge::id();
+        let built = ix::accept_admin(&program, &vault);
+        let text = render_instruction(&built);
+        assert!(text.contains(&format!("program_id: {program}")), "{text}");
+        assert!(
+            text.contains(&format!("{vault} signer writable"))
+                || text.contains(&format!("{vault} signer")),
+            "{text}"
+        );
+        let config = config_pda(&program).0;
+        assert!(text.contains(&format!("{config} writable")), "{text}");
+        assert!(
+            text.contains(&format!(
+                "data (base58): {}",
+                bs58::encode(&built.data).into_string()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "data (base64): {}",
+                base64::engine::general_purpose::STANDARD.encode(&built.data)
+            )),
+            "{text}"
+        );
+        assert!(text.contains("nothing was signed or sent"), "{text}");
     }
 
     #[test]

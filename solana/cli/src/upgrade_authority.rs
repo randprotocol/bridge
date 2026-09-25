@@ -73,11 +73,241 @@ pub fn decode_program_data(data: &[u8]) -> Result<(u64, Option<Pubkey>)> {
     }
 }
 
+/// The upgrade authority moves last and only to a vault whose multisig is at
+/// least this strict: 2 signatures, and the design's 48 h time lock.
+pub const MIN_SQUADS_THRESHOLD: u16 = 2;
+pub const MIN_SQUADS_TIME_LOCK_SECS: u32 = 172_800;
+
+/// The fields of a Squads v4 `Multisig` account this CLI checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SquadsMultisig {
+    pub create_key: Pubkey,
+    pub config_authority: Pubkey,
+    pub threshold: u16,
+    pub time_lock: u32,
+    pub members: usize,
+}
+
+/// A Squads v4 `Multisig` account (`state/multisig.rs`): the Anchor
+/// discriminator `sha256("account:Multisig")[..8]`, then Borsh: create_key,
+/// config_authority, threshold u16, time_lock u32, transaction_index u64,
+/// stale_transaction_index u64, rent_collector `Option<Pubkey>`, bump u8,
+/// members `Vec<{key, permissions u8}>`. The same decoder as
+/// `daemons/src/gov_audit.rs` `decode_squads_multisig`.
+pub fn decode_squads_multisig(data: &[u8]) -> Result<SquadsMultisig> {
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Result<&[u8]> {
+        let out = data
+            .get(at..at + n)
+            .ok_or_else(|| anyhow!("Squads multisig account too short at byte {at}"))?;
+        at += n;
+        Ok(out)
+    };
+    let discriminator = solana_sdk::hash::hash(b"account:Multisig");
+    if take(8)? != &discriminator.as_ref()[..8] {
+        bail!("not a Squads v4 Multisig account (discriminator)");
+    }
+    let key = |b: &[u8]| Pubkey::try_from(b).expect("32 bytes");
+    let create_key = key(take(32)?);
+    let config_authority = key(take(32)?);
+    let threshold = u16::from_le_bytes(take(2)?.try_into().expect("2"));
+    let time_lock = u32::from_le_bytes(take(4)?.try_into().expect("4"));
+    take(16)?; // transaction_index, stale_transaction_index
+    match take(1)?[0] {
+        0 => {}
+        1 => {
+            take(32)?;
+        }
+        t => bail!("bad Option tag {t} for rent_collector"),
+    }
+    take(1)?; // bump
+    let members = u32::from_le_bytes(take(4)?.try_into().expect("4")) as usize;
+    if members > data.len() / 33 {
+        bail!("member count {members} does not fit the account");
+    }
+    take(33 * members)?;
+    Ok(SquadsMultisig {
+        create_key,
+        config_authority,
+        threshold,
+        time_lock,
+        members,
+    })
+}
+
+/// The multisig behind the vault that will hold the upgrade authority:
+/// owned by Squads v4, autonomous (no `config_authority`, which could change
+/// members, threshold and time lock without a vote), `threshold >= 2` and no
+/// more than its members, `time_lock >= 172800` s.
+pub fn check_squads_multisig(owner: &Pubkey, data: &[u8]) -> Result<SquadsMultisig> {
+    let squads: Pubkey = SQUADS_PROGRAM_ID.parse().expect("a pubkey");
+    if *owner != squads {
+        bail!("--squads-multisig is not owned by Squads v4 ({squads}) but by {owner}");
+    }
+    let ms = decode_squads_multisig(data)?;
+    if ms.config_authority != Pubkey::default() {
+        bail!(
+            "the Squads multisig is controlled: config_authority {} can change it without a vote; create it autonomous",
+            ms.config_authority
+        );
+    }
+    if ms.threshold < MIN_SQUADS_THRESHOLD || usize::from(ms.threshold) > ms.members {
+        bail!(
+            "the Squads multisig threshold is {} of {} members; need at least {MIN_SQUADS_THRESHOLD} and no more than the members",
+            ms.threshold,
+            ms.members
+        );
+    }
+    if ms.time_lock < MIN_SQUADS_TIME_LOCK_SECS {
+        bail!(
+            "the Squads multisig time_lock is {} s; need at least {MIN_SQUADS_TIME_LOCK_SECS} s (48 h)",
+            ms.time_lock
+        );
+    }
+    Ok(ms)
+}
+
+/// The upgrade authority is the last step: the bridge's admin must already be
+/// the vault, with no admin transfer in flight. Until then a mistake is still
+/// recoverable by the old upgrade authority.
+pub fn check_admin_handed_over(config: &rand_bridge::state::Config, new: &Pubkey) -> Result<()> {
+    if config.admin != *new {
+        bail!(
+            "the bridge admin is {}, not {new}: finish the admin handover (transfer-admin, then AcceptAdmin from the vault) first; the upgrade authority moves last",
+            config.admin
+        );
+    }
+    if config.pending_admin != Pubkey::default() {
+        bail!(
+            "pending_admin is {}: an admin transfer is in flight; cancel or finish it first",
+            config.pending_admin
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use solana_sdk::signature::Signer;
     use solana_sdk::signer::keypair::Keypair;
+
+    /// Mainnet Squads v4 multisig 5qprF75BYaQvgYq1dVUgAEkUczW5DhiuNn7ahiYu6FR6
+    /// (getAccountInfo, 2026-09-25; threshold 2 of 4, time_lock 0, autonomous),
+    /// the audit's fixture.
+    fn ms_5qpr() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                include_str!(
+                    "../../../daemons/tests/fixtures/squads-v4-multisig-5qprF75BYaQvgYq1dVUgAEkUczW5DhiuNn7ahiYu6FR6.b64"
+                )
+                .trim(),
+            )
+            .unwrap()
+    }
+
+    /// The fixture with threshold 3 (bytes 72..74, after the 8-byte
+    /// discriminator, create_key and config_authority) and its time lock
+    /// (bytes 74..78) set.
+    fn with_time_lock(mut data: Vec<u8>, secs: u32) -> Vec<u8> {
+        data[72..74].copy_from_slice(&3u16.to_le_bytes());
+        data[74..78].copy_from_slice(&secs.to_le_bytes());
+        data
+    }
+
+    fn squads() -> Pubkey {
+        SQUADS_PROGRAM_ID.parse().unwrap()
+    }
+
+    #[test]
+    fn decodes_the_mainnet_squads_multisig_fixture() {
+        let ms = decode_squads_multisig(&ms_5qpr()).unwrap();
+        assert_eq!((ms.threshold, ms.time_lock, ms.members), (2, 0, 4));
+        assert_eq!(ms.config_authority, Pubkey::default());
+        // It is the multisig PDA of its own create_key.
+        let (pda, _) = Pubkey::find_program_address(
+            &[b"multisig", b"multisig", ms.create_key.as_ref()],
+            &squads(),
+        );
+        assert_eq!(
+            pda,
+            "5qprF75BYaQvgYq1dVUgAEkUczW5DhiuNn7ahiYu6FR6"
+                .parse::<Pubkey>()
+                .unwrap()
+        );
+        let mut bad = ms_5qpr();
+        bad[0] ^= 1;
+        assert!(decode_squads_multisig(&bad).is_err(), "discriminator");
+        assert!(
+            decode_squads_multisig(&ms_5qpr()[..90]).is_err(),
+            "truncated"
+        );
+    }
+
+    #[test]
+    fn the_squads_multisig_must_be_autonomous_2_of_n_and_time_locked() {
+        let good = with_time_lock(ms_5qpr(), 172_800);
+        let ms = check_squads_multisig(&squads(), &good).unwrap();
+        assert_eq!((ms.threshold, ms.time_lock), (3, 172_800));
+
+        // The fixture as it is: no time lock.
+        let err = check_squads_multisig(&squads(), &ms_5qpr())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("time_lock"), "{err}");
+        assert!(check_squads_multisig(&squads(), &with_time_lock(ms_5qpr(), 172_799)).is_err());
+        // Not owned by Squads v4.
+        let err = check_squads_multisig(&Pubkey::new_unique(), &good)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not owned by Squads"), "{err}");
+        // A controlled multisig: its config_authority changes members, threshold and time lock alone.
+        let mut controlled = good.clone();
+        controlled[40..72].copy_from_slice(Pubkey::new_unique().as_ref());
+        let err = check_squads_multisig(&squads(), &controlled)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("config_authority"), "{err}");
+        // Threshold 1 is a key; more than the members is unusable.
+        let mut one = good.clone();
+        one[72..74].copy_from_slice(&1u16.to_le_bytes());
+        let err = check_squads_multisig(&squads(), &one)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("threshold"), "{err}");
+        let mut five = good;
+        five[72..74].copy_from_slice(&5u16.to_le_bytes());
+        assert!(check_squads_multisig(&squads(), &five).is_err(), "5 of 4");
+    }
+
+    fn config(admin: Pubkey, pending_admin: Pubkey) -> rand_bridge::state::Config {
+        rand_bridge::state::Config {
+            admin,
+            pending_admin,
+            pauser: Pubkey::new_unique(),
+            paused: false,
+            rand_emitter: [7; 32],
+            current_guardian_set: 0,
+            sequence: 0,
+            bump: 255,
+            protocol_fee_bps: 10,
+        }
+    }
+
+    #[test]
+    fn the_upgrade_authority_moves_only_after_the_admin_did() {
+        let vault = Pubkey::new_unique();
+        assert!(check_admin_handed_over(&config(vault, Pubkey::default()), &vault).is_ok());
+        let err = check_admin_handed_over(&config(Pubkey::new_unique(), vault), &vault)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("admin"), "{err}");
+        let err = check_admin_handed_over(&config(vault, Pubkey::new_unique()), &vault)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pending_admin"), "{err}");
+    }
 
     #[test]
     fn set_upgrade_authority_matches_the_loaders_own_encoding() {
