@@ -656,12 +656,14 @@ fn multisig_rule(
                     ),
                 );
             };
-            let Some(owners) = safe.owners.as_ref().ok().and_then(|r| decode_owners(r))
-            else {
+            let Some(owners) = safe.owners.as_ref().ok().and_then(|r| decode_owners(r)) else {
                 return rule(
                     name,
                     false,
-                    format!("{who} is not a Safe (getOwners(): {})", call_error(&safe.owners)),
+                    format!(
+                        "{who} is not a Safe (getOwners(): {})",
+                        call_error(&safe.owners)
+                    ),
                 );
             };
             let Some(modules) = safe
@@ -697,7 +699,10 @@ fn multisig_rule(
                 return rule(
                     name,
                     false,
-                    format!("{who} getThreshold() = {t} but only {} owner(s)", owners.len()),
+                    format!(
+                        "{who} getThreshold() = {t} but only {} owner(s)",
+                        owners.len()
+                    ),
                 );
             }
             rule(
@@ -837,16 +842,20 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
             observed: why.clone(),
         },
         (Ok(_), None) => rule(name, false, "admin(): unreadable"),
-        (Ok(events), Some(timelock)) => match events.first() {
-            Some(e) if e.granted && e.role == [0u8; 32] && e.account == timelock => rule(
-                name,
-                true,
-                format!("first event RoleGranted(DEFAULT_ADMIN_ROLE, {})", show(&timelock, flavor)),
-            ),
-            first => rule(
-                name,
-                false,
-                format!(
+        (Ok(events), Some(timelock)) => {
+            match events.first() {
+                Some(e) if e.granted && e.role == [0u8; 32] && e.account == timelock => rule(
+                    name,
+                    true,
+                    format!(
+                        "first event RoleGranted(DEFAULT_ADMIN_ROLE, {})",
+                        show(&timelock, flavor)
+                    ),
+                ),
+                first => rule(
+                    name,
+                    false,
+                    format!(
                     "deploy block too late or timelock not freshly deployed (first role event: {})",
                     match first {
                         None => "none".to_string(),
@@ -858,8 +867,9 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
                         ),
                     }
                 ),
-            ),
-        },
+                ),
+            }
+        }
     });
 
     // 6-9. Who holds the timelock's roles.
@@ -1572,10 +1582,16 @@ mod tests {
         );
         let mut bad = logs.clone();
         bad[0]["topics"][0] = serde_json::json!(format!("0x{}", "ab".repeat(32)));
-        assert!(role_events_from_logs(&bad, &TIMELOCK).is_err(), "not a role event");
+        assert!(
+            role_events_from_logs(&bad, &TIMELOCK).is_err(),
+            "not a role event"
+        );
         let mut bad = logs;
         bad[1]["topics"][2] = serde_json::json!(format!("0x{}", "ff".repeat(32)));
-        assert!(role_events_from_logs(&bad, &TIMELOCK).is_err(), "not an address topic");
+        assert!(
+            role_events_from_logs(&bad, &TIMELOCK).is_err(),
+            "not an address topic"
+        );
     }
 
     #[test]
@@ -1695,7 +1711,6 @@ mod tests {
         with(&|r| r.pending_admin = word(&EOA), PENDING);
     }
 
-
     #[test]
     fn the_canonical_safe_singletons_are_the_four_pinned() {
         let got: Vec<[u8; 20]> = CANONICAL_SAFE_SINGLETONS.iter().map(|(_, a)| *a).collect();
@@ -1707,7 +1722,11 @@ mod tests {
         assert_eq!(decode_owners(&abi_owners(0)), Some(vec![]));
         assert_eq!(
             decode_owners(&abi_owners(3)),
-            Some(vec![addr(0x5afe_0000), addr(0x5afe_0001), addr(0x5afe_0002)])
+            Some(vec![
+                addr(0x5afe_0000),
+                addr(0x5afe_0001),
+                addr(0x5afe_0002)
+            ])
         );
         assert_eq!(decode_modules_page(&abi_modules(0)), Some(vec![]));
         assert_eq!(
@@ -1751,12 +1770,14 @@ mod tests {
         for check in [admin, pauser] {
             // A module is enabled: it executes without any owner signature.
             let rules = check(&|s| s.modules = Ok(abi_modules(1)));
-            assert!(rules
-                .iter()
-                .any(|r| r.observed.contains("Safe has modules: a module acts without signatures")));
+            assert!(rules.iter().any(|r| r
+                .observed
+                .contains("Safe has modules: a module acts without signatures")));
             // Slot 0 is not a canonical singleton: a look-alike answering the same views.
             let rules = check(&|s| s.singleton_slot = Ok(word(&DEPLOYER)));
-            assert!(rules.iter().any(|r| r.observed.contains("not a canonical Safe")));
+            assert!(rules
+                .iter()
+                .any(|r| r.observed.contains("not a canonical Safe")));
             check(&|s| s.singleton_slot = Ok(vec![0; 32]));
             check(&|s| s.singleton_slot = Err("refused".into()));
             // More signatures required than there are owners.
@@ -1791,12 +1812,21 @@ mod tests {
         // No event at all.
         let mut r = compliant_reads();
         r.roles = Ok(vec![]);
-        assert_eq!(evm_rules(&r, Flavor::Evm, &policy())[HISTORY].status, Status::Fail);
+        assert_eq!(
+            evm_rules(&r, Flavor::Evm, &policy())[HISTORY].status,
+            Status::Fail
+        );
         // The first grant of DEFAULT_ADMIN_ROLE to someone else: not this timelock's constructor.
         let mut r = compliant_reads();
         r.roles.as_mut().unwrap()[0] = grant("DEFAULT_ADMIN_ROLE", DEPLOYER);
-        r.roles.as_mut().unwrap().push(grant("DEFAULT_ADMIN_ROLE", TIMELOCK));
-        r.roles.as_mut().unwrap().push(revoke("DEFAULT_ADMIN_ROLE", DEPLOYER));
+        r.roles
+            .as_mut()
+            .unwrap()
+            .push(grant("DEFAULT_ADMIN_ROLE", TIMELOCK));
+        r.roles
+            .as_mut()
+            .unwrap()
+            .push(revoke("DEFAULT_ADMIN_ROLE", DEPLOYER));
         only_fails(&r, Flavor::Evm, HISTORY);
     }
 
