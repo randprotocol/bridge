@@ -10,6 +10,7 @@
 //! `SOL_PRIVATE_KEY` (see `keys.rs`). `deploy/sol.sh` drives this.
 
 mod keys;
+mod upgrade_authority;
 
 use std::path::PathBuf;
 
@@ -178,6 +179,35 @@ enum Command {
     Show {
         #[command(flatten)]
         program: ProgramArg,
+    },
+    /// BR-3: hand the program's upgrade authority to a new key (a Squads
+    /// vault, in production), via the BPF Upgradeable Loader's unchecked
+    /// `SetAuthority` (the new authority, a PDA, cannot co-sign offline).
+    /// Signed by the *current* upgrade authority. Refuses without `--yes`.
+    SetUpgradeAuthority {
+        #[command(flatten)]
+        program: ProgramArg,
+        /// The new upgrade authority.
+        #[arg(long)]
+        new: Pubkey,
+        /// Repeated so a typo cannot silently hand authority to the wrong key.
+        #[arg(long)]
+        confirm_new: Pubkey,
+        /// If given (with --vault-index), refuse unless --new is exactly
+        /// this Squads v4 multisig's vault PDA.
+        #[arg(long)]
+        squads_multisig: Option<Pubkey>,
+        /// The Squads vault index of --squads-multisig.
+        #[arg(long, default_value_t = 0)]
+        vault_index: u8,
+        /// Allow an on-curve --new. Normally refused: a Squads vault (or
+        /// any PDA) is never on the Ed25519 curve, so an on-curve key is
+        /// almost certainly a wallet given by mistake.
+        #[arg(long)]
+        allow_on_curve: bool,
+        /// Actually send the transaction; otherwise only print what would happen.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -444,6 +474,17 @@ fn main() -> Result<()> {
                 .context("guardian set account")?;
             let set = GuardianSetAccount::load(&set_data)
                 .map_err(|e| anyhow!("guardian set account: {e}"))?;
+            let program_data = upgrade_authority::program_data_address(&program);
+            let upgrade_authority = match client.get_account_data(&program_data) {
+                Ok(data) => match upgrade_authority::decode_program_data(&data) {
+                    Ok((_, Some(a))) => a.to_string(),
+                    Ok((_, None)) => "immutable".to_string(),
+                    Err(e) => format!("unreadable: {e}"),
+                },
+                Err(e) => {
+                    format!("unknown ({e}); is the program deployed under the upgradeable loader?")
+                }
+            };
             let out = serde_json::json!({
                 "program": program.to_string(),
                 "program_hex": format!("0x{}", hex::encode(program.to_bytes())),
@@ -457,8 +498,101 @@ fn main() -> Result<()> {
                 "guardians": set.keys.iter().map(|k| format!("0x{}", hex::encode(k))).collect::<Vec<_>>(),
                 "guardian_set_expiration": set.expiration_time,
                 "sequence": config.sequence,
+                "program_data": program_data.to_string(),
+                "upgrade_authority": upgrade_authority,
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        Command::SetUpgradeAuthority {
+            program,
+            new,
+            confirm_new,
+            squads_multisig,
+            vault_index,
+            allow_on_curve,
+            yes,
+        } => {
+            let program = program.program;
+            if new != confirm_new {
+                bail!("--new and --confirm-new must match ({new} != {confirm_new})");
+            }
+            if new == Pubkey::default() {
+                bail!("--new must not be the zero pubkey");
+            }
+            if !allow_on_curve {
+                upgrade_authority::check_not_on_curve(&new)?;
+            }
+            if let Some(ms) = squads_multisig {
+                let vault = upgrade_authority::squads_vault_pda(&ms, vault_index);
+                if vault != new {
+                    bail!(
+                        "--new ({new}) is not the vault (index {vault_index}) of --squads-multisig {ms}; expected {vault}"
+                    );
+                }
+            }
+
+            let kp = signer()?;
+            let client = client(&cli.rpc_url);
+            let program_data = upgrade_authority::program_data_address(&program);
+            let data = client.get_account_data(&program_data).with_context(|| {
+                format!("no ProgramData account at {program_data}; is {program} deployed under the upgradeable loader?")
+            })?;
+            let (_, current_authority) = upgrade_authority::decode_program_data(&data)?;
+            let current_authority = current_authority.ok_or_else(|| {
+                anyhow!("{program} is already immutable: its upgrade authority is None")
+            })?;
+
+            if current_authority != kp.pubkey() {
+                bail!(
+                    "signer {} is not the current upgrade authority ({current_authority})",
+                    kp.pubkey()
+                );
+            }
+            if new == current_authority {
+                bail!("--new ({new}) is already the current upgrade authority");
+            }
+
+            let instruction =
+                upgrade_authority::build_set_upgrade_authority(&program, &current_authority, &new);
+
+            println!("program:            {program}");
+            println!("program data:       {program_data}");
+            println!("current authority:  {current_authority}");
+            println!("new authority:      {new}");
+            println!(
+                "instruction:        program_id={} accounts=[{}] data=0x{}",
+                instruction.program_id,
+                instruction
+                    .accounts
+                    .iter()
+                    .map(|m| format!(
+                        "{}{}{}",
+                        m.pubkey,
+                        if m.is_signer { " (signer)" } else { "" },
+                        if m.is_writable { " (writable)" } else { "" },
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                hex::encode(&instruction.data),
+            );
+
+            if !yes {
+                bail!("refusing to send without --yes; re-run with --yes to submit");
+            }
+
+            let sig = send(&cli.rpc_url, &kp, instruction)?;
+            println!("sent in {sig}");
+
+            let data = client
+                .get_account_data(&program_data)
+                .context("re-reading ProgramData after the transaction")?;
+            let (_, after) = upgrade_authority::decode_program_data(&data)?;
+            if after != Some(new) {
+                bail!(
+                    "upgrade authority is {after:?} after the transaction, expected {new}; the cluster may not have finished confirming"
+                );
+            }
+            println!("upgrade authority is now {new}");
         }
     }
     Ok(())
