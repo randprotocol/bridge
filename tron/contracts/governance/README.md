@@ -1,0 +1,3 @@
+# Vendored OpenZeppelin `TimelockController` (Tron)
+
+OpenZeppelin Contracts **v5.0.2**, commit `dbb6104ce834628e473d2173bbc9d47f81a9eec3`: `governance/TimelockController.sol` and exactly its transitive imports, byte-for-byte unmodified, in their original relative layout under `openzeppelin/` (MIT, see `openzeppelin/LICENSE`); the same pin as `evm/lib/openzeppelin-contracts`. Compiled by tronbox with solc 0.8.20 / `paris` (`tron/tronbox.js`), deployed by `node deploy/tron-ops.js deploy-timelock` (BR-3). The `sync` script and `deploy/trx.sh` mirror `evm/src` into `contracts/`; this directory must be excluded from that mirror's `--delete`.

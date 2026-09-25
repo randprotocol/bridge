@@ -51,9 +51,10 @@ if [[ ! -x node_modules/.bin/tronbox ]]; then
   npm ci --no-audit --no-fund >/dev/null   # the tracked lockfile, exactly
 fi
 
-# TronBox compiles what it finds under tron/contracts, a mirror of evm/src.
+# TronBox compiles what it finds under tron/contracts, a mirror of evm/src -- except the
+# tracked governance/ (the vendored OZ TimelockController, BR-3), which --delete must not touch.
 mkdir -p contracts
-rsync -a --delete ../evm/src/ contracts/
+rsync -a --delete --exclude governance/ ../evm/src/ contracts/
 info "mirrored evm/src -> tron/contracts"
 
 # TRON_RPC_URL overrides the host for whichever network was named, so the

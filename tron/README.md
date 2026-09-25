@@ -25,6 +25,12 @@ Run that from inside `tron/`. `tron/contracts/` is git-ignored in this repo (see
 precisely because it is a generated copy of `evm/src/` -- re-run the `rsync` any time `evm/src/`
 changes, rather than editing anything under `tron/contracts/` directly.
 
+The one exception is `tron/contracts/governance/`: the vendored OpenZeppelin v5.0.2
+`TimelockController` (BR-3, see its README), which is tracked and must survive the mirror. Use
+`rsync -a --delete --exclude governance/ ../evm/src/ contracts/` (what `npm run sync` does) whenever
+`--delete` is in play. `node deploy/tron-ops.js deploy-timelock` deploys it from
+`build/contracts/TimelockController.json`.
+
 ## 2. Install TronBox and build
 
 ```
