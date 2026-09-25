@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+bincode = "1"
 borsh = "1"
 bridge-codec = { path = "../../../fullnode/crates/bridge-codec" }
 bs58 = "0.5"
@@ -20,6 +21,7 @@ hex = "0.4"
 rand-bridge = { path = "../programs/rand-bridge", features = ["no-entrypoint"] }
 serde_json = "1"
 solana-client = "2.3"
+solana-loader-v3-interface = { version = "5", features = ["bincode"] }
 solana-sdk = "2.3"
 
 [dev-dependencies]

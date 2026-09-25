@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-codec"
-version = "0.1.0"
+version = "0.5.7"
 
 [[package]]
 name = "brotli"
@@ -3445,6 +3445,7 @@ name = "rand-bridge-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "borsh 1.8.1",
  "bridge-codec",
  "bs58",
@@ -3453,6 +3454,7 @@ dependencies = [
  "rand-bridge",
  "serde_json",
  "solana-client",
+ "solana-loader-v3-interface",
  "solana-sdk",
  "tempfile",
 ]
