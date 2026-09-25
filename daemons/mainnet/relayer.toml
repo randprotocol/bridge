@@ -55,3 +55,11 @@ guardian_addresses = [
 solana_cli = "../solana/target/release/rand-bridge-cli"
 rand_cli = "/Users/dendisuhubdy/rand-node-a/bin-b3c594c/rand"   # the chain-14 release build (fullnode b3c594c); wallet via RAND_KEY, node via RAND_RPC
 listen = "127.0.0.1:7080"
+
+# rand-bridge-audit --config mainnet/relayer.toml --governance (BR-3). Until the
+# handover in docs/governance.md is done every endpoint fails it, as it should.
+# [governance]
+# min_delay_secs = 172800
+# min_threshold = 2
+# solana_multisig = "<the admin Squads v4 multisig, base58>"
+# solana_vault_index = 0

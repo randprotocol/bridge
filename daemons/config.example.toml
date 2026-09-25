@@ -76,3 +76,15 @@ rand_cli = "../../fullnode/target/release/rand"            # the wallet that pay
 rand_cli_args = []
 # recipients_file = "./recipients.json"   # { "<recipient_hash hex>": "rand1…" }
 listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, address}
+
+# ---- governance policy (rand-bridge-audit --governance, BR-3) ------------------
+# Optional; absent, the defaults below apply. The audit fails unless every
+# endpoint's admin is a timelock with at least `min_delay_secs` behind a
+# multisig of at least `min_threshold`, the pauser is a separate multisig, and
+# on Solana the admin and the upgrade authority are the vault of the Squads v4
+# multisig named here.
+# [governance]
+# min_delay_secs = 172800             # 48 h
+# min_threshold = 2
+# solana_multisig = "<Squads v4 multisig account, base58>"
+# solana_vault_index = 0
