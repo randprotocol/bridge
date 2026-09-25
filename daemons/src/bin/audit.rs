@@ -12,13 +12,21 @@
 //! is attested but not yet minted (or a burn not yet released) shows up as a
 //! difference, which is reported rather than hidden. Exits non-zero when an
 //! endpoint is insolvent.
+//!
+//! `--governance` instead checks that no single key controls any endpoint
+//! (BR-3): the admin the pinned OZ timelock, its roles held only by the
+//! configured admin multisig (read from its role logs), the pauser a separate
+//! multisig, the Solana admin and upgrade authority an autonomous Squads
+//! vault. Read-only; exits non-zero when any rule is FAIL or UNKNOWN. The
+//! rules live in `bridge_daemons::gov_audit`.
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use bridge_daemons::config::{address20, pubkey32, Config, EvmKind};
-use bridge_daemons::rpc::{hex_data, JsonRpc};
+use bridge_daemons::config::{address20, pubkey32, Config, EvmConfig, EvmKind, GovernanceConfig};
+use bridge_daemons::gov_audit::{self, EvmReads, Flavor, Rule, SolanaReads, Status};
+use bridge_daemons::rpc::{hex_data, quantity, JsonRpc};
 use bridge_daemons::sources::solana::find_program_address;
 use bridge_daemons::submit::selector;
 use clap::Parser;
@@ -32,6 +40,10 @@ struct Cli {
     /// The bridged token on Rand: a registry index, 64 hex, or `rpl1…`.
     #[arg(long, default_value = "1")]
     token: String,
+    /// Check governance (BR-3) instead of custody: admin, pauser, timelock,
+    /// multisig and upgrade authority on every endpoint.
+    #[arg(long)]
+    governance: bool,
 }
 
 /// The approved backings: (bridge chain, symbol, token, decimals).
@@ -254,10 +266,420 @@ fn attested(native: u128, decimals: u32) -> u128 {
     }
 }
 
+// ---- --governance ------------------------------------------------------------
+
+async fn eth_get_code(rpc: &JsonRpc, address: &[u8; 20]) -> Result<Vec<u8>> {
+    let result = rpc
+        .call(
+            "eth_getCode",
+            json!([format!("0x{}", hex::encode(address)), "latest"]),
+        )
+        .await?;
+    hex_data(&result)
+}
+
+/// `eth_call` whose failure is data: a revert is how a non-timelock answers.
+async fn try_call(rpc: &JsonRpc, to: &[u8; 20], signature: &str) -> Result<Vec<u8>, String> {
+    eth_call(rpc, to, selector(signature).to_vec())
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+fn word_to_address(w: &[u8]) -> Option<[u8; 20]> {
+    (w.len() == 32).then(|| w[12..].try_into().expect("20"))
+}
+
+/// Tron `wallet/getaccount`: how many signatures the account needs, or
+/// `None` when the API is not served (or the account does not exist).
+async fn tron_signers(api: &str, address: &[u8; 20]) -> Option<u32> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .ok()?;
+    let account: serde_json::Value = http
+        .post(format!("{}/wallet/getaccount", api.trim_end_matches('/')))
+        .json(&json!({ "address": format!("41{}", hex::encode(address)) }))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    gov_audit::tron_min_signers(&account)
+}
+
+/// `[from, to]` in inclusive chunks of at most `max` blocks.
+fn log_ranges(from: u64, to: u64, max: u64) -> Vec<(u64, u64)> {
+    let step = max.max(1);
+    let mut out = Vec::new();
+    let mut start = from;
+    while start <= to {
+        let end = to.min(start.saturating_add(step - 1));
+        out.push((start, end));
+        if end == u64::MAX {
+            break;
+        }
+        start = end + 1;
+    }
+    out
+}
+
+/// The timelock's RoleGranted / RoleRevoked history since its deployment.
+async fn role_history(
+    rpc: &JsonRpc,
+    timelock: &[u8; 20],
+    from: u64,
+    max_range: u64,
+) -> Result<Vec<gov_audit::RoleEvent>, (Status, String)> {
+    let unknown = |why: String| {
+        (
+            Status::Unknown,
+            format!("{why}; use an archive-capable RPC that serves eth_getLogs over this range"),
+        )
+    };
+    let head = rpc
+        .call("eth_blockNumber", json!([]))
+        .await
+        .and_then(|v| quantity(&v))
+        .map_err(|e| unknown(format!("eth_blockNumber: {e:#}")))?;
+    let topics = json!([[
+        format!("0x{}", hex::encode(gov_audit::role_granted_topic())),
+        format!("0x{}", hex::encode(gov_audit::role_revoked_topic())),
+    ]]);
+    let mut logs = Vec::new();
+    for (lo, hi) in log_ranges(from, head, max_range) {
+        let filter = json!([{
+            "address": format!("0x{}", hex::encode(timelock)),
+            "fromBlock": format!("0x{lo:x}"),
+            "toBlock": format!("0x{hi:x}"),
+            "topics": topics,
+        }]);
+        let result = rpc
+            .call("eth_getLogs", filter)
+            .await
+            .map_err(|e| unknown(format!("eth_getLogs [{lo}, {hi}] refused: {e:#}")))?;
+        let batch = result
+            .as_array()
+            .ok_or_else(|| unknown(format!("eth_getLogs [{lo}, {hi}]: not an array")))?;
+        logs.extend(batch.iter().cloned());
+    }
+    gov_audit::role_events_from_logs(&logs)
+        .map_err(|e| (Status::Unknown, format!("role logs: {e:#}")))
+}
+
+async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Result<Vec<Rule>> {
+    let (url, flavor) = match endpoint.kind {
+        EvmKind::Evm => (endpoint.rpc.clone(), Flavor::Evm),
+        EvmKind::Tron => (
+            format!("{}/jsonrpc", endpoint.rpc.trim_end_matches('/')),
+            Flavor::Tron,
+        ),
+    };
+    let rpc = JsonRpc::new(&url);
+    let bridge = address20(&endpoint.contract)?;
+    let admin = eth_call(&rpc, &bridge, selector("admin()").to_vec())
+        .await
+        .context("admin()")?;
+    let pauser = eth_call(&rpc, &bridge, selector("pauser()").to_vec())
+        .await
+        .context("pauser()")?;
+    let pending_admin = eth_call(&rpc, &bridge, selector("pendingAdmin()").to_vec())
+        .await
+        .context("pendingAdmin()")?;
+    let admin20 = word_to_address(&admin).ok_or_else(|| anyhow!("admin(): not an address"))?;
+    let pauser20 = word_to_address(&pauser).ok_or_else(|| anyhow!("pauser(): not an address"))?;
+    let admin_code = eth_get_code(&rpc, &admin20)
+        .await
+        .context("eth_getCode(admin)")?;
+    let pauser_code = eth_get_code(&rpc, &pauser20)
+        .await
+        .context("eth_getCode(pauser)")?;
+    let has_code = !admin_code.is_empty();
+
+    // An account without code answers any call with empty data and has no
+    // storage or logs of its own; only ask a contract.
+    let proxy_slots = if has_code {
+        let slot = |s: &'static str| {
+            let rpc = rpc.clone();
+            async move {
+                rpc.call(
+                    "eth_getStorageAt",
+                    json!([format!("0x{}", hex::encode(admin20)), s, "latest"]),
+                )
+                .await
+                .and_then(|v| hex_data(&v))
+                .map_err(|e| format!("{e:#}"))
+            }
+        };
+        match (
+            slot(gov_audit::EIP1967_IMPLEMENTATION_SLOT).await,
+            slot(gov_audit::EIP1967_ADMIN_SLOT).await,
+        ) {
+            (Ok(i), Ok(a)) => Ok((i, a)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        }
+    } else {
+        Ok((vec![0; 32], vec![0; 32]))
+    };
+    let min_delay = if has_code {
+        try_call(&rpc, &admin20, "getMinDelay()").await
+    } else {
+        Ok(Vec::new())
+    };
+    let roles = match policy.deploy_block(endpoint.chain) {
+        None => Err((
+            Status::Fail,
+            format!(
+                "no [governance].timelock_deploy_block for chain {}",
+                endpoint.chain
+            ),
+        )),
+        Some(_) if !has_code => Err((
+            Status::Fail,
+            "admin has no code: no timelock roles to read".to_string(),
+        )),
+        Some(from) => role_history(&rpc, &admin20, from, endpoint.max_log_range).await,
+    };
+
+    let admin_multisig = policy.admin_multisig20(endpoint.chain)?;
+    let (mut admin_multisig_code, mut admin_multisig_threshold, mut tron_admin_multisig_signers) =
+        (Vec::new(), Ok(Vec::new()), None);
+    if let Some(ms) = &admin_multisig {
+        admin_multisig_code = eth_get_code(&rpc, ms)
+            .await
+            .context("eth_getCode(admin multisig)")?;
+        match flavor {
+            Flavor::Evm if !admin_multisig_code.is_empty() => {
+                admin_multisig_threshold = try_call(&rpc, ms, "getThreshold()").await;
+            }
+            Flavor::Evm => {}
+            Flavor::Tron => {
+                admin_multisig_threshold = Err("not asked on Tron".into());
+                if admin_multisig_code.is_empty() {
+                    tron_admin_multisig_signers = tron_signers(&endpoint.rpc, ms).await;
+                }
+            }
+        }
+    }
+
+    let (pauser_threshold, tron_pauser_signers) = match flavor {
+        Flavor::Evm if !pauser_code.is_empty() => {
+            (try_call(&rpc, &pauser20, "getThreshold()").await, None)
+        }
+        Flavor::Evm => (Ok(Vec::new()), None),
+        Flavor::Tron => (
+            Err("not asked on Tron".into()),
+            if pauser_code.is_empty() {
+                tron_signers(&endpoint.rpc, &pauser20).await
+            } else {
+                None
+            },
+        ),
+    };
+    let reads = EvmReads {
+        admin,
+        admin_code,
+        proxy_slots,
+        min_delay,
+        roles,
+        admin_multisig,
+        admin_multisig_code,
+        admin_multisig_threshold,
+        tron_admin_multisig_signers,
+        pauser,
+        pauser_code,
+        pauser_threshold,
+        pending_admin,
+        tron_pauser_signers,
+    };
+    Ok(gov_audit::evm_rules(&reads, flavor, policy))
+}
+
+/// `getAccountInfo`, with the owner, optionally only a prefix of the data.
+async fn solana_account_owned(
+    rpc: &JsonRpc,
+    key: &[u8; 32],
+    prefix: Option<usize>,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let mut opts = json!({ "encoding": "base64", "commitment": "finalized" });
+    if let Some(len) = prefix {
+        opts["dataSlice"] = json!({ "offset": 0, "length": len });
+    }
+    let result = rpc
+        .call(
+            "getAccountInfo",
+            json!([bs58::encode(key).into_string(), opts]),
+        )
+        .await?;
+    let value = &result["value"];
+    let (Some(owner), Some(data)) = (value["owner"].as_str(), value["data"][0].as_str()) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        owner.to_string(),
+        base64::engine::general_purpose::STANDARD.decode(data)?,
+    )))
+}
+
+async fn solana_governance(
+    sol: &bridge_daemons::config::SolanaConfig,
+    policy: &GovernanceConfig,
+) -> Result<Vec<Rule>> {
+    let rpc = JsonRpc::new(&sol.rpc);
+    let program = pubkey32(&sol.program)?;
+    let (config_key, _) = find_program_address(&[b"config"], &program)?;
+    let (owner, data) = solana_account_owned(&rpc, &config_key, Some(97))
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "config PDA {} not found",
+                bs58::encode(config_key).into_string()
+            )
+        })?;
+    if owner != sol.program {
+        bail!("config PDA is owned by {owner}, not the bridge program");
+    }
+    let config = gov_audit::decode_bridge_config(&data)?;
+
+    let loader = gov_audit::BPF_LOADER_UPGRADEABLE;
+    let (owner, data) = solana_account_owned(&rpc, &program, Some(36))
+        .await?
+        .ok_or_else(|| anyhow!("program account not found"))?;
+    let upgrade_authority = if owner != loader {
+        None // not under the upgradeable loader: it cannot be upgraded
+    } else {
+        let programdata = gov_audit::decode_program_account(&data)?;
+        let (owner, data) = solana_account_owned(&rpc, &programdata, Some(45))
+            .await?
+            .ok_or_else(|| anyhow!("ProgramData account not found"))?;
+        if owner != loader {
+            bail!("ProgramData is owned by {owner}");
+        }
+        gov_audit::decode_programdata_authority(&data)?
+    };
+
+    let multisig = policy
+        .solana_multisig
+        .as_deref()
+        .map(pubkey32)
+        .transpose()?;
+    let vault = multisig
+        .map(|ms| gov_audit::squads_vault(&ms, policy.solana_vault_index))
+        .transpose()?;
+    let multisig_state = match multisig {
+        None => Err("no [governance].solana_multisig configured".to_string()),
+        Some(ms) => {
+            let shown = bs58::encode(ms).into_string();
+            match solana_account_owned(&rpc, &ms, None).await? {
+                None => Err(format!("multisig {shown} not found")),
+                Some((owner, _)) if owner != gov_audit::SQUADS_V4 => {
+                    Err(format!("{shown} is owned by {owner}, not Squads v4"))
+                }
+                Some((_, data)) => {
+                    gov_audit::decode_squads_multisig(&data).map_err(|e| format!("{shown}: {e:#}"))
+                }
+            }
+        }
+    };
+    let reads = SolanaReads {
+        config,
+        upgrade_authority,
+        multisig,
+        vault,
+        multisig_state,
+    };
+    Ok(gov_audit::solana_rules(&reads, policy))
+}
+
+fn render_governance(title: &str, rules: &[Rule]) -> String {
+    let mut out = format!("== {title} ==\n");
+    out.push_str(&format!(
+        "  {:<54} {:<8} {}\n",
+        "rule", "status", "observed"
+    ));
+    for r in rules {
+        out.push_str(&format!(
+            "  {:<54} {:<8} {}\n",
+            r.name,
+            r.status.label(),
+            r.observed
+        ));
+    }
+    out
+}
+
+fn unreadable(e: anyhow::Error) -> Vec<Rule> {
+    vec![Rule {
+        name: "endpoint readable".into(),
+        status: Status::Fail,
+        observed: format!("{e:#}"),
+    }]
+}
+
+async fn governance(config: &Config) -> Result<()> {
+    let policy = config.governance_policy();
+    println!(
+        "governance policy: min_delay_secs = {}, min_threshold = {}, solana_multisig = {}, solana_vault_index = {}, timelock_deploy_block = {:?}, admin_multisig = {:?}\n",
+        policy.min_delay_secs,
+        policy.min_threshold,
+        policy.solana_multisig.as_deref().unwrap_or("(unset)"),
+        policy.solana_vault_index,
+        policy.timelock_deploy_block,
+        policy.admin_multisig
+    );
+    let mut failed = 0;
+    let mut endpoints_failing = 0;
+    let chains: Vec<u16> = config.evm.iter().map(|e| e.chain).collect();
+    let coverage = gov_audit::endpoint_coverage(&chains, config.solana.is_some());
+    if !coverage.is_empty() {
+        print!("{}", render_governance("bridge chains", &coverage));
+        println!();
+        failed += gov_audit::failures(&coverage);
+    }
+    for endpoint in &config.evm {
+        let rules = evm_governance(endpoint, &policy)
+            .await
+            .unwrap_or_else(unreadable);
+        let contract = match endpoint.kind {
+            EvmKind::Evm => endpoint.contract.clone(),
+            EvmKind::Tron => gov_audit::tron_base58(&address20(&endpoint.contract)?),
+        };
+        let title = format!("{} (chain {}) {contract}", endpoint.name, endpoint.chain);
+        print!("{}", render_governance(&title, &rules));
+        println!();
+        let n = gov_audit::failures(&rules);
+        failed += n;
+        endpoints_failing += usize::from(n > 0);
+    }
+    if let Some(sol) = &config.solana {
+        let rules = solana_governance(sol, &policy)
+            .await
+            .unwrap_or_else(unreadable);
+        let title = format!("{} (chain 5) {}", sol.name, sol.program);
+        print!("{}", render_governance(&title, &rules));
+        println!();
+        let n = gov_audit::failures(&rules);
+        failed += n;
+        endpoints_failing += usize::from(n > 0);
+    }
+    if failed > 0 {
+        return Err(anyhow!(
+            "governance: {failed} rule(s) not passed on {endpoints_failing} endpoint(s)"
+        ));
+    }
+    println!("governance: every rule passed");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
+    if cli.governance {
+        return governance(&config).await;
+    }
     let mut rows = evm_rows(&config).await?;
     rows.extend(solana_rows(&config).await?);
     let rand = rand_side(&config, &cli.token).await;
@@ -338,6 +760,55 @@ mod tests {
     use super::*;
 
     /// The shape `rand_getTokenSupply` serves (fullnode a2c9896: amounts are decimal strings).
+    #[test]
+    fn chunks_the_role_log_scan_by_max_log_range() {
+        assert_eq!(log_ranges(100, 100, 1000), vec![(100, 100)]);
+        assert_eq!(
+            log_ranges(0, 2499, 1000),
+            vec![(0, 999), (1000, 1999), (2000, 2499)]
+        );
+        assert_eq!(
+            log_ranges(10, 9, 1000),
+            Vec::<(u64, u64)>::new(),
+            "deployed after the head"
+        );
+        assert_eq!(
+            log_ranges(5, 7, 0),
+            vec![(5, 5), (6, 6), (7, 7)],
+            "0 is read as 1"
+        );
+    }
+
+    #[test]
+    fn renders_a_governance_table() {
+        use bridge_daemons::gov_audit::{Rule, Status};
+        let rules = vec![
+            Rule {
+                name: "admin has code".into(),
+                status: Status::Fail,
+                observed: "0xe49b… has no code (a key)".into(),
+            },
+            Rule {
+                name: "no pendingAdmin".into(),
+                status: Status::Pass,
+                observed: "none".into(),
+            },
+            Rule {
+                name: "pauser is a contract".into(),
+                status: Status::Unknown,
+                observed: "?".into(),
+            },
+        ];
+        let text = render_governance("ethereum (chain 2) 0xd6eb", &rules);
+        assert!(text.starts_with("== ethereum (chain 2) 0xd6eb =="));
+        assert!(text.contains("admin has code"));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "title, header, one line per rule:\n{text}");
+        assert!(
+            lines[2].contains("FAIL") && lines[3].contains("PASS") && lines[4].contains("UNKNOWN")
+        );
+    }
+
     #[test]
     fn reads_the_token_supply_rows() {
         let v: serde_json::Value = serde_json::from_str(
