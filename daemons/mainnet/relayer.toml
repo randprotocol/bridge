@@ -41,16 +41,21 @@ rpc = "https://api.mainnet-beta.solana.com"
 program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
 
 [relayer]
+# Set 1 (since 2026-09-25): indices 0-5 are the droplet guardians, reached through
+# mainnet/guardian-tunnels.sh at 127.0.0.1:7171-7176; 6-7 run on this laptop
+# (mainnet/run-guardians-set1.sh). Quorum 6 of 8; the chain-14 Dilithium2 quorum (5 of 6)
+# comes from the droplets, whose PQ keys sit at their own indices.
 guardians = [
-  "http://127.0.0.1:7071", "http://127.0.0.1:7072", "http://127.0.0.1:7073",
-  "http://127.0.0.1:7074", "http://127.0.0.1:7075", "http://127.0.0.1:7076",
+  "http://127.0.0.1:7171", "http://127.0.0.1:7172", "http://127.0.0.1:7173",
+  "http://127.0.0.1:7174", "http://127.0.0.1:7175", "http://127.0.0.1:7176",
+  "http://127.0.0.1:7077", "http://127.0.0.1:7078",
 ]
-# Until the bridged Rand chain serves rand_getBridgeState:
-guardian_set_index = 0
+guardian_set_index = 1
 guardian_addresses = [
-  "0x5B5C007b5638B643a1f6b3C18AFB2a7784a9a2aa", "0x3fACDAf6Ea59Bc75cD18B4CA1844344005e66453",
-  "0x8CD7478ECa7235E8A5265d4B7F638086f25cC9F5", "0x76845347679B878c0016491B19defc59C83E20fB",
-  "0x62fA3e39F56636955DF228917EDD2e9e68F3a957", "0xb3F1409AE0D5b2467229fA74a92c51b15f980445",
+  "0x29851d77b4b5b095cd10f85ad76ee917dcf0f0ac", "0xba56d1cec76b461b7aeb04a559350962070b5f7f",
+  "0xc0a9fc250cfe2ae8ebfb6704777e6be4fbe3e374", "0x6f7196e8448415f667b32cf162e8689f98e6a987",
+  "0x4dc932582668dbfeb24c03b22701f7e93ad53320", "0x6d63947627cac07bb863d36e015a714099a57359",
+  "0x849f4e9e2420e115fa6e6715f53279af0a679c39", "0x98fffdec75284d77433404c1c0fc9f90abb58a9c",
 ]
 solana_cli = "../solana/target/release/rand-bridge-cli"
 rand_cli = "/Users/dendisuhubdy/rand-node-a/bin-b3c594c/rand"   # the chain-14 release build (fullnode b3c594c); wallet via RAND_KEY, node via RAND_RPC

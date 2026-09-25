@@ -1,0 +1,46 @@
+# Mainnet guardian 8 (index 7 in set 1), on the laptop. Key: ~/.rand-bridge/mainnet-set1/guardian-8.key via run-guardians-set1.sh. No PQ seed.
+data_dir = "./data/mainnet/guardian-8"
+poll_secs = 15
+
+[rand]
+rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
+chain_id = 14                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
+emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
+
+[[evm]]
+name = "ethereum"
+chain = 2
+kind = "evm"
+rpc = "https://ethereum-rpc.publicnode.com"
+contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+finality = "finalized"
+start_block = 26048731          # set-1 guardian: no lock after sequence 2 predates this (checked 2026-09-25)
+
+[[evm]]
+name = "bsc"
+chain = 3
+kind = "evm"
+rpc = "https://bsc-rpc.publicnode.com"
+contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+finality = 15
+start_block = 123874607           # publicnode keeps BSC logs only ~1 h back
+max_log_range = 1000
+
+[[evm]]
+name = "tron"
+chain = 4
+kind = "tron"
+rpc = "https://tron-rpc.publicnode.com"   # TronGrid rate-limits one IP without an API key
+contract = "0x0992df85dcce77ded2c0387f1fa9cf98ac859700"   # TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU
+finality = 19
+start_block = 86524636
+max_log_range = 1000
+
+[solana]
+rpc = "https://api.mainnet-beta.solana.com"
+program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
+
+[guardian]
+listen = "127.0.0.1:7078"
+key_env = "GUARDIAN8_PRIV_KEY"
+pq_seed_env = "GUARDIAN8_PQ_SEED"   # unset: the PQ quorum comes from the droplets

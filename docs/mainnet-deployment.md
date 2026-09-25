@@ -81,3 +81,39 @@ work, keep 36 zUSD against 36 USDT in custody). Locks: Ethereum
 `rand-bridge-audit` afterwards: custody 9 USDT on each endpoint == `locked` on Rand, total supply
 3600000000 == Σ locked, custody − locked = 0. The zUSD is held by the chain-14 "tester" wallet
 (`~/.rand-chain14/wallets/`, the fullnode session's).
+
+## Guardian set 1 (2026-09-25)
+
+Set 0 (six keys on one laptop) was rotated to **set 1: eight guardians, quorum 6**, as the first step
+of BR-4 (key custody). Indices 0–5 run on six DigitalOcean droplets (`rand-guardian-1..6`: nyc3,
+sfo3, ams3, fra1, lon1, sgp1), each with its own ECDSA key generated on that droplet and its own
+non-validator chain-14 node, so no guardian takes its view of Rand from a shared RPC. Indices 6–7 run
+on the operator laptop. Losing the laptop leaves 6 of 8 (the bridge keeps running); stealing it yields
+2. Host layout and operation: `docs/guardian-hosts.md`.
+
+Set 1, in index order: `0x29851d77B4b5b095Cd10F85ad76EE917dCf0F0aC`,
+`0xBA56d1cec76b461b7aeB04a559350962070b5f7f`, `0xc0A9FC250cfe2AE8EbFb6704777E6bE4fbe3E374`,
+`0x6F7196e8448415F667B32CF162e8689f98e6A987`, `0x4dC932582668DBfEB24c03B22701F7e93Ad53320`,
+`0x6d63947627CAc07bB863D36E015a714099A57359` (droplets 1–6), `0x849f4e9e2420e115FA6E6715f53279af0a679C39`,
+`0x98fFfdEC75284D77433404C1c0Fc9f90AbB58A9c` (laptop).
+
+One attestation (`rand-bridge-gov rotate`, signed by set 0 indices 0–4, digest
+`0x3ee6a6096430ba52ce3d1511c317684abfffa13696e6639c98c884e071b5224b`) applied everywhere:
+
+| chain | transaction |
+|---|---|
+| Ethereum | `0x32dba04944bfec4ea6efe1a9f4df2476535a5fea80d1ce8c1d12cfd872321ec1` |
+| BSC | `0xe96e76ec01f0ebe2383750c563f567d6ab0de58ec88498cd378f3846e2365dbc` |
+| Tron | `79be29dc9c91d14e3c2dced5beff174a7b122c02c36fd74564601e3c7eca046d` |
+| Solana | `2LZrAjC9WvzZrNFdoXZr5nF3ZXx9UkRwqSDAqgJXTp4NCU7no9fbQ1sibbnhJy6pixsvJd14byoG4pEPYfDgQw9J` |
+| Rand chain 14 | `rand bridge-rotate` with the PQ quorum (indices 0–4), tx `05431f36987a460b86eeafedce78e35d88fc809b1b3b27f0550067e9b64cfec0` |
+
+Set 0 keeps verifying transfers for 86,400 s after each rotation (until about 2026-09-26 03:35 UTC),
+then its keys are worthless.
+
+**Not changed by this rotation:** the chain-14 Dilithium2 set (`pq_guardians`, six keys generated on
+the laptop). Chain 14 cannot rotate it; bridge rules v2 (`RotatePqGuardians`, fullnode `39f3f35`)
+can, from the next chain cut. Until then each droplet also holds the chain-14 PQ seed at its own index,
+so mints reach the 5-of-6 PQ quorum without the laptop, and the laptop still holds all six seeds.
+Each droplet has already generated its successor Dilithium2 seed (`/etc/rand-guardian/pq-next.seed`,
+public key in `pq-next.pub`) for that rotation.

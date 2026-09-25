@@ -6,6 +6,24 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-09-25 — guardian set 1: eight guardians, six on droplets
+
+- **Set 0 → set 1 rotated on all five chains** (user go, 2026-09-25). Set 1 has 8 keys, quorum 6:
+  indices 0–5 run on droplets `rand-guardian-1..6`, 6–7 on the laptop. Tx table in
+  `docs/mainnet-deployment.md`, operation in `docs/guardian-hosts.md`. Each droplet runs its own
+  chain-14 node (no shared Rand RPC, since a lying RPC would get a release signed) and holds the
+  chain-14 PQ seed at its own index. The PQ set itself is unchanged until the chain-15 cut.
+  Set 0 stays valid for transfers until about 2026-09-26 03:35 UTC.
+- **Droplet IPs are NOT in this repo (it is public):** `~/.rand-bridge/mainnet-set1/hosts.txt`.
+  The relayer reaches droplet guardians through `daemons/mainnet/guardian-tunnels.sh`
+  (127.0.0.1:7171-7176). Start the relayer with `daemons/mainnet/run-relayer.sh`. Before 09-25
+  it had been running since 09-24 **without EVM/Tron keys** (releases there were skipped).
+- **publicnode log windows:** BSC is about 1 h, Ethereum about 1 day. The set-0 guardians and the
+  relayer were stuck on Ethereum/BSC from about 09-21 to 09-25 (403s). Nothing was missed, because
+  `sequence()` stayed at 2. Moving a cursor forward is safe only after that check.
+- BR-4 is still open: one DO account, one laptop SSH key reaches every droplet, and the laptop holds
+  all six chain-14 PQ seeds. BR-3 (multisig signers) is on hold until the user decides who holds the Ledgers.
+
 ## State as of 2026-09-20 — LIVE: whitelisted, first mainnet round trip passed
 
 - **Rand chain 14 carries the bridge** (genesis `1cff3b7d…c7ff`, fullnode build `b3c594c` = `a2c9896`
@@ -24,7 +42,7 @@ read it before touching anything there, it is worked on by many sessions in para
   fees exactly 10 bps, supply 0 == Σ locked.
 - **Round 2 (same day): 9 USDT per chain minted and left on Rand** — 36 zUSD (tester wallet)
   against 36 USDT in custody; audit clean. **The user put the guardian rotation ON HOLD** (stay on
-  set 0 until they say otherwise) — do not produce the rotation attestation without a new go.
+  set 0 until they say otherwise) — superseded 2026-09-25: the user gave the go and set 1 is live.
 - **Running on this laptop**: six guardians (`daemons/mainnet/run-guardians.sh`, `GUARDIANi_PQ_SEED`
   mapped from `NEW_GUARDIANi_PQ_SEED`) + one relayer (gas from the deployer keys, Rand wallet
   `~/.rand-chain14/wallets/relayer.key.json`, `rand` at `~/rand-node-a/bin-b3c594c/rand`). Logs in
