@@ -193,6 +193,18 @@ enum Command {
         /// Repeated so a typo cannot silently hand authority to the wrong key.
         #[arg(long)]
         confirm_new: Pubkey,
+        /// If given (with --vault-index), refuse unless --new is exactly
+        /// this Squads v4 multisig's vault PDA.
+        #[arg(long)]
+        squads_multisig: Option<Pubkey>,
+        /// The Squads vault index of --squads-multisig.
+        #[arg(long, default_value_t = 0)]
+        vault_index: u8,
+        /// Allow an on-curve --new. Normally refused: a Squads vault (or
+        /// any PDA) is never on the Ed25519 curve, so an on-curve key is
+        /// almost certainly a wallet given by mistake.
+        #[arg(long)]
+        allow_on_curve: bool,
         /// Actually send the transaction; otherwise only print what would happen.
         #[arg(long)]
         yes: bool,
@@ -469,8 +481,8 @@ fn main() -> Result<()> {
                     Ok((_, None)) => "immutable".to_string(),
                     Err(e) => format!("unreadable: {e}"),
                 },
-                Err(_) => {
-                    "unknown (no ProgramData account; not an upgradeable deployment?)".to_string()
+                Err(e) => {
+                    format!("unknown ({e}); is the program deployed under the upgradeable loader?")
                 }
             };
             let out = serde_json::json!({
@@ -495,6 +507,9 @@ fn main() -> Result<()> {
             program,
             new,
             confirm_new,
+            squads_multisig,
+            vault_index,
+            allow_on_curve,
             yes,
         } => {
             let program = program.program;
@@ -503,6 +518,17 @@ fn main() -> Result<()> {
             }
             if new == Pubkey::default() {
                 bail!("--new must not be the zero pubkey");
+            }
+            if !allow_on_curve {
+                upgrade_authority::check_not_on_curve(&new)?;
+            }
+            if let Some(ms) = squads_multisig {
+                let vault = upgrade_authority::squads_vault_pda(&ms, vault_index);
+                if vault != new {
+                    bail!(
+                        "--new ({new}) is not the vault (index {vault_index}) of --squads-multisig {ms}; expected {vault}"
+                    );
+                }
             }
 
             let kp = signer()?;

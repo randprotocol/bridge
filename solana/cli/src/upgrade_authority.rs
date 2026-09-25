@@ -4,7 +4,7 @@
 //! Pure, unit-tested helpers only; `main.rs` does the RPC and confirmation
 //! dance around them (`set-upgrade-authority`, and `show`'s extra field).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use solana_loader_v3_interface::instruction::set_upgrade_authority;
 use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_sdk::instruction::Instruction;
@@ -14,6 +14,35 @@ use solana_sdk::pubkey::Pubkey;
 /// under `bpf_loader_upgradeable`. Re-exported from `rand_bridge` so the
 /// CLI and the program derive the same address from one place.
 pub use rand_bridge::instruction::program_data_address;
+
+/// The Squads v4 program.
+pub const SQUADS_PROGRAM_ID: &str = "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf";
+
+/// Derives a Squads v4 multisig's vault PDA: `["multisig", ms, "vault",
+/// [index]]` under the Squads program. Vault 0 is the multisig's default
+/// spending/voting vault; a multisig may have several.
+pub fn squads_vault_pda(multisig: &Pubkey, vault_index: u8) -> Pubkey {
+    let squads_program: Pubkey = SQUADS_PROGRAM_ID
+        .parse()
+        .expect("SQUADS_PROGRAM_ID is a valid base58 pubkey");
+    Pubkey::find_program_address(
+        &[b"multisig", multisig.as_ref(), b"vault", &[vault_index]],
+        &squads_program,
+    )
+    .0
+}
+
+/// Refuses an on-curve `new` upgrade authority. A Squads vault (or any
+/// PDA) is never on the Ed25519 curve, so an on-curve key is almost
+/// certainly a wallet given by mistake rather than a vault.
+pub fn check_not_on_curve(new: &Pubkey) -> Result<()> {
+    if new.is_on_curve() {
+        bail!(
+            "{new} is on the Ed25519 curve; a Squads vault is a PDA and is never on the curve. Pass --allow-on-curve to override."
+        );
+    }
+    Ok(())
+}
 
 /// Builds the loader's `SetAuthority` instruction moving `program`'s
 /// upgrade authority from `current` (must sign) to `new`. This is the
@@ -77,9 +106,12 @@ mod tests {
         assert!(!built.accounts[2].is_signer);
         assert!(!built.accounts[2].is_writable);
 
-        // Instruction data: exactly the loader's own `SetAuthority` encoding.
+        // Instruction data: exactly the loader's own `SetAuthority` encoding,
+        // pinned independently of the SDK builder: bincode's 4-byte
+        // little-endian enum index, 4 (SetAuthority is the 5th variant).
         let expected = set_upgrade_authority(&program, &current, Some(&new));
         assert_eq!(built.data, expected.data);
+        assert_eq!(built.data, vec![4u8, 0, 0, 0]);
         assert_eq!(built, expected);
     }
 
@@ -90,7 +122,10 @@ mod tests {
             slot: 42,
             upgrade_authority_address: Some(authority),
         };
-        let bytes = bincode::serialize(&state).unwrap();
+        // A real ProgramData account is the bincode header followed by the
+        // program's own executable bytes; the decoder must ignore them.
+        let mut bytes = bincode::serialize(&state).unwrap();
+        bytes.extend(std::iter::repeat(0xAB).take(100));
 
         let (slot, decoded) = decode_program_data(&bytes).unwrap();
         assert_eq!(slot, 42);
@@ -103,7 +138,8 @@ mod tests {
             slot: 7,
             upgrade_authority_address: None,
         };
-        let bytes = bincode::serialize(&state).unwrap();
+        let mut bytes = bincode::serialize(&state).unwrap();
+        bytes.extend(std::iter::repeat(0xCD).take(100));
 
         let (slot, decoded) = decode_program_data(&bytes).unwrap();
         assert_eq!(slot, 7);
@@ -117,5 +153,32 @@ mod tests {
         };
         let bytes = bincode::serialize(&state).unwrap();
         assert!(decode_program_data(&bytes).is_err());
+    }
+
+    #[test]
+    fn squads_vault_pda_matches_a_known_vector_and_differs_from_the_multisig() {
+        let multisig = Pubkey::new_unique();
+        let squads_program: Pubkey = SQUADS_PROGRAM_ID.parse().unwrap();
+        let (expected, _) = Pubkey::find_program_address(
+            &[b"multisig", multisig.as_ref(), b"vault", &[0u8]],
+            &squads_program,
+        );
+
+        let vault = squads_vault_pda(&multisig, 0);
+        assert_eq!(vault, expected);
+        assert_ne!(vault, multisig);
+
+        // A different index derives a different vault.
+        assert_ne!(squads_vault_pda(&multisig, 1), vault);
+    }
+
+    #[test]
+    fn an_on_curve_key_is_refused_but_a_pda_passes() {
+        let on_curve = Keypair::new().pubkey();
+        assert!(check_not_on_curve(&on_curve).is_err());
+
+        let (pda, _) = Pubkey::find_program_address(&[b"whatever"], &rand_bridge::id());
+        assert!(!pda.is_on_curve());
+        assert!(check_not_on_curve(&pda).is_ok());
     }
 }
