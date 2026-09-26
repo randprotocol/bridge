@@ -15,9 +15,10 @@ read it before touching anything there, it is worked on by many sessions in para
 - The Tron multisig accounts and signers are children of ONE xpub (`TRON_MSIG_XPUB`,
   `TRON_ADMIN_MULTISIG`, `TRON_PAUSE_MULTISIG`, `TRON_MSIG_SIGNER_1..5` in `~/.zshrc`) — user ruled
   this fine for now; the multisig is nominal until the signers are separate people/devices.
-- Next: fund `/0` and `/1` (≥ 110 TRX each), `tron-ops.js multisig-permissions` (new; the account's
-  own key signs, on the user's device — this machine has no key for them), then
-  `timelock-schedule-accept`, 48 h, `timelock-execute-accept`.
+- `/0` and `/1` are multi-signature since 2026-09-26 (admin 3/5 + 3/5, pause 3/5 + 2/5, signers /2–/6).
+  The user pasted the xprv into the bridge session to sign those updates: that one secret controls
+  every signer, so the Tron multisigs are one key until the signers are re-keyed on separate devices.
+  Next: `timelock-schedule-accept`, 48 h, `timelock-execute-accept`. The admin account holds ~10 TRX.
 
 ## State as of 2026-09-25 — guardian set 1: eight guardians, six on droplets
 

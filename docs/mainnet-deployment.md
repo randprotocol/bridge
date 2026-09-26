@@ -137,14 +137,21 @@ The two multi-signature accounts are children of one xpub (`TRON_MSIG_XPUB` in `
 | pause multisig account (the bridge `pauser()`) | /1 | `TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58` |
 | signers 1–5 | /2–/6 | `TCCm5ui5kHeqxgYF69pmb7GF8RcdP5fccG`, `TWk2QEXwM42qAQ5TFKwWo66eg5G2m9v82P`, `TYbQ16vcbRY34gLN5AN25miEZJR29pCqme`, `TBqXBmWnUKeat3Fpgx8e8YKNEVSXXgWe6F`, `TW4M3My781kRpUFZwYBUQfkd1FqEMq3Xrn` |
 
+Multi-signature since 2026-09-26 (funded 110 TRX each from the deployer, `2ff489dc…af20`,
+`f2bb477e…bc22`; each `AccountPermissionUpdate` signed by the account's own key and burning 100 TRX):
+admin `TXbkkf…Rjp` owner 3/5, active id 2 3/5 (TriggerSmartContract only), tx
+`97889ff03ae5f25689944d14cd757c7d0d4d5fb37d6d9d16ffe03ab705ceecfc` (block 86584583); pause `TCimv6…LG58`
+owner 3/5, active id 2 2/5, tx `8675613036534d4903a86492716abf2af8417d76d69314e4be7b1621f803779b`
+(block 86584610). Signers `/2`–`/6`.
+
 **All of them share one seed**, so the Tron multisigs are nominal (one key in substance) until the
 signers move to separate people and devices (BR-4). Not done yet, in order:
 
-1. Fund `/0` and `/1` with ≥ 110 TRX each (activation, the 100 TRX permission-update fee, energy).
-2. `node deploy/tron-ops.js multisig-permissions <account> --signers <the five> --owner-threshold 3
+1. ~~Fund `/0` and `/1`~~ (done).
+2. ~~`node deploy/tron-ops.js multisig-permissions <account> --signers <the five> --owner-threshold 3
    --active-threshold 3` (pause account: `--active-threshold 2`) writes the unsigned
    `AccountPermissionUpdate`; the account's own key (`/0`, `/1`) signs it with permission id 0. After
-   it lands those keys have no power; the audit needs both thresholds ≥ 2.
+   it lands those keys have no power; the audit needs both thresholds ≥ 2.~~ (done)
 3. `timelock-schedule-accept TKmds8…V7k --from TXbkkf…Rjp` (signed by 3 of the signers), then after
    48 h `timelock-execute-accept`. Until the execute, `TWoyj…9mh` is admin and can cancel with
    `transferAdmin(T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb)`.
