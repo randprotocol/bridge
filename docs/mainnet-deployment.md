@@ -148,3 +148,20 @@ signers move to separate people and devices (BR-4). Not done yet, in order:
 3. `timelock-schedule-accept TKmds8…V7k --from TXbkkf…Rjp` (signed by 3 of the signers), then after
    48 h `timelock-execute-accept`. Until the execute, `TWoyj…9mh` is admin and can cancel with
    `transferAdmin(T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb)`.
+
+## Burn and release before the chain-15 cut (2026-09-26)
+
+The tester wallet's 26 zUSD burned on chain 14 (fullnode session), released by the relayer to the
+round-1 addresses, relayer fee 0, 10 bps protocol fee:
+
+| seq | to | Rand burn | release |
+|---|---|---|---|
+| 4 | Ethereum USDT 8.991 → `0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90` | `7cf30a6f722e8b68710aa1a22bfa3b2897f9d45c8de7002c046aaa09994d537a` (h 377101) | `0xbb9e23602c29ecf9c8d3f1947af9d104cd2180d090a16f8d8206087ec6c853e7` |
+| 5 | BSC USDT 8.991 → the same | `7091252ab78d1c287263ab9c73ad23e3ea3c101c8afb9919be5a0e8df487bac9` (h 377189) | `0xf3aae2c9995f3982cbe545192605045d4bc8356599d1de84497d201f7676465f` |
+| 6 | Solana USDT 7.992 → `FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv` | `cf0a826ef16adba662427c83fc89276e15b40210da67be22c84b1258c25e714f` (h 377296) | `2ZzhYvuUBeH1X6KazVsL6mZtBZJgBUhnGiZ8eTdYNrAxmKWGTEpsEjNwQf611mqhSKJoFFSniA2WWLLnSGTr2Mss` |
+
+`rand-bridge-audit` afterwards: custody Tron USDT 9, Solana USDT 1, all else 0; Rand supply 10 zUSD
+== Σ locked; custody − locked = 0. That residue (a third party's 10 zUSD) is carried into the chain-15
+genesis as `locked` Tron-USDT 9 / Sol-USDT 1 and a 10-zUSD genesis note; chain 15 starts at guardian
+set index 1 and burn sequence 7, with `pq_guardians` from
+`~/.rand-bridge/mainnet-set1/pq-guardians-chain15.json`.
