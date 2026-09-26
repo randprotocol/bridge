@@ -4,7 +4,7 @@ poll_secs = 15
 
 [rand]
 rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
-chain_id = 14                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
+chain_id = 15                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
 emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
 
 [[evm]]
@@ -58,7 +58,7 @@ guardian_addresses = [
   "0x849f4e9e2420e115fa6e6715f53279af0a679c39", "0x98fffdec75284d77433404c1c0fc9f90abb58a9c",
 ]
 solana_cli = "../solana/target/release/rand-bridge-cli"
-rand_cli = "/Users/dendisuhubdy/rand-node-a/bin-b3c594c/rand"   # the chain-14 release build (fullnode b3c594c); wallet via RAND_KEY, node via RAND_RPC
+rand_cli = "/Users/dendisuhubdy/rand-node-a/bin-dd2ccbe/rand"   # the chain-15 build (fullnode dd2ccbe, v0.5.8); wallet via RAND_KEY, node via RAND_RPC
 listen = "127.0.0.1:7080"
 
 # rand-bridge-audit --config mainnet/relayer.toml --governance (BR-3). Until the

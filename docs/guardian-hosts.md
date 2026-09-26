@@ -15,8 +15,10 @@ Guardian set 1 has eight guardians and a quorum of 6. The addresses and rotation
 
 ## What each droplet runs
 
-- `rand-node.service`: a chain-14 node (release v0.5.6, sha256 `8edb8dbb…bdbc0d`, checked on
-  install). User `randnode`, data in `/var/lib/randnode/data-14`, RPC on `127.0.0.1:8545` only.
+- `rand-node.service`: since 2026-09-26 13:1x UTC a **chain-15** node (fullnode dd2ccbe, v0.5.8, sha256
+  `61e40aa1…822f`, checked on the droplet; unit override `rand-node.service.d/chain15.conf`), data in
+  `/var/lib/randnode/data-15`, genesis `cc30e085…b6b8`. User `randnode`, RPC on `127.0.0.1:8545` only.
+  The chain-14 binary (`rand-node-14`) and `data-14` are kept until chain 14 is retired.
   It runs with `--verify-chain off`. The default quick replay of the whole chain took 35 minutes on
   a restart, and the guardian was blind for all of it. The node already checked every block while
   syncing. `/etc/needrestart/conf.d/rand.conf` stops unattended-upgrades from restarting the

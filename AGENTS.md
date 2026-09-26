@@ -6,6 +6,14 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-09-26 — bridge on Rand chain 15
+
+- Chain 14 stopped 13:04 UTC; chain 15 (genesis `cc30e085…b6b8`, fullnode dd2ccbe) carries the bridge:
+  guardian set 1 at index 1, burn sequence 7, `pq_guardians` = the droplets' pq-next keys + laptop
+  `pq-next-{7,8}.seed`, 10 zUSD carried over (locked Tron USDT 9 / Sol USDT 1). All daemons moved with
+  `daemons/mainnet/cut-chain15.sh`; `chain_id = 15` everywhere; relayer CLI `~/rand-node-a/bin-dd2ccbe/rand`,
+  300 RAND on chain 15. Audit clean on 15. Before the cut the tester's 26 zUSD were burned and released.
+
 ## State as of 2026-09-26 — BR-3 on Tron: timelock deployed, handover proposed
 
 - User go in the bridge session: Tron steps 0–3 of `docs/governance.md` §4 ran on mainnet. Timelock
