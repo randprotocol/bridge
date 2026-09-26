@@ -85,7 +85,8 @@ EOF
       echo "+ echo '$cursor7' > data/mainnet/$d/cursors/rand.json"
       (( yes )) && echo "$cursor7" > "data/mainnet/$d/cursors/rand.json"
     done
-    echo "then: point [rand].rpc / rand_cli in mainnet/relayer.toml at the chain-15 node and build"
+    # chain 15's CLI (fullnode dd2ccbe, v0.5.8): its note store binds to the chain-15 genesis
+    run sed -i '' -E 's#^rand_cli = "[^"]*"#rand_cli = "'"$HOME"'/rand-node-a/bin-dd2ccbe/rand"#' mainnet/relayer.toml
     ;;
   start-laptop)
     for i in 7 8; do
