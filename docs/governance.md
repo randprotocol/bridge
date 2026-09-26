@@ -4,7 +4,7 @@ What this closes: security-report finding **BR-3** (High), "multisig and timeloc
 contracts; Solana upgrade authority". Design and rationale:
 `docs/superpowers/specs/2026-09-25-br3-governance-design.md`.
 
-**None of the on-chain steps below has been run.** They move control of live custody and are
+**Tron steps 0–3 ran on mainnet on 2026-09-26** (timelock `TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k`, pauser and pending admin set; `docs/mainnet-deployment.md`); the multi-signature account permissions and the accept are still to do. **No other on-chain step below has been run.** They move control of live custody and are
 irreversible once a timelock or multisig accepts. Run them in the order given, one chain at a time,
 and check each with the audit (§5) before the next.
 
@@ -122,6 +122,9 @@ OPS_PRIVATE_KEY=… node deploy/tron-ops.js deploy-timelock <admin multisig acco
 OPS_PRIVATE_KEY=<current admin> node deploy/tron-ops.js set-pauser <pause multisig account> --yes
 OPS_PRIVATE_KEY=<current admin> node deploy/tron-ops.js transfer-admin <timelock> \
   --admin-multisig <admin multisig account> --yes
+# 3b. make the two accounts multi-signature (unsigned, signed by each account's own key; burns 100 TRX each)
+node deploy/tron-ops.js multisig-permissions <admin multisig account> --signers T1,...,T5 --owner-threshold 3 --active-threshold 3
+node deploy/tron-ops.js multisig-permissions <pause multisig account> --signers T1,...,T5 --owner-threshold 3 --active-threshold 2
 # 4. schedule the acceptance (unsigned, for the admin multisig)
 node deploy/tron-ops.js timelock-schedule-accept <timelock> --from <admin multisig account>
 #   → deploy/governance/tron-schedule-accept.json: the multisig's signers sign it within 23 h

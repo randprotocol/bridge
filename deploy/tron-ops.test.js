@@ -221,3 +221,27 @@ test('timelock-execute refuses an operation that is not pending, and builds exec
   assert.equal(tw.built[0].params[2].value, ops.encodeBridgeCall(tw, 'unpause', []));
   assert.ok(fs.existsSync(path.join(out, 'tron-execute-unpause.json')));
 });
+
+test('multisigPermissions: owner and active id 2 need the thresholds, active may only call contracts', () => {
+  const tw = new TronWeb({ fullHost: 'http://127.0.0.1:1' });
+  const signers = ['33', '44', '55', '66', '77'].map((b) => b58(b.repeat(20)));
+  const { owner, actives } = ops.multisigPermissions(tw, b58('99'.repeat(20)), signers, 3, 2);
+  assert.deepEqual([owner.type, owner.threshold, owner.keys.length], [0, 3, 5]);
+  assert.equal(actives.length, 1);
+  assert.deepEqual([actives[0].type, actives[0].threshold], [2, 2]);
+  // TriggerSmartContract (31) only: byte 3, bit 7. Tron's default active mask sets it too.
+  assert.equal(actives[0].operations, '00000080' + '00'.repeat(28));
+  assert.ok(owner.keys.every((k) => k.weight === 1));
+  assert.ok(tw.transactionBuilder.checkPermissions(owner, 0) && tw.transactionBuilder.checkPermissions(actives[0], 2));
+});
+
+test('multisigPermissions refuses a weak or self-including set', () => {
+  const tw = new TronWeb({ fullHost: 'http://127.0.0.1:1' });
+  const account = b58('99'.repeat(20));
+  const signers = ['33', '44', '55'].map((b) => b58(b.repeat(20)));
+  assert.throws(() => ops.multisigPermissions(tw, account, signers, 1, 2), /owner-threshold/);
+  assert.throws(() => ops.multisigPermissions(tw, account, signers, 2, 4), /active-threshold/);
+  assert.throws(() => ops.multisigPermissions(tw, account, [signers[0], signers[0]], 2, 2), /duplicate/);
+  assert.throws(() => ops.multisigPermissions(tw, account, [...signers, account], 2, 2), /itself/);
+  assert.throws(() => ops.multisigPermissions(tw, account, [signers[0]], 2, 2), /at least two/);
+});

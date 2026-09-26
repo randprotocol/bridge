@@ -117,3 +117,34 @@ can, from the next chain cut. Until then each droplet also holds the chain-14 PQ
 so mints reach the 5-of-6 PQ quorum without the laptop, and the laptop still holds all six seeds.
 Each droplet has already generated its successor Dilithium2 seed (`/etc/rand-guardian/pq-next.seed`,
 public key in `pq-next.pub`) for that rotation.
+
+## BR-3 on Tron: timelock deployed, pauser moved, admin handover proposed (2026-09-26)
+
+Steps 0–3 of the Tron sequence in `docs/governance.md` §4 (user go in the bridge session).
+
+| step | what | transaction | block |
+|---|---|---|---|
+| 1 | `TimelockController` [`TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k`](https://tronscan.org/#/contract/TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k), deployed by `THCaN…x2a`: runtime keccak `0xfcb7…5d5b` (the pin), `getMinDelay()` 172800, proposer = executor = canceller `TXbkkf…Rjp` only, `DEFAULT_ADMIN_ROLE` the timelock only; 1,603,010 energy, 172.553 TRX | `f2f0b40da0662c05633c5d6fd3581d4290c19ec0e0ec2ec92404dfcfef897f5a` | 86582871 |
+| 2 | `setPauser(TCimv6…LG58)` from the admin `TWoyj…9mh` | `14b3ced340061ef24260241ace1a20be9c4ca5a3a8668866a2e1f52bf7fefd1b` | 86582898 |
+| 3 | `transferAdmin(TKmds8…V7k)` from the admin: `pendingAdmin()` = the timelock, `admin()` is still `TWoyj…9mh` | `b7cc251c030ec1e707ee11614ecbc44ba1ac8f673de7b6ee9946b0c2d34d20ed` | 86582920 |
+
+The two multi-signature accounts are children of one xpub (`TRON_MSIG_XPUB` in `~/.zshrc`, depth 4 =
+`m/44'/195'/a'/0`, address `/i` = child `i`):
+
+| role | index | address |
+|---|---|---|
+| admin multisig account (the timelock's only proposer/executor/canceller) | /0 | `TXbkkfTiCAJWsTZcBnyemQZsgfKJr2SRjp` |
+| pause multisig account (the bridge `pauser()`) | /1 | `TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58` |
+| signers 1–5 | /2–/6 | `TCCm5ui5kHeqxgYF69pmb7GF8RcdP5fccG`, `TWk2QEXwM42qAQ5TFKwWo66eg5G2m9v82P`, `TYbQ16vcbRY34gLN5AN25miEZJR29pCqme`, `TBqXBmWnUKeat3Fpgx8e8YKNEVSXXgWe6F`, `TW4M3My781kRpUFZwYBUQfkd1FqEMq3Xrn` |
+
+**All of them share one seed**, so the Tron multisigs are nominal (one key in substance) until the
+signers move to separate people and devices (BR-4). Not done yet, in order:
+
+1. Fund `/0` and `/1` with ≥ 110 TRX each (activation, the 100 TRX permission-update fee, energy).
+2. `node deploy/tron-ops.js multisig-permissions <account> --signers <the five> --owner-threshold 3
+   --active-threshold 3` (pause account: `--active-threshold 2`) writes the unsigned
+   `AccountPermissionUpdate`; the account's own key (`/0`, `/1`) signs it with permission id 0. After
+   it lands those keys have no power; the audit needs both thresholds ≥ 2.
+3. `timelock-schedule-accept TKmds8…V7k --from TXbkkf…Rjp` (signed by 3 of the signers), then after
+   48 h `timelock-execute-accept`. Until the execute, `TWoyj…9mh` is admin and can cancel with
+   `transferAdmin(T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb)`.

@@ -66,7 +66,7 @@ listen = "127.0.0.1:7080"
 # [governance]
 # min_delay_secs = 172800
 # min_threshold = 2
-# timelock_deploy_block = { 2 = <block>, 3 = <block>, 4 = <block> }
-# admin_multisig = { 2 = "0x<Safe>", 3 = "0x<Safe>", 4 = "T<multi-signature account>" }
+# timelock_deploy_block = { 2 = <block>, 3 = <block>, 4 = 86582871 }
+# admin_multisig = { 2 = "0x<Safe>", 3 = "0x<Safe>", 4 = "TXbkkfTiCAJWsTZcBnyemQZsgfKJr2SRjp" }
 # solana_multisig = "<the admin Squads v4 multisig, base58>"
 # solana_vault_index = 0

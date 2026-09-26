@@ -6,6 +6,19 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-09-26 — BR-3 on Tron: timelock deployed, handover proposed
+
+- User go in the bridge session: Tron steps 0–3 of `docs/governance.md` §4 ran on mainnet. Timelock
+  `TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k` (pinned code, 48 h, deploy block 86582871), `pauser()` =
+  `TCimv6…LG58`, `pendingAdmin()` = the timelock; `admin()` is still `TWoyj…9mh` until the accept.
+  Tx table in `docs/mainnet-deployment.md`. EVM, BSC and Solana BR-3 steps not run.
+- The Tron multisig accounts and signers are children of ONE xpub (`TRON_MSIG_XPUB`,
+  `TRON_ADMIN_MULTISIG`, `TRON_PAUSE_MULTISIG`, `TRON_MSIG_SIGNER_1..5` in `~/.zshrc`) — user ruled
+  this fine for now; the multisig is nominal until the signers are separate people/devices.
+- Next: fund `/0` and `/1` (≥ 110 TRX each), `tron-ops.js multisig-permissions` (new; the account's
+  own key signs, on the user's device — this machine has no key for them), then
+  `timelock-schedule-accept`, 48 h, `timelock-execute-accept`.
+
 ## State as of 2026-09-25 — guardian set 1: eight guardians, six on droplets
 
 - **Set 0 → set 1 rotated on all five chains** (user go, 2026-09-25). Set 1 has 8 keys, quorum 6:

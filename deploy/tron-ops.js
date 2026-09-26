@@ -22,6 +22,9 @@
 //                       node deploy/tron-ops.js timelock-schedule <timelock> --from <adminMultisig> \
 //                           --call <setToken|unpause|setProtocolFee|withdrawFees|setPauser|transferAdmin> [--args a,b,...]
 //                       node deploy/tron-ops.js timelock-execute <timelock> --from <adminMultisig> --call ... [--args ...]
+//   making the multi-signature accounts themselves (unsigned, for the account's current key):
+//                       node deploy/tron-ops.js multisig-permissions <account> --signers T1,T2,... \
+//                           [--owner-threshold 3] [--active-threshold 3]
 //       (the multisig commands also take [--bridge T...] [--salt 0x<32 bytes>] [--permission-id 2]
 //        [--expire-hours 23] [--out-dir deploy/governance]; execute refuses unless the operation is
 //        pending, and prints whether it is ready and from when)
@@ -317,6 +320,31 @@ function multisigFlags(flags) {
   return { salt, permissionId, expireHours, outDir: flags['out-dir'] || OUT_DIR };
 }
 
+const TRIGGER_SMART_CONTRACT = 31; // protocol ContractType
+const PERMISSION_UPDATE_FEE_SUN = 100_000_000; // getUpdateAccountPermissionFee, 100 TRX
+
+/// The owner and active permission of a native multi-signature account: every signer a key of
+/// weight 1, `ownerThreshold` of them to change the permissions or move TRX, `activeThreshold`
+/// of them (permission id 2) to call contracts and nothing else. The account's own key is not a
+/// signer, so once this lands it has no power of its own. rand-bridge-audit --governance reads
+/// the fewer of the two thresholds (daemons/src/gov_audit.rs tron_min_signers).
+function multisigPermissions(tronWeb, account, signers, ownerThreshold, activeThreshold) {
+  if (!Array.isArray(signers) || signers.length < 2) throw new Error('--signers: at least two');
+  const hexes = signers.map((s) => requireAddress(tronWeb, '--signers', s) && tronWeb.address.toHex(s));
+  if (new Set(hexes).size !== hexes.length) throw new Error('--signers: duplicate signer');
+  if (hexes.includes(tronWeb.address.toHex(account))) throw new Error('--signers must not include the account itself');
+  for (const [name, t] of [['--owner-threshold', ownerThreshold], ['--active-threshold', activeThreshold]]) {
+    if (!Number.isSafeInteger(t) || t < 2 || t > signers.length) throw new Error(`${name} must be in [2, ${signers.length}]`);
+  }
+  const keys = signers.map((address) => ({ address, weight: 1 }));
+  const ops = Buffer.alloc(32);
+  ops[TRIGGER_SMART_CONTRACT >> 3] |= 1 << (TRIGGER_SMART_CONTRACT & 7);
+  return {
+    owner: { type: 0, permission_name: 'owner', threshold: ownerThreshold, keys },
+    actives: [{ type: 2, permission_name: 'contracts', threshold: activeThreshold, operations: ops.toString('hex'), keys }],
+  };
+}
+
 function same(tronWeb, a, b) {
   return tronWeb.address.toHex(a) === tronWeb.address.toHex(b);
 }
@@ -386,6 +414,24 @@ async function governance(tronWeb, command, argv, key) {
       `bridge ${bridge}: transferAdmin(${timelock}) (timelock: pinned code, minDelay ${delay} s, ` +
       `driven by ${adminMultisig}; ${signer} stays admin until it accepts)`,
       flags.yes);
+  } else if (command === 'multisig-permissions') {
+    // Signed by the account's CURRENT owner key (permission 0), once: afterwards only the signers.
+    const account = requireAddress(tronWeb, 'account', args[0]);
+    const signers = String(flags.signers || '').split(',').filter(Boolean);
+    const { owner, actives } = multisigPermissions(tronWeb, account, signers,
+      Number(flags['owner-threshold'] || 3), Number(flags['active-threshold'] || 3));
+    const m = multisigFlags(flags);
+    const acct = await tronWeb.trx.getAccount(account);
+    if (!acct || !acct.address) throw new Error(`${account} is not activated: send it TRX first (>= 101 TRX)`);
+    if ((acct.balance || 0) < PERMISSION_UPDATE_FEE_SUN) {
+      throw new Error(`${account} holds ${(acct.balance || 0) / 1e6} TRX; the permission update burns 100 TRX`);
+    }
+    let tx = await tronWeb.transactionBuilder.updateAccountPermissions(account, owner, null, actives);
+    tx = await tronWeb.transactionBuilder.extendExpiration(tx, Math.floor(m.expireHours * 3600) - 60, { txLocal: true });
+    writeUnsigned(m.outDir, `permissions-${account}`,
+      `${account}: owner ${owner.threshold} of ${signers.length}, active id 2 (TriggerSmartContract only) ` +
+      `${actives[0].threshold} of ${signers.length}, signers ${signers.join(', ')}; burns 100 TRX`,
+      tx, account, 0);
   } else if (command === 'pause') {
     // Sent by the pause multisig: pause() is immediate (no timelock).
     const from = requireAddress(tronWeb, '--from (the pause multisig account)', flags.from);
@@ -445,7 +491,7 @@ async function governance(tronWeb, command, argv, key) {
 
 const GOVERNANCE_COMMANDS = [
   'deploy-timelock', 'set-pauser', 'transfer-admin', 'timelock-schedule-accept', 'timelock-execute-accept',
-  'pause', 'timelock-schedule', 'timelock-execute',
+  'pause', 'timelock-schedule', 'timelock-execute', 'multisig-permissions',
 ];
 
 async function main() {
@@ -498,6 +544,6 @@ if (require.main === module) {
 
 module.exports = {
   timelockConstructorParams, buildTimelockDeployTx, buildTimelockAcceptTx, buildTimelockTx, checkExecutable,
-  checkTimelockTarget, encodeBridgeCall, governance, parseFlags,
+  checkTimelockTarget, encodeBridgeCall, governance, parseFlags, multisigPermissions,
   TRON_ZERO_HEX, TRON_ZERO_BASE58, TRON_TIMELOCK_RUNTIME_KECCAK, ACCEPT_ADMIN,
 };
