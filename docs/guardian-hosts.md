@@ -74,6 +74,10 @@ remove this problem.
      - maintenance then goes through `ssh-add`.
   2. move droplets to a second provider;
   3. hand droplets to separate operators, who re-key by rotation.
+- **Chain-15 PQ set (2026-09-26).** `~/.rand-bridge/mainnet-set1/pq-guardians-chain15.json`: position
+  i = set-1 index i. Positions 0–5 are the droplets' `pq-next.pub`, 6–7 laptop seeds
+  `~/.rand-bridge/mainnet-set1/pq-next-{7,8}.seed` (mode 600). Pause key unchanged from chain 14.
+  `daemons/examples/pq_pubkey.rs` prints a seed's public key (`PQ_SEED` from the environment).
 - **Dilithium2.** The laptop still holds all six chain-14 PQ seeds (`NEW_GUARDIAN<i>_PQ_SEED`), and
   now each droplet holds one too. This closes only at the next chain cut, by rotating to the
   `pq-next` keys.
