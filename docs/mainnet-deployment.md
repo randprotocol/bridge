@@ -152,8 +152,10 @@ signers move to separate people and devices (BR-4). Not done yet, in order:
    --active-threshold 3` (pause account: `--active-threshold 2`) writes the unsigned
    `AccountPermissionUpdate`; the account's own key (`/0`, `/1`) signs it with permission id 0. After
    it lands those keys have no power; the audit needs both thresholds ≥ 2.~~ (done)
-3. `timelock-schedule-accept TKmds8…V7k --from TXbkkf…Rjp` (signed by 3 of the signers), then after
-   48 h `timelock-execute-accept`. Until the execute, `TWoyj…9mh` is admin and can cancel with
+3. ~~`timelock-schedule-accept`~~: scheduled 2026-09-26 12:41 UTC, signed by `/2`–`/4`, tx
+   `bdc6dbe353824e15f165468f36c3c540efe1f064219845dfca7ef8c691cd07b2` (block 86584687), operation
+   `0x41295d326830402237d1eb324e557b8a1451420b41c12d59883fb8eba8ba9a75`, executable from
+   **2026-09-28 12:41 UTC**; then `timelock-execute-accept` (3 signers). Until the execute, `TWoyj…9mh` is admin and can cancel with
    `transferAdmin(T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb)`.
 
 ## Burn and release before the chain-15 cut (2026-09-26)

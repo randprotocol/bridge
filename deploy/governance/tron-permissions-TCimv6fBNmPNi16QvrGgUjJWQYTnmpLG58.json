@@ -1,0 +1,82 @@
+{
+  "description": "BR-3: TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58: owner 3 of 5, active id 2 (TriggerSmartContract only) 2 of 5, signers TCCm5ui5kHeqxgYF69pmb7GF8RcdP5fccG, TWk2QEXwM42qAQ5TFKwWo66eg5G2m9v82P, TYbQ16vcbRY34gLN5AN25miEZJR29pCqme, TBqXBmWnUKeat3Fpgx8e8YKNEVSXXgWe6F, TW4M3My781kRpUFZwYBUQfkd1FqEMq3Xrn; burns 100 TRX",
+  "signers": "UNSIGNED. Owner TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58, permission id 0. Each signer: tx = await tronWeb.trx.multiSign(tx, <own key>, 0); once the threshold is met, tronWeb.trx.sendRawTransaction(tx). Expires 2026-09-27T11:13:45.000Z; rebuild with this command after that.",
+  "transaction": {
+    "visible": false,
+    "txID": "8675613036534d4903a86492716abf2af8417d76d69314e4be7b1621f803779b",
+    "raw_data_hex": "0a022b4c22086fc65c514bbb39be40a8d4c8948e345aab03082e12a6030a3c747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e4163636f756e745065726d697373696f6e557064617465436f6e747261637412e5020a15411e2d9d1116fd8ce4ae18221fb54e7341647380c31290011a056f776e657220033a190a1541188070ee5aafa084527f1ed932138a6b116ab6ac10013a190a1541e3dc629a1c6a17e973113f35a7e972dcc8595c9410013a190a1541f82aecc22bc7aed5d4c428e23af80c436b598f4c10013a190a1541147c1a88b93bf6b7c38f976ca06213195de458f110013a190a1541dc5b4e83cad6f43f7f2763028e20e9620d1fbcc9100122b80108021a09636f6e7472616374732002322000000080000000000000000000000000000000000000000000000000000000003a190a1541188070ee5aafa084527f1ed932138a6b116ab6ac10013a190a1541e3dc629a1c6a17e973113f35a7e972dcc8595c9410013a190a1541f82aecc22bc7aed5d4c428e23af80c436b598f4c10013a190a1541147c1a88b93bf6b7c38f976ca06213195de458f110013a190a1541dc5b4e83cad6f43f7f2763028e20e9620d1fbcc9100170a8f98aed8d34",
+    "raw_data": {
+      "contract": [
+        {
+          "parameter": {
+            "value": {
+              "owner_address": "411e2d9d1116fd8ce4ae18221fb54e7341647380c3",
+              "owner": {
+                "permission_name": "owner",
+                "threshold": 3,
+                "keys": [
+                  {
+                    "address": "41188070ee5aafa084527f1ed932138a6b116ab6ac",
+                    "weight": 1
+                  },
+                  {
+                    "address": "41e3dc629a1c6a17e973113f35a7e972dcc8595c94",
+                    "weight": 1
+                  },
+                  {
+                    "address": "41f82aecc22bc7aed5d4c428e23af80c436b598f4c",
+                    "weight": 1
+                  },
+                  {
+                    "address": "41147c1a88b93bf6b7c38f976ca06213195de458f1",
+                    "weight": 1
+                  },
+                  {
+                    "address": "41dc5b4e83cad6f43f7f2763028e20e9620d1fbcc9",
+                    "weight": 1
+                  }
+                ]
+              },
+              "actives": [
+                {
+                  "type": "Active",
+                  "permission_name": "contracts",
+                  "threshold": 2,
+                  "operations": "0000008000000000000000000000000000000000000000000000000000000000",
+                  "keys": [
+                    {
+                      "address": "41188070ee5aafa084527f1ed932138a6b116ab6ac",
+                      "weight": 1
+                    },
+                    {
+                      "address": "41e3dc629a1c6a17e973113f35a7e972dcc8595c94",
+                      "weight": 1
+                    },
+                    {
+                      "address": "41f82aecc22bc7aed5d4c428e23af80c436b598f4c",
+                      "weight": 1
+                    },
+                    {
+                      "address": "41147c1a88b93bf6b7c38f976ca06213195de458f1",
+                      "weight": 1
+                    },
+                    {
+                      "address": "41dc5b4e83cad6f43f7f2763028e20e9620d1fbcc9",
+                      "weight": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            "type_url": "type.googleapis.com/protocol.AccountPermissionUpdateContract"
+          },
+          "type": "AccountPermissionUpdateContract"
+        }
+      ],
+      "ref_block_bytes": "2b4c",
+      "ref_block_hash": "6fc65c514bbb39be",
+      "expiration": 1790507625000,
+      "timestamp": 1790424825000
+    }
+  }
+}

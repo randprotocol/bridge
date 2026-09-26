@@ -18,7 +18,8 @@ read it before touching anything there, it is worked on by many sessions in para
 - `/0` and `/1` are multi-signature since 2026-09-26 (admin 3/5 + 3/5, pause 3/5 + 2/5, signers /2–/6).
   The user pasted the xprv into the bridge session to sign those updates: that one secret controls
   every signer, so the Tron multisigs are one key until the signers are re-keyed on separate devices.
-  Next: `timelock-schedule-accept`, 48 h, `timelock-execute-accept`. The admin account holds ~10 TRX.
+  acceptAdmin scheduled 2026-09-26 12:41 UTC (op 0x41295d32…9a75); `timelock-execute-accept` from
+  2026-09-28 12:41 UTC, 3 signers. Admin multisig holds ~45 TRX for it.
 
 ## State as of 2026-09-25 — guardian set 1: eight guardians, six on droplets
 
