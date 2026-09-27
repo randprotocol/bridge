@@ -99,6 +99,8 @@ interface IRandBridge {
     error InsufficientFees();
     /// A guardian set larger than an attestation's one-byte counts can carry.
     error TooManyGuardians();
+    /// A token call re-entered `lock` or `release`.
+    error ReentrantCall();
 
     function lock(address token, uint256 amount, bytes32 randRecipient, uint256 relayerFee, uint32 nonce)
         external

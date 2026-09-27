@@ -861,7 +861,9 @@ or not at all:
   by Rand's `check_attest` (`AmountTooLarge`).
 - On Rand the payload's `to` is `blake3("rand-shielded-recipient", pk || kem_ek)` of the
   recipient's shielded address; the endpoints treat it as opaque.
-- Effects before interactions on every release.
+- Effects before interactions on every release; on the EVM/TVM endpoints `lock` and `release` also
+  share a reentrancy lock (`ReentrantCall`) — in code since v0.6, not in the contracts deployed
+  before it.
 
 And the consensus-facing constants on Rand: `Action` tags 7 and 8, `MAX_ATTESTATION_BYTES`, the
 hash domains `rand-bridge-asset`, `rand-bridge-state`, `rand-asset-registry` and

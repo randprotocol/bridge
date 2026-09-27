@@ -9,6 +9,7 @@ import {EthereumRandBridge} from "../src/EthereumRandBridge.sol";
 import {BscRandBridge} from "../src/BscRandBridge.sol";
 import {TronRandBridge} from "../src/TronRandBridge.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {ReentrantERC20} from "./mocks/ReentrantERC20.sol";
 
 /// Unit tests for `RandBridgeBase` through `EthereumRandBridge` (chain id
 /// 2), covering every rule in design Section 5.1: normalisation on lock,
@@ -532,6 +533,87 @@ contract RandBridgeTest is Test {
         bytes memory payload = _transferPayload(1000, _word(address(t8)), 2, _word(address(bridge)), 2, 0);
         vm.expectRevert(IRandBridge.BadRecipient.selector);
         bridge.release(_fromRand(payload));
+    }
+
+    // ------------------------------------------------------------------
+    // reentrancy (defence in depth: checks-effects-interactions and the
+    // balance-delta checks already make every reentry below fail closed)
+    // ------------------------------------------------------------------
+
+    /// A whitelisted token whose transfer hook re-enters the bridge, with
+    /// `lockedAmount` of it in custody already.
+    function _reentrantToken(uint256 lockedAmount) internal returns (ReentrantERC20 evil) {
+        evil = new ReentrantERC20();
+        vm.prank(admin);
+        bridge.setToken(address(evil), true, 0, 0);
+        evil.mint(user, lockedAmount);
+        vm.startPrank(user);
+        evil.approve(address(bridge), type(uint256).max);
+        if (lockedAmount != 0) bridge.lock(address(evil), lockedAmount, keccak256("rand-recipient"), 0, 0);
+        vm.stopPrank();
+    }
+
+    function _assertReentryRefused(ReentrantERC20 evil) internal {
+        assertTrue(evil.reentered(), "the token re-entered");
+        assertFalse(evil.innerOk(), "the re-entered call must fail");
+        assertEq(evil.innerRevert(), abi.encodeWithSelector(IRandBridge.ReentrantCall.selector), "refused by the guard");
+    }
+
+    function test_lock_refuses_reentry_into_lock_from_the_token() public {
+        ReentrantERC20 evil = _reentrantToken(0);
+        evil.mint(user, 1000);
+        evil.mint(address(evil), 1000);
+        evil.selfApprove(address(bridge));
+        evil.arm(address(bridge), abi.encodeCall(bridge.lock, (address(evil), 1000, keccak256("inner"), 0, 0)));
+
+        vm.prank(user);
+        bridge.lock(address(evil), 1000, keccak256("rand-recipient"), 0, 0);
+
+        _assertReentryRefused(evil);
+        assertEq(bridge.sequence(), 1, "one message published");
+        assertEq(bridge.custody(address(evil)), 1000, "custody holds the outer lock only");
+    }
+
+    function test_lock_refuses_reentry_into_release_from_the_token() public {
+        ReentrantERC20 evil = _reentrantToken(500);
+        bytes memory att = _fromRand(_releasePayload(address(evil), 500, 0));
+        evil.mint(user, 1000);
+        evil.arm(address(bridge), abi.encodeCall(bridge.release, (att)));
+
+        vm.prank(user);
+        bridge.lock(address(evil), 1000, keccak256("rand-recipient"), 0, 0);
+
+        _assertReentryRefused(evil);
+        assertFalse(bridge.consumed(_digestOf(att)), "the burn stays releasable");
+        assertEq(bridge.custody(address(evil)), 1500, "nothing left custody");
+    }
+
+    function test_release_refuses_reentry_into_release_from_the_token() public {
+        ReentrantERC20 evil = _reentrantToken(2000);
+        bytes memory outer = _fromRand(_releasePayload(address(evil), 1000, 0));
+        bytes memory inner = _fromRand(_releasePayload(address(evil), 1000, 0));
+        evil.arm(address(bridge), abi.encodeCall(bridge.release, (inner)));
+
+        bridge.release(outer);
+
+        _assertReentryRefused(evil);
+        assertTrue(bridge.consumed(_digestOf(outer)), "the outer release completed");
+        assertFalse(bridge.consumed(_digestOf(inner)), "the inner burn stays releasable");
+        assertEq(evil.balanceOf(recipient), 1000, "paid once");
+        assertEq(bridge.custody(address(evil)), 1000, "custody fell by the outer amount only");
+    }
+
+    function test_release_refuses_reentry_into_lock_from_the_token() public {
+        ReentrantERC20 evil = _reentrantToken(1000);
+        evil.mint(address(evil), 1000);
+        evil.selfApprove(address(bridge));
+        evil.arm(address(bridge), abi.encodeCall(bridge.lock, (address(evil), 1000, keccak256("inner"), 0, 0)));
+
+        bridge.release(_fromRand(_releasePayload(address(evil), 1000, 0)));
+
+        _assertReentryRefused(evil);
+        assertEq(bridge.sequence(), 1, "only the setup lock was published");
+        assertEq(bridge.custody(address(evil)), 0, "custody drained by the release alone");
     }
 
     // ------------------------------------------------------------------

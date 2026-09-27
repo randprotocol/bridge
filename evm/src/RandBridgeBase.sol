@@ -32,6 +32,9 @@ interface IERC20Metadata {
 /// digest is marked consumed and custody/window counters are updated
 /// *before* any token call, so a token with a callback in its transfer
 /// hook cannot re-enter into a second release of the same attestation.
+/// `lock` and `release` also share a reentrancy lock (`nonReentrant`), so
+/// a token call can re-enter neither; that holds even if a later change
+/// breaks the ordering or the balance-delta checks.
 abstract contract RandBridgeBase is IRandBridge {
     using SafeTransfer for address;
 
@@ -91,6 +94,11 @@ abstract contract RandBridgeBase is IRandBridge {
     /// Sequence of the next message this emitter publishes; starts at 0.
     uint64 public override sequence;
 
+    /// `lock`/`release` reentrancy lock: 1 free, 2 entered. Declared last
+    /// so every slot above keeps its place; `evm_version = paris` has no
+    /// transient storage, so it is an ordinary slot kept warm at 1.
+    uint256 private _entered;
+
     constructor(address admin_, address pauser_, bytes32 randEmitter_, address[] memory guardians) {
         if (admin_ == address(0) || randEmitter_ == bytes32(0) || guardians.length == 0) revert ZeroAddress();
         _checkKeys(guardians);
@@ -101,6 +109,7 @@ abstract contract RandBridgeBase is IRandBridge {
         pauser = pauser_;
         _guardianSets[0].keys = guardians;
         protocolFeeBps = DEFAULT_PROTOCOL_FEE_BPS;
+        _entered = 1;
 
         emit AdminTransferred(admin_);
         emit PauserSet(pauser_);
@@ -198,6 +207,7 @@ abstract contract RandBridgeBase is IRandBridge {
     function lock(address token, uint256 amount, bytes32 randRecipient, uint256 relayerFee, uint32 nonce)
         external
         override
+        nonReentrant
         returns (uint64)
     {
         _checkFork();
@@ -267,7 +277,7 @@ abstract contract RandBridgeBase is IRandBridge {
     /// Section 5.1's release: verify a Rand burn attestation and pay it
     /// out of custody. Anyone may submit; the submitter collects the
     /// payload's relayer fee.
-    function release(bytes calldata attestation) external override {
+    function release(bytes calldata attestation) external override nonReentrant {
         _checkFork();
         if (paused) revert IsPaused();
 
@@ -447,6 +457,15 @@ abstract contract RandBridgeBase is IRandBridge {
     // ------------------------------------------------------------------
     // roles and configuration
     // ------------------------------------------------------------------
+
+    /// One `lock` or `release` at a time: a token whose transfer calls back
+    /// into the bridge is refused `ReentrantCall`.
+    modifier nonReentrant() {
+        if (_entered == 2) revert ReentrantCall();
+        _entered = 2;
+        _;
+        _entered = 1;
+    }
 
     modifier onlyAdmin() {
         _requireAdmin();
