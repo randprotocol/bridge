@@ -10,7 +10,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use bridge_daemons::api::GuardianClient;
 use bridge_daemons::config::{address20, hex32, Config, EvmKind, RelayerConfig};
-use bridge_daemons::relayer::{self, Destinations, EndpointSubmitter, GuardianSet, Progress};
+use bridge_daemons::relayer::{
+    self, Destinations, EndpointSubmitter, GuardianSet, Progress, RegistrationError,
+};
 use bridge_daemons::rpc::JsonRpc;
 use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource};
 use bridge_daemons::store::Store;
@@ -122,15 +124,16 @@ struct Registration {
 }
 
 async fn register(State(store): State<Arc<Store>>, Json(r): Json<Registration>) -> StatusCode {
-    let Ok(hash) = hex32(&r.recipient_hash) else {
-        return StatusCode::BAD_REQUEST;
-    };
-    if !r.address.starts_with("rand1") || r.address.len() > 8192 {
-        return StatusCode::BAD_REQUEST;
-    }
-    match relayer::register_recipient(&store, &hash, &r.address) {
+    match relayer::register_request(&store, &r.recipient_hash, &r.address) {
         Ok(()) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Err(RegistrationError::BadRequest(_) | RegistrationError::HashMismatch) => {
+            StatusCode::BAD_REQUEST
+        }
+        Err(RegistrationError::AlreadyRegistered) => StatusCode::CONFLICT,
+        Err(RegistrationError::Store(e)) => {
+            tracing::error!("registering a recipient: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
 
@@ -160,8 +163,19 @@ async fn main() -> Result<()> {
             std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
         let table: BTreeMap<String, String> =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+        // The operator's table may replace an entry, but it may not name an
+        // address its hash does not commit to: that deposit could never be
+        // minted.
         for (hash, address) in table {
-            relayer::register_recipient(&store, &hex32(&hash)?, &address)?;
+            let hash = hex32(&hash)?;
+            if relayer::recipient_hash(&address)? != hash {
+                return Err(anyhow!(
+                    "{}: {} is not the hash of its address",
+                    file.display(),
+                    hex::encode(hash)
+                ));
+            }
+            relayer::register_recipient(&store, &hash, &address)?;
         }
     }
     if let Some(listen) = &section.listen {

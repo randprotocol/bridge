@@ -49,7 +49,11 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
 - **Deposits need the recipient's address.** A lock names only the 32-byte recipient hash, but
   minting seals a note to the full `rand1…` address. Whoever wants a deposit relayed registers the
   address (`POST /v1/recipients`, or `recipients_file`). The chain refuses a mint whose address does
-  not hash to the lock's recipient, so a wrong registration can only fail, never misdirect.
+  not hash to the lock's recipient, so a wrong registration can only fail, never misdirect. The
+  relayer refuses it first: an address is registered only under the hash it hashes to (the hash is
+  its own authorization, no other credential exists), and the API never replaces an entry that
+  maps to a different address (409) — before this, anyone who reached the port could re-point a
+  depositor's hash and stall that deposit.
 - For a deposit on a chain that lists `pq_guardians`, also collects the co-signatures, verifies
   each under the key at its guardian's index, keeps exactly a quorum and hands it to the wallet
   (`rand bridge-mint @att --pq @pq.json --to …`); short of either quorum nothing is submitted.

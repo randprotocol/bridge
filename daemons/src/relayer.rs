@@ -173,6 +173,81 @@ pub fn register_recipient(store: &Store, recipient_hash: &[u8; 32], address: &st
     )
 }
 
+/// The domain of a Rand recipient hash: a lock names
+/// `blake3("rand-shielded-recipient" || pk || kem_ek)` of the shielded
+/// address (fullnode `ShieldedAddress::recipient_hash`).
+const RECIPIENT_DOMAIN: &[u8] = b"rand-shielded-recipient";
+/// `rand1` + base58(pk[32] || kem_ek[1184]).
+const ADDRESS_PREFIX: &str = "rand1";
+const ADDRESS_RAW_LEN: usize = 32 + 1184;
+/// The real text form is 1665–1666 characters; the node refuses anything
+/// over 2000.
+const ADDRESS_MAX_CHARS: usize = 2000;
+
+/// The recipient hash a lock names for `address`.
+pub fn recipient_hash(address: &str) -> Result<[u8; 32]> {
+    if address.len() > ADDRESS_MAX_CHARS {
+        return Err(anyhow!("address is too long"));
+    }
+    let rest = address
+        .strip_prefix(ADDRESS_PREFIX)
+        .ok_or_else(|| anyhow!("address must start with {ADDRESS_PREFIX}"))?;
+    let raw = bs58::decode(rest)
+        .into_vec()
+        .map_err(|_| anyhow!("address is not base58"))?;
+    if raw.len() != ADDRESS_RAW_LEN {
+        return Err(anyhow!(
+            "address decodes to {} bytes, expected {ADDRESS_RAW_LEN}",
+            raw.len()
+        ));
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(RECIPIENT_DOMAIN);
+    h.update(&raw);
+    Ok(*h.finalize().as_bytes())
+}
+
+/// Why `POST /v1/recipients` refused a registration.
+#[derive(Debug)]
+pub enum RegistrationError {
+    /// Malformed hash or address: the caller's mistake.
+    BadRequest(String),
+    /// The address is well-formed but is not the one the hash names.
+    HashMismatch,
+    /// The hash already maps to a different address; only the operator
+    /// (the store, or `recipients_file`) can change it.
+    AlreadyRegistered,
+    /// The store failed.
+    Store(anyhow::Error),
+}
+
+/// One registration as the relayer's HTTP API receives it.
+///
+/// The request carries its own authorization: the hash is a commitment to
+/// the address, so an address is accepted only for the hash it hashes to,
+/// and nobody but the depositor (who chose the address) can name a second
+/// preimage. Anyone may register, as randbridge.org's status service does
+/// for its users; nobody can point a depositor's hash at another address,
+/// and an existing entry is never replaced through the API.
+pub fn register_request(
+    store: &Store,
+    recipient_hash_hex: &str,
+    address: &str,
+) -> std::result::Result<(), RegistrationError> {
+    let hash = crate::config::hex32(recipient_hash_hex)
+        .map_err(|e| RegistrationError::BadRequest(format!("recipient_hash: {e}")))?;
+    let derived =
+        recipient_hash(address).map_err(|e| RegistrationError::BadRequest(e.to_string()))?;
+    if derived != hash {
+        return Err(RegistrationError::HashMismatch);
+    }
+    match recipient_address(store, &hash).map_err(RegistrationError::Store)? {
+        Some(held) if held == address => Ok(()),
+        Some(_) => Err(RegistrationError::AlreadyRegistered),
+        None => register_recipient(store, &hash, address).map_err(RegistrationError::Store),
+    }
+}
+
 /// What happened to one pending message this round.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Progress {
