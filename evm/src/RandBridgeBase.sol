@@ -541,7 +541,11 @@ abstract contract RandBridgeBase is IRandBridge {
         _push(token, to, amount);
     }
 
+    /// Moves the pause role. Never to zero: that would quietly leave
+    /// pausing to the admin alone (a timelock on mainnet). The constructor
+    /// still takes a zero `pauser_` for a deployment that names none yet.
     function setPauser(address pauser_) external override onlyAdmin {
+        if (pauser_ == address(0)) revert ZeroAddress();
         pauser = pauser_;
         emit PauserSet(pauser_);
     }

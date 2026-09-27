@@ -936,6 +936,15 @@ contract RandBridgeTest is Test {
         bridge.setPauser(user);
     }
 
+    function test_setPauser_refuses_the_zero_address() public {
+        // Zero would silently leave pausing to the admin alone (a timelock
+        // on mainnet): a typo must not disarm the pause quorum.
+        vm.expectRevert(IRandBridge.ZeroAddress.selector);
+        vm.prank(admin);
+        bridge.setPauser(address(0));
+        assertEq(bridge.pauser(), pauser, "pauser unchanged");
+    }
+
     function test_setToken_records_decimals_and_caps() public {
         vm.expectEmit(true, false, false, true, address(bridge));
         emit TokenConfigured(address(t18), true, 5 ether, 50 ether);
