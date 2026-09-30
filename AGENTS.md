@@ -27,6 +27,19 @@ read it before touching anything there, it is worked on by many sessions in para
   (chain, sequence), so archive chains 2–4 before repointing or the guardians halt on a false
   equivocation. The old Tron endpoint's `acceptAdmin` was never executed (admin still the EOA, which
   can pause it); BR-3 has to be redone for the new Tron endpoint.
+- **Order ruled by the user (2026-09-30):** cut chain 19 FIRST; once the fleet, all eight guardians
+  and the relayer have been healthy for 10 minutes, `setToken` on the new endpoints (never before
+  2026-10-01 12:23:40 UTC), then at once the consume step, then the round trips. So the cut runs with
+  the new endpoints at sequence 0 (`FLOOR_AHEAD_OK=1`, `MIN_INBOUND_2/3/4=1`) and the daemons' cursors
+  start at sequence 1 from the deploy blocks (an EVM source skips a lower sequence as already seen).
+  Cut scripts: fullnode branch `feat/chain19-cut` (`358bca3`); chain 19 runs on the released v0.6.7.
+  The wallet apps are aimed at 19 on clients `feat/chain-19-default`; 0.6.6 ships at the cut.
+- **The relayer moves to a droplet right after the cut (user ruling):** `rand-relayer-1` (sgp1,
+  4 vCPU / 8 GB, SSH-only firewall; IPs in `~/.rand-bridge/relayer-host/host.txt`), paying gas with
+  the deployer keys, copied there at the user's choice. Provisioned and built on 2026-09-30, no key on
+  it yet. randbridge.org had lost the laptop (its tailnet address went stale), so the site's deposits
+  are off until the relayer is reachable again. Stop the laptop relayer before starting the droplet
+  one: two relayers on one EVM key fight over nonces.
 - The laptop daemons had been down since 09-29 08:22 UTC (reboot); restarted 09-30 12:20 UTC on
   chain 18 (chain 16, 17 and 18 cutovers were run by fullnode sessions; `chain_id = 18`, relayer CLI
   `~/rand-node-a/bin-v067rc1/rand`). First mints and burn on the gas-model chain passed.
