@@ -85,3 +85,25 @@ remove this problem.
   `pq-next` keys.
 - **Set 0.** `GUARDIAN<i>_PRIV_KEY` in `~/.zshrc` expire with set 0's grace period (about
   2026-09-26 03:35 UTC). After that they can be deleted.
+
+## The relayer host (from the chain-19 cut)
+
+The relayer moves off the laptop to the droplet `rand-relayer-1` (DigitalOcean sgp1, 4 vCPU / 8 GB:
+it proves each mint's fee bundle itself, about 6 GB a proof). Its IPs are in
+`~/.rand-bridge/relayer-host/host.txt`, not in this repository; the firewall `rand-relayer-fw`
+allows SSH only. It pays gas with copies of the deployer keys, at the owner's choice
+(2026-09-30), in `/etc/rand-relayer/env` (root, mode 600).
+
+- `rand-relayer.service` (user `relayer`, config `/etc/rand-relayer.toml`, data
+  `/var/lib/rand-relayer/data`, wallet `/var/lib/rand-relayer/wallet`, API on `127.0.0.1:7080`).
+- `rand-relayer-tunnel@1..6.service`: one SSH forward per guardian droplet, as that droplet's
+  `tunnel` user with the relayer's own key (`permitopen 127.0.0.1:7071`, and on host 6 also
+  `:8545`, the Rand RPC the relayer uses). Guardian i answers on `127.0.0.1:717<i>`.
+- The laptop guardians 7 and 8 reach it through `daemons/mainnet/guardian-reverse-tunnel.sh`
+  (reverse forward to `127.0.0.1:7077` and `:7078`, `permitlisten` only). While the laptop is off
+  the six droplet guardians are exactly a quorum.
+- randbridge.org keeps its own forward-only SSH tunnel to those loopback ports (its key, user
+  `tunnel`, `permitopen` 7080, 7171–7176, 7077, 7078).
+- `daemons/mainnet/move-relayer-to-droplet.sh check | move | back` moves the relayer's config, data
+  directory and Rand wallet across and back; one relayer at a time, since two on one EVM key race
+  each other's nonces.
