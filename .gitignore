@@ -8,3 +8,6 @@ target/
 *-keypair.json
 id.json
 *.bak
+
+# per-chain backups the cutover steps leave beside the live configs
+daemons/mainnet/*.toml.chain*
