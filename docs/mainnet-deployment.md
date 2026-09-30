@@ -174,3 +174,71 @@ round-1 addresses, relayer fee 0, 10 bps protocol fee:
 genesis as `locked` Tron-USDT 9 / Sol-USDT 1 and a 10-zUSD genesis note; chain 15 starts at guardian
 set index 1 and burn sequence 7, with `pq_guardians` from
 `~/.rand-bridge/mainnet-set1/pq-guardians-chain15.json`.
+
+## Endpoint redeploy: reentrancy lock and `setPauser(0)` (2026-09-30)
+
+The Ethereum, BSC and Tron endpoints cannot be upgraded, so scan fixes R1 (`e5229f0`, `lock` and
+`release` share a reentrancy lock) and R3 (`6737c57`, `setPauser` refuses the zero address) ship as
+new contracts, built from bridge `d9cde20` (`evm/src` identical to `93a5956`). The Solana program is
+unchanged and stays where it is. **The new endpoints are dark**: no token is enabled on any of them,
+the daemons still watch the old ones, and only a Rand genesis that names them (chain 19) can mint
+from them. The 09-19 endpoints above stay live for chain 18 until that cut.
+
+| chain | new endpoint | deployment | block | rotation 0→1 replayed | set 0 valid until (UTC) |
+|---|---|---|---|---|---|
+| Ethereum (2) | [`0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA`](https://etherscan.io/address/0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA) | [`0x0ebdaf3fa1162739f746fe978ff81d130dfc9823fac7a2dbc2f0f80181592d9b`](https://etherscan.io/tx/0x0ebdaf3fa1162739f746fe978ff81d130dfc9823fac7a2dbc2f0f80181592d9b) | 26090266 | [`0x0774e23db48384b5e532098c9a87342c06831397ea593a95b502696696daa4cb`](https://etherscan.io/tx/0x0774e23db48384b5e532098c9a87342c06831397ea593a95b502696696daa4cb) (26090272) | 2026-10-01 12:23:35 |
+| BNB Smart Chain (3) | [`0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA`](https://bscscan.com/address/0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA) | [`0xa3be34020452837c0ad06d07c80ba4ea38d8e7a8e612bf7cd0ca83d7e9d15dce`](https://bscscan.com/tx/0xa3be34020452837c0ad06d07c80ba4ea38d8e7a8e612bf7cd0ca83d7e9d15dce) | 124907817 | [`0xbb15dff6c0de54512b524f3e627282722f649d312d5d43fe2594c5756d9b28d0`](https://bscscan.com/tx/0xbb15dff6c0de54512b524f3e627282722f649d312d5d43fe2594c5756d9b28d0) (124907946) | 2026-10-01 12:23:40 |
+| Tron (4) | [`TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me`](https://tronscan.org/#/contract/TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me) (hex `416410797df959987a5baf65b5fab97edeb34d5163`) | [`1f60caa038b48864aaaf29432f408f8df338f2b5e289a7f5528d118790a02842`](https://tronscan.org/#/transaction/1f60caa038b48864aaaf29432f408f8df338f2b5e289a7f5528d118790a02842), 286.32 TRX | 86699346 | [`5869f7b5955feae1cc07ee7146a883c52e764a4a438fe0b2fd5e370f98ac4aa2`](https://tronscan.org/#/transaction/5869f7b5955feae1cc07ee7146a883c52e764a4a438fe0b2fd5e370f98ac4aa2) (86699360) | 2026-10-01 12:16:51 |
+
+Emitter wire forms for the chain-19 genesis `bridge.emitters`: `"2"` and `"3"`
+`0000000000000000000000007af6b17047c1db6cb54347fdea45cf9179075bfa`, `"4"`
+`0000000000000000000000006410797df959987a5baf65b5fab97edeb34d5163`, `"5"` unchanged
+(`d3e58f1e…413a`). `bridge.emitter` is unchanged (`c02df6ba…d15f`, immutable in every endpoint).
+
+Each was read back after deployment: admin `0xe49B…0d0e` (`TWoyj…9mh` on Tron, an EOA until BR-3 is
+redone for the new endpoint), pauser the same EOA on Ethereum and BSC and the pause multisig
+`TCimv6…LG58` on Tron, `randEmitter`, chain ids 2 / 3 / 4, fee 10 bps, `sequence` 0.
+
+**Why they were deployed with guardian set 0.** A constructor installs its keys at index 0, while
+Rand signs at index 1. Each endpoint was therefore deployed with the six launch keys and the public
+0→1 rotation attestation of 2026-09-25 (`~/.rand-bridge/mainnet-set1/rotation-1.hex`, digest
+`0x3ee6a609…224b`) was replayed onto it; no guardian key was needed. `currentGuardianSetIndex()` is
+1 on all three and `guardianSet(1)` lists the eight set-1 keys. The side effect is that set 0 signs
+validly on the new endpoints for 86,400 s: **no token may be enabled on a new endpoint before the
+time in the last column.**
+
+**A fresh endpoint has an empty `consumed` map**, so every burn attestation set 1 ever signed for
+that chain replays on it once it holds custody: Ethereum seq 4 and BSC seq 5 (9 USDT each, the
+09-26 releases) and Tron seq 7 (below). Before a new endpoint opens to users, each is consumed by an
+operator lock of exactly that amount followed by the replayed release (the lock is the endpoint's
+sequence 0 and must never mint: the chain-19 genesis sets `min_inbound_sequence` to 1 for chains 2,
+3 and 4).
+
+### Custody moved off the old Tron endpoint (2026-09-30, chain 18)
+
+The endpoints have no migration function, so the old Tron endpoint's 9 USDT (backing 9 of a third
+party's 10 zUSD) was emptied by rebalancing through Solana with operator funds: 1 + 8 USDT locked on
+Solana for the relayer's Rand wallet, 9 zUSD burned against the Tron backing.
+
+| step | transaction |
+|---|---|
+| Solana lock 1 USDT, seq 2 | `z8Dxrqvwq1uqbJkC4wfzXLEcUabDCqRcXfzz6GzCTXXdc9EhrKnsbjyRgidXPoaJmNXExxzDgwLPsk5n6VkBP7F` |
+| Solana lock 8 USDT, seq 3 | `5SHpT5wQmzmgHyAJfq1Bj5x7LgNS2K27uxADwy9CrLghLHLSGmzgcTXdHqv8izioFRBrpWBLSSK1k1kn5D8UrRgN` |
+| Rand burn 9 zUSD → Tron USDT, burn seq 7 | `b37db5deec02d75f79bff9cbcae24952c859282ed41350f53a859f2550a642a2` |
+| release on the old Tron endpoint, 8.991 USDT → `TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW` | `7809b41d0d2ae886c69a082d25bc871fdb6bf464da455b68e596a965893b72f7` (block 86699850) |
+
+`rand-bridge-audit` afterwards: custody Solana USDT 10, everything else 0; Rand supply 10 zUSD ==
+Σ locked; custody − locked = 0. Chain 18's `burn_sequence` is 8, the Solana program's `sequence` 4.
+The release calldata (the seq-7 attestation to consume on the new Tron endpoint) is kept in
+`~/.rand-bridge/redeploy/`. The old Tron endpoint's scheduled `acceptAdmin` was never executed; its
+admin is still `TWoyj…9mh`, which can pause it at the cut.
+
+### Still to do before the new endpoints carry value
+
+1. After the set-0 times above: `setToken` on each new endpoint, then the consume step for Ethereum
+   seq 4, BSC seq 5 and Tron seq 7.
+2. Cut Rand chain 19 with the emitters above, `min_inbound_sequence` `{2: 1, 3: 1, 4: 1, 5: 4}`,
+   `burn_sequence` 8 and zUSD `locked` Solana-USDT 10.
+3. Pause the old endpoints; repoint every guardian and the relayer (contract, `start_block`, archived
+   `signed`/`done` stores for chains 2–4, cursors at sequence 1); the randbridge.org status config.
+4. One 1 USDT round trip per new endpoint; BR-3 (timelock handover) for the new Tron endpoint.

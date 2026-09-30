@@ -6,6 +6,31 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-09-30 — new endpoints deployed (dark), custody on Solana, chain 19 pending
+
+- **User go in the bridge session (2026-09-30): redeploy the endpoints and bring the bridge up on Rand
+  chain 19.** New Ethereum + BSC `0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA`, new Tron
+  `TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me` (R1 reentrancy lock, R3 `setPauser(0)`; bridge `d9cde20`), each
+  deployed with set 0 and the public 0→1 rotation replayed: index 1, **set 0 valid on them until
+  2026-10-01 12:23:40 UTC — no `setToken` before that.** Solana is not redeployed. Tx table, emitter
+  wire forms and the remaining steps: `docs/mainnet-deployment.md` (last section). The runbook this
+  follows is `~/.rand-bridge/redeploy/RUNBOOK-2026-09-28.md` (written for chain 16; read 19 for 16).
+- **Until the chain-19 cut the OLD endpoints are the live ones** (chain 18 names them): daemons,
+  `relayer.toml` and the droplets still point at them. Old custody is 0 on Ethereum, BSC and Tron —
+  the Tron 9 USDT was moved by rebalancing through Solana (lock 1 + 8 on Solana, burn seq 7 to Tron).
+  All 10 zUSD (a third party's) is now backed by Solana USDT 10. Chain 18 `burn_sequence` 8, Solana
+  `sequence` 4.
+- **Traps for the rest:** a fresh endpoint replays every old set-1 burn (Ethereum seq 4, BSC seq 5,
+  Tron seq 7) once it holds custody — consume each with an operator lock + the replayed release
+  before users can lock; that lock is sequence 0, so the chain-19 floors are `{2: 1, 3: 1, 4: 1,
+  5: 4}`, never the old endpoints' 2; guardian `signed/` and relayer `done/` stores are keyed by
+  (chain, sequence), so archive chains 2–4 before repointing or the guardians halt on a false
+  equivocation. The old Tron endpoint's `acceptAdmin` was never executed (admin still the EOA, which
+  can pause it); BR-3 has to be redone for the new Tron endpoint.
+- The laptop daemons had been down since 09-29 08:22 UTC (reboot); restarted 09-30 12:20 UTC on
+  chain 18 (chain 16, 17 and 18 cutovers were run by fullnode sessions; `chain_id = 18`, relayer CLI
+  `~/rand-node-a/bin-v067rc1/rand`). First mints and burn on the gas-model chain passed.
+
 ## State as of 2026-09-26 — bridge on Rand chain 15
 
 - Chain 14 stopped 13:04 UTC; chain 15 (genesis `cc30e085…b6b8`, fullnode dd2ccbe) carries the bridge:
