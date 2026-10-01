@@ -4,7 +4,7 @@ poll_secs = 15
 
 [rand]
 rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
-chain_id = 18                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
+chain_id = 19                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
 emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
 
 [[evm]]
@@ -12,18 +12,18 @@ name = "ethereum"
 chain = 2
 kind = "evm"
 rpc = "https://ethereum-rpc.publicnode.com"
-contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+contract = "0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA"
 finality = "finalized"
-start_block = 26048731          # set-1 guardian: no lock after sequence 2 predates this (checked 2026-09-25)
+start_block = 26090266          # the 2026-09-30 endpoint (deploy block; BSC: 1 h before the cut); cursors start at sequence 1, past the consume-step lock
 
 [[evm]]
 name = "bsc"
 chain = 3
 kind = "evm"
 rpc = "https://bsc-rpc.publicnode.com"
-contract = "0xd6EBD21C3dF90c9175EBdc8d6b377a9361604892"
+contract = "0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA"
 finality = 15
-start_block = 123874607           # publicnode keeps BSC logs only ~1 h back
+start_block = 125030322          # the 2026-09-30 endpoint (deploy block; BSC: 1 h before the cut); cursors start at sequence 1, past the consume-step lock
 max_log_range = 1000
 
 [[evm]]
@@ -31,9 +31,9 @@ name = "tron"
 chain = 4
 kind = "tron"
 rpc = "https://tron-rpc.publicnode.com"   # TronGrid rate-limits one IP without an API key
-contract = "0x0992df85dcce77ded2c0387f1fa9cf98ac859700"   # TAqq2i8KfYpACPUc9f5e2gAjdSgXqmPpkU
+contract = "0x6410797df959987a5baf65b5fab97edeb34d5163"   # TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me
 finality = 19
-start_block = 86524636
+start_block = 86699346          # the 2026-09-30 endpoint (deploy block; BSC: 1 h before the cut); cursors start at sequence 1, past the consume-step lock
 max_log_range = 1000
 
 [solana]

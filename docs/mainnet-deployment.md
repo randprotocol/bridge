@@ -248,3 +248,27 @@ admin is still `TWoyj…9mh`, which can pause it at the cut.
 3. Pause the old endpoints; repoint every guardian and the relayer (contract, `start_block`, archived
    `signed`/`done` stores for chains 2–4, cursors at sequence 1); the randbridge.org status config.
 4. One 1 USDT round trip per new endpoint; BR-3 (timelock handover) for the new Tron endpoint.
+
+## Rand chain 19 and the new endpoints live (2026-10-01)
+
+Chain 19 was cut ahead of the original evening slot at the owner's choice, on fullnode v0.6.7
+(`86941a1`, the fleet's installed release; RPL-2 and the genesis-gated audit-v6 fixes wait for a
+chain 20). Genesis `a3defc937d561d4beb1df9a08c9cb87a3dc32dadbfc2d1814ab6f627b0a2228a` (file on
+fullnode branch `feat/chain19-cut`, sha256 `92e46bc0…46e0`); bridge section: emitters
+`2`/`3` = `…7af6b170…5bfa`, `4` = `…6410797d…5163`, `5` unchanged, floors `{2: 1, 3: 1, 4: 1, 5: 4}`,
+burn sequence 8, guardian set 1, zUSD locked Solana-USDT 10 (one carry note).
+
+| step (UTC) | what |
+|---|---|
+| 03:2x | relayer and all eight guardians stopped (nothing in flight: cursors 2/2/2/4, burn 8) |
+| 03:2x | old endpoints paused by their admin: Ethereum `0xaec13a10a95aae178d6d3769e6f31c1c62bb22ed1a75457ab23384c48c7a3422`, BSC `0xbf78832e9b25435704d08eddcfe643fbbe22c46a1b7493b7c220338aabe4d08e`, Tron `2d4e6cb2656872b28b326652c9329c3c0fbbd23de1c485de7192bc993906bedd` |
+| 03:1x–03:38 | chain-18 snapshot at 141935 (archive node), RAND carry scan (7 operator wallets, 5,294.64 RAND) |
+| 03:38:49 | fleet stopped, chain 18 at 143776 |
+| 03:39–03:43 | genesis cut, pushed, switched, started; 26/26 healthy on chain 19 at 03:43:00 |
+| 03:43–03:45 | six droplet guardians and laptop guardians 7/8 moved (`daemons/mainnet/cut-chain19.sh`: chain_id 19, new contracts, stores of chains 2–4 archived, cursors at sequence 1 from Ethereum 26090266 / BSC 125030322 / Tron 86699346) |
+| 03:45 | the relayer started on `rand-relayer-1` (`move-relayer-to-droplet.sh move`); the laptop no longer runs it |
+
+`rand-bridge-audit` on chain 19: supply 10 zUSD == Σ locked == Solana custody 10; the new endpoints
+hold 0 with no token enabled. Unwithdrawn validator rewards on chain 18 (0.044 RAND) were dropped;
+shielded notes of wallets the operator does not hold were not carried.
+
