@@ -15,6 +15,7 @@ import {IRandBridge} from "../src/interfaces/IRandBridge.sol";
 ///     --sig "setToken(address,address,uint256,uint256)" <bridge> <token> <perTransferCap> <dailyCap>
 ///     --sig "lock(address,address,uint256,bytes32,uint256,uint32)" <bridge> <token> <amount> <recipientHash> <relayerFee> <nonce>
 ///     --sig "pause(address)" <bridge>
+///     --sig "setProtocolFee(address,uint16)" <bridge> <bps>
 ///     --sig "replay(address,bytes)" <bridge> <calldata of an earlier transaction to that endpoint's ABI>
 /// ```
 contract Ops is Script {
@@ -65,5 +66,14 @@ contract Ops is Script {
                 revert(add(ret, 32), mload(ret))
             }
         }
+    }
+
+    /// Sets the endpoint's release skim (admin only, at most 100 bps). 0 from Rand chain 20 on,
+    /// where the bridge fee is taken in zUSD on Rand instead.
+    function setProtocolFee(address bridge, uint16 bps) external {
+        vm.startBroadcast(vm.envUint("OPS_PRIVATE_KEY"));
+        IRandBridge(bridge).setProtocolFee(bps);
+        vm.stopBroadcast();
+        console2.log("protocolFeeBps", IRandBridge(bridge).protocolFeeBps());
     }
 }
