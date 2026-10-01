@@ -89,7 +89,10 @@ remove this problem.
 ## The relayer host (from the chain-19 cut)
 
 The relayer moves off the laptop to the droplet `rand-relayer-1` (DigitalOcean sgp1, 4 vCPU / 8 GB:
-it proves each mint's fee bundle itself, about 6 GB a proof). Its IPs are in
+it proves each mint's fee bundle itself, about 6 GB a proof). On chain 19 (v0.6.7, single-threaded,
+256-root anchor window ≈ 4.7 min) it ran at 8 dedicated vCPUs; back at 4 vCPU / 8 GB since
+2026-10-01 11:00 UTC, where a chain-20 mint (v0.6.8, multi-core, 1,024-root window ≈ 20 min) takes
+about 160 s. Its IPs are in
 `~/.rand-bridge/relayer-host/host.txt`, not in this repository; the firewall `rand-relayer-fw`
 allows SSH only. It pays gas with copies of the deployer keys, at the owner's choice
 (2026-09-30), in `/etc/rand-relayer/env` (root, mode 600).
