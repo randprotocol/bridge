@@ -14,6 +14,8 @@ import {IRandBridge} from "../src/interfaces/IRandBridge.sol";
 ///     --sig "fund(address,uint256)" <to> <wei>
 ///     --sig "setToken(address,address,uint256,uint256)" <bridge> <token> <perTransferCap> <dailyCap>
 ///     --sig "lock(address,address,uint256,bytes32,uint256,uint32)" <bridge> <token> <amount> <recipientHash> <relayerFee> <nonce>
+///     --sig "pause(address)" <bridge>
+///     --sig "replay(address,bytes)" <bridge> <calldata of an earlier transaction to that endpoint's ABI>
 /// ```
 contract Ops is Script {
     function fund(address payable to, uint256 amount) external {
@@ -42,5 +44,26 @@ contract Ops is Script {
         require(ok, "approve failed");
         IRandBridge(bridge).lock(token, amount, randRecipient, relayerFee, nonce);
         vm.stopBroadcast();
+    }
+
+    /// Stops lock and release (the pauser or the admin may; only the admin unpauses).
+    function pause(address bridge) external {
+        vm.startBroadcast(vm.envUint("OPS_PRIVATE_KEY"));
+        IRandBridge(bridge).pause();
+        vm.stopBroadcast();
+    }
+
+    /// Sends `data` to `bridge` as is: the calldata of an earlier `release` or
+    /// `submitGuardianSetUpgrade`, replayed onto another endpoint (the consume step after a
+    /// redeploy). Any funded key may send it.
+    function replay(address bridge, bytes calldata data) external {
+        vm.startBroadcast(vm.envUint("OPS_PRIVATE_KEY"));
+        (bool ok, bytes memory ret) = bridge.call(data);
+        vm.stopBroadcast();
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
     }
 }
