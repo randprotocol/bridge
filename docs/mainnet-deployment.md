@@ -301,3 +301,19 @@ custody. Every transaction and latency: `docs/e2e-chain19-2026-10-01.csv`; repor
 7 s on the laptop; mint on the relayer droplet 4–5 min (close to chain 19's 256-root anchor window);
 burn → release 14–34 s; lock → mint 4.5 min (BSC) to 19 min (Ethereum finality).
 
+## Rand chain 20: zUSD fees (2026-10-01)
+
+Chain 20 (fullnode v0.6.8 `c9c9bd3c`, genesis `6210cf07…5135`, live 06:17 UTC, cut by fullnode-4c)
+takes the bridge fee in zUSD on Rand: 10 bps of each mint and 10 bps of each burn, as chain-created
+notes to the owner's wallet (`bridge.fees`). The endpoints' USDT release fee went to 0 the same
+hour: Ethereum `0x9f7c842e524be32fa456bc5dd8b2f2b469647e3180c14be5b11239e0313334f0`, BSC
+`0xce1dc20439471424900c54ae3c10a6543e2300135391bc8323600d8710ff1eff`, Tron
+`27f232ace7671b9464cd05974e5ee86638091529958f8207b58612d597998ab9`, Solana
+`39ecavmerZ814FndJNJgwJ6vzq81zhgq32gM3bHrgCARMihb9fnPVFT3L32mWUhKX1qBmHvSW1UXxwUjq4hQ5NFQ`. Bridge
+stopped 06:0x UTC (floors carried: 2:3, 3:3, 4:3, 5:7; burn 13; zUSD 99 carried: 10 to the third
+party, 89 to the owner), restarted 06:36 UTC (`daemons/mainnet/cut-chain20.sh`; relayer `rand`
+v0.6.8 sha256 `155dfe66…ee2d`). First deposit: 1 USDT on BSC (`0xf372d891…4b72`, sequence 3)
+minted at block 1664 as 0.999 zUSD to the depositor and a 0.001 zUSD fee note — correct on chain.
+**Open:** the v0.6.8 wallet refuses to scan it ("rebuilt deposit or mint note(s) match no leaf"),
+reported to fullnode-4c; randbridge.org routes stay off until a wallet can open such a note.
+
