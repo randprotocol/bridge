@@ -36,3 +36,7 @@ time_utc,round,chain,step,amount,token,from,to,tx,source_sequence_or_burn,latenc
 2026-10-01T05:36:35Z,2,rand19,mint,30,zUSD,bridge (Tron),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,tron 2,398,ok,
 2026-10-01T05:40:31Z,2,rand19,mint,15,zUSD,bridge (Solana),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,sol 6,633,ok,
 2026-10-01T05:46:51Z,2,rand19,mint,22,zUSD,bridge (Ethereum),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,eth 2,1143,ok,mint subprocess 05:41:31-05:46:51 (320 s)
+2026-10-01T06:47:23Z,chain20,bsc,lock,1,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,rand:shielded-5,0xf372d891f4740a1aeb518e45f56b5f3af8e2a6dbcbc81ccf6d9f4a6584864b72,bsc 3,,ok,first chain-20 deposit; endpoint fee 0
+2026-10-01T06:48:56Z,chain20,rand20,mint,0.999,zUSD,bridge (BSC),rand:shielded-5,block 1664,bsc 3,93,ok,deposit_amount 0.999 + fee note 0.001 zUSD to the owner (mint_bps 10)
+2026-10-01T07:13:56Z,chain20,rand20,burn,0.999,zUSD,rand:shielded-5,bsc:0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,ceb9e3c24268ba7060363ae63848b583ed8d918e0454957c2e4fdf0422e20be7,burn 13,,ok,fee 0.000999 zUSD kept on Rand (burn_bps 10); proof 45.0 s + 5.5 s auth (v0.6.8)
+2026-10-01T07:14:26Z,chain20,bsc,release,0.998001,USDT,bridge,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,(relayer release),burn 13,30,ok,release_amount 99800100; no USDT skim
