@@ -195,6 +195,12 @@ Emitter wire forms for the chain-19 genesis `bridge.emitters`: `"2"` and `"3"`
 `0000000000000000000000006410797df959987a5baf65b5fab97edeb34d5163`, `"5"` unchanged
 (`d3e58f1e…413a`). `bridge.emitter` is unchanged (`c02df6ba…d15f`, immutable in every endpoint).
 
+Source code verified on Etherscan and BscScan on 2026-10-01 (`forge verify-contract`, solc 0.8.20,
+200 runs, paris; the deployed initcode equals the local build byte for byte). Tron is not verified
+on Tronscan yet (a manual upload of the flattened source). The consume step was rehearsed on
+Ethereum and BSC mainnet forks the same day: `setToken`, a 9 USDT lock as sequence 0, the replayed
+release pays 8.991 to the original recipient and leaves custody 0, and a second replay reverts.
+
 Each was read back after deployment: admin `0xe49B…0d0e` (`TWoyj…9mh` on Tron, an EOA until BR-3 is
 redone for the new endpoint), pauser the same EOA on Ethereum and BSC and the pause multisig
 `TCimv6…LG58` on Tron, `randEmitter`, chain ids 2 / 3 / 4, fee 10 bps, `sequence` 0.
