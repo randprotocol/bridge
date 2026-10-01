@@ -272,3 +272,13 @@ burn sequence 8, guardian set 1, zUSD locked Solana-USDT 10 (one carry note).
 hold 0 with no token enabled. Unwithdrawn validator rewards on chain 18 (0.044 RAND) were dropped;
 shielded notes of wallets the operator does not hold were not carried.
 
+### BR-3 for the new Tron endpoint (started 2026-10-01)
+
+`transferAdmin(TKmds8…V7k)` from the admin `TWoyj…9mh`: tx
+`5bd571b4f72bd0f1e13279bbd7e8543ecf73fa15a36e2b32e854f5cdbbe6084e` (block 86718474); `pendingAdmin()`
+is the timelock, `admin()` stays `TWoyj…9mh` until the accept. The admin multisig's unsigned
+`schedule(acceptAdmin)` is `deploy/governance/new-tron-endpoint/tron-schedule-accept.json` (3 of the
+signers `/2`–`/6`, permission id 2; it expires about 23 h after it was built, 2026-10-01 04:14 UTC);
+then 48 h, then `timelock-execute-accept … --bridge TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me`. The old
+endpoint's scheduled accept is moot (it is paused and retired).
+
