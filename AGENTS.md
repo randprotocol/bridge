@@ -6,6 +6,34 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-10-01 — bridge LIVE on Rand chain 20 (zUSD fees), new endpoints, relayer on a droplet
+
+- **Rand chain 20** (fullnode v0.6.8 `c9c9bd3c`, genesis `6210cf07…5135`, live 06:17 UTC, cut by session
+  fullnode-4c) carries the bridge since 06:36 UTC. Chain 19 (v0.6.7, genesis `a3defc93…228a`) ran 03:43–06:0x.
+- **Endpoints:** Ethereum + BSC `0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA`, Tron
+  `TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me`, Solana `FGA3kY3R…vycu` (unchanged). The 2026-09-19 endpoints are
+  PAUSED and retired (custody 0). USDT/USDC enabled, caps 100 / 1,000 per day. Each new EVM-family endpoint's
+  sequence 0 is an operator "consume" lock that never mints.
+- **Fees (owner ruling, chain 20):** 10 bps of every mint and 10 bps of every burn, taken in zUSD on Rand as
+  chain-created notes to the owner's wallet (fingerprint 89DS-4Q4X-HXSX-MBYW, genesis `bridge.fees`); the burn's
+  signed body carries `release_amount`. Endpoint `protocolFeeBps` = 0 on all four. This supersedes the
+  09-19 "deposits are free / 10 bps USDT skim on release" ruling below.
+- **Daemons:** relayer on droplet `rand-relayer-1` (systemd `rand-relayer`, 8 dedicated vCPU, deployer keys
+  in `/etc/rand-relayer/env`, Linux v0.6.8 `rand`); guardians 1–6 on their droplets, 7–8 on the laptop
+  (reverse tunnel to the relayer). Laptop tools must use the TAGGED macOS v0.6.8 `rand`
+  (`~/rand-node-a/bin-v068/rand`); a build from the shared fullnode checkout was stale once. Scripts:
+  `daemons/mainnet/cut-chain20.sh` (latest switch), `move-relayer-to-droplet.sh`, `guardian-reverse-tunnel.sh`.
+- **Verified:** full USDT e2e on chain 19 (22/22/30/15 USDT round trips + 89 zUSD minted to the owner) and a
+  chain-20 round trip with the zUSD fees (1 USDT → 0.999 zUSD + 0.001 fee → 0.998001 USDT). Supply 99.001999
+  zUSD == custody. Report `~/Downloads/Rand_Bridge_E2E_Chain19_2026-10-01.pdf`, data
+  `docs/e2e-chain19-2026-10-01.csv`. randbridge.org has all four routes open on chain 20.
+- **Pending:** the new Tron endpoint's `acceptAdmin` (timelock op `0x816a8de4…2d88`) is executable from
+  2026-10-03 04:24 UTC — 3 multisig signatures from `TRON_MSIG_XPRV`; Tronscan source verification needs the
+  owner's TronLink; Ethereum/BSC/Solana BR-3 not started; external audit (issue #4) still the gate for raising caps.
+- **Traps:** deploy randprotocol.org only with its `server/deploy-site.sh` (a plain rsync broke sign-in);
+  node A's RPC (laptop tunnel 8545) is also a prover host now and dropped once — the obs1 archive (tunnel 8548)
+  is the fallback; publicnode refuses Ethereum logs older than ~1 day and BSC older than ~1 h.
+
 ## State as of 2026-09-30 — new endpoints deployed (dark), custody on Solana, chain 19 pending
 
 - **User go in the bridge session (2026-09-30): redeploy the endpoints and bring the bridge up on Rand
