@@ -282,3 +282,9 @@ signers `/2`–`/6`, permission id 2; it expires about 23 h after it was built, 
 then 48 h, then `timelock-execute-accept … --bridge TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me`. The old
 endpoint's scheduled accept is moot (it is paused and retired).
 
+Scheduled 2026-10-01 04:24 UTC: `schedule(acceptAdmin)` signed by signers `/2`–`/4`, tx
+`e5868c36bc4135507dec81329d3f9d262a14351436e59a784de61350b5bea871` (block 86718685), operation
+`0x816a8de4fcd4e876409596609f9021a4771b20f6c0ec745a885f6fa281672d88`, executable from
+**2026-10-03 04:24:03 UTC**; then `timelock-execute-accept … --bridge TK6JJv55…93me` (3 signers).
+Until then `TWoyj…9mh` is admin (it does the `setToken` on 2026-10-01).
+
