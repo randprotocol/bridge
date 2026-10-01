@@ -288,3 +288,16 @@ Scheduled 2026-10-01 04:24 UTC: `schedule(acceptAdmin)` signed by signers `/2`�
 **2026-10-03 04:24:03 UTC**; then `timelock-execute-accept … --bridge TK6JJv55…93me` (3 signers).
 Until then `TWoyj…9mh` is admin (it does the `setToken` on 2026-10-01).
 
+## Tokens on and the end-to-end test on chain 19 (2026-10-01)
+
+USDT/USDC switched on early on the owner's ruling ("it's okay for now since we're still at testnet",
+during set 0's last hours). Consume step on each new endpoint: Ethereum lock `0xedd567d1…9591` +
+replay of burn 4 `0x1ae372b8…a4b3`; BSC `0x645e16e4…e807` + burn 5 `0x19d19b86…7897`; Tron
+`0b83e220…2fb7` + burn 7 `f0468610…cfd0`. **PASSED on all four chains** (bridge in, unbridge,
+bridge back): rounds of 22 / 22 / 30 / 15 USDT on Ethereum / BSC / Tron / Solana, then the same
+again minted to the owner's wallet (89 zUSD kept). Audit afterwards: supply 99 zUSD == Σ locked ==
+custody. Every transaction and latency: `docs/e2e-chain19-2026-10-01.csv`; report
+`~/Downloads/Rand_Bridge_E2E_Chain19_2026-10-01.pdf`. Latency: bundle proof 110–116 s + auth
+7 s on the laptop; mint on the relayer droplet 4–5 min (close to chain 19's 256-root anchor window);
+burn → release 14–34 s; lock → mint 4.5 min (BSC) to 19 min (Ethereum finality).
+

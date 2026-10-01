@@ -1,0 +1,38 @@
+time_utc,round,chain,step,amount,token,from,to,tx,source_sequence_or_burn,latency_from_previous_step_s,status,notes
+2026-10-01T03:53:41Z,0,solana,lock,1,USDT,FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,rand:shielded-5,y6KnQgTk4SJsBd1ELkyF9u5D5nzQ3tCgVPZMTXzMEfyhzY2133AsUzG8Ej21rLeRiCnpbUcpho6irYVmpaF38Vi,sol 4,,ok,first chain-19 deposit
+2026-10-01T04:09:26Z,0,rand19,mint,1,zUSD,bridge,rand:shielded-5,relayer bridge-mint,sol 4,945,ok,first attempt refused (4-vCPU proof outlived the 256-root anchor window); passed after resize to 8 vCPU
+2026-10-01T04:10:29Z,0,rand19,burn,1,zUSD,rand:shielded-5,solana:FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,4669bd476f119f33111de65043499eaae6ff1f30ec58506311679516f9468613,burn 8,,ok,proof 116.0 s bundle + 6.7 s auth (laptop)
+2026-10-01T04:12:25Z,0,solana,release,0.999,USDT,bridge,FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,23CCBZTsS66cBNms6DwY7ZNUUG2NU6TgSY6LmyDZeUB6i8P3Vwg5AAasDfc8igvxDDkKwsmDc2NAeJZ2fYBPuX2L,burn 8,116,ok,10 bps fee
+2026-10-01T04:47:00Z,setup,ethereum,setToken USDT+USDC,,,admin 0xe49B…0d0e,0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA,0x126650a9cc721bcfd7de0ded743961353b9d5ef462d7265a54fffabc9469bcff; 0x36711658aa6dc6de57fe854f16e752159f999af3198ca7ab0300995a4b11af0e,,,ok,caps 100/1000
+2026-10-01T04:47:30Z,setup,ethereum,consume lock,9,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA,0xedd567d149a4998c69c4fb637ebcf6226942b7e9a45456f8fbfb3108c2399591,eth 0,,ok,never minted (chain-19 floor 1)
+2026-10-01T04:48:00Z,setup,ethereum,consume replay,8.991,USDT,bridge,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0x1ae372b8498efb3c8f809bab2e4f43b452cb25f9eb507f0ef7e09a601e55a4b3,old burn 4,,ok,custody back to 0
+2026-10-01T04:50:00Z,setup,bsc,setToken USDT+USDC,,,admin 0xe49B…0d0e,0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA,0x6402a566f0e2980e48e6cb41b7e5a91c184d38f9088cef41bbea72db395d271b; 0x963d0ac64a7b9ad93217a322ef10a0bfb286b6a770e12d4b6279cd6213de28d2,,,ok,caps 100/1000
+2026-10-01T04:51:00Z,setup,bsc,consume lock,9,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA,0x645e16e4fa0aef9f35fe807277c1daba7cab02ca7ec028d8877dbd13be68e807,bsc 0,,ok,never minted
+2026-10-01T04:51:30Z,setup,bsc,consume replay,8.991,USDT,bridge,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0x19d19b86db1a5d26b66c1c650a7e9959b79ebe510beb614aec6ac7f306ac7897,old burn 5,,ok,custody back to 0
+2026-10-01T04:53:00Z,setup,tron,setToken USDT,,,admin TWoyj…9mh,TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me,a2ca5cc594584f35def9482ad6d5e94a328db31ff762c15e16fadc2a212395e7,,,ok,caps 100/1000
+2026-10-01T04:54:00Z,setup,tron,consume lock,9,USDT,TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me,0b83e220229aabb5564d7ff6c3ea81118684a6a9cc11fdde7e47251cc1d32fb7,tron 0,,ok,never minted
+2026-10-01T04:55:00Z,setup,tron,consume replay,8.991,USDT,bridge,TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,f04686101230ce1bb229abd7ed0b0828ecce01f6b7226833c0bf06c495cacfd0,old burn 7,,ok,custody back to 0
+2026-10-01T04:57:25Z,1,ethereum,lock,22,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,rand:shielded-5,0x900185bd38397847196b82f64452d97b7117586943754b3af94c1702d577930b,eth 1,,ok,
+2026-10-01T04:57:40Z,1,bsc,lock,22,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,rand:shielded-5,0xc7bda9623776e5b18e7bfac4e7e205eedb36c3340cbf57a840ec92e8a3b6a2a7,bsc 1,,ok,
+2026-10-01T04:59:41Z,1,tron,lock,30,USDT,TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,rand:shielded-5,59eca15a951443544d029a495d57879cccb060070ade1caa2b6755f96cc50e62,tron 1,,ok,
+2026-10-01T04:59:42Z,1,solana,lock,15,USDT,FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,rand:shielded-5,27kbvx1wLmV2fDE8cpfSmrwDSUkQTwCy7LLHEzsETYBy7rCUNE6fh7RtVrEgKgL1VZTGnBSCSAjjXUaE63Z7yaFK,sol 5,,ok,
+2026-10-01T05:02:19Z,1,rand19,mint,22,zUSD,bridge (BSC),rand:shielded-5,relayer bridge-mint,bsc 1,279,ok,
+2026-10-01T05:06:36Z,1,rand19,mint,30,zUSD,bridge (Tron),rand:shielded-5,relayer bridge-mint,tron 1,415,ok,queued behind the BSC mint
+2026-10-01T05:10:34Z,1,rand19,mint,15,zUSD,bridge (Solana),rand:shielded-5,relayer bridge-mint,sol 5,652,ok,queued
+2026-10-01T05:15:04Z,1,rand19,mint,22,zUSD,bridge (Ethereum),rand:shielded-5,relayer bridge-mint,eth 1,1059,ok,waited for Ethereum finality
+2026-10-01T05:18:18Z,1,rand19,burn,22,zUSD,rand:shielded-5,ethereum:0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,5d05f8d028d0685ee3c6a2c127a626f493e826ff5797210fb0f880865bcfd085,burn 9,,ok,proof 114.1 s + 6.6 s auth
+2026-10-01T05:18:38Z,1,ethereum,release,21.978,USDT,bridge,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0x740ff9d94d271da90b3e5d8986087fb6eb1a7a80ec1adb2011bbfe7a496b0702,burn 9,20,ok,10 bps fee
+2026-10-01T05:20:33Z,1,rand19,burn,22,zUSD,rand:shielded-5,bsc:0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,4d2d4bb2a2c0a11a9eac8e8b74788ba6597513efdbd5aedcba702ad8aac20736,burn 10,,ok,proof 109.8 s + 7.7 s auth
+2026-10-01T05:21:07Z,1,bsc,release,21.978,USDT,bridge,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,0xe39f47891f60184ddef192240063f0070590ca1848f1ffe1f0dcb85fd330df1a,burn 10,34,ok,relayer logged AlreadyDone after a public-RPC receipt error; paid once
+2026-10-01T05:22:46Z,1,rand19,burn,30,zUSD,rand:shielded-5,tron:TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,54f173388c12944ca0b183398decef14ca4a333ac046563ca3877a5097af0845,burn 11,,ok,proof 111.7 s + 7.1 s auth
+2026-10-01T05:23:04Z,1,tron,release,29.97,USDT,bridge,TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,f10fb62b39123ad47305d9d375529016c675d800917361fd60850053862efdc0,burn 11,18,ok,
+2026-10-01T05:25:01Z,1,rand19,burn,15,zUSD,rand:shielded-5,solana:FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,ce2f2118caf8dda6e4b08dd3c9fc3011b1122242ce52b86d7da8d395588f22fa,burn 12,,ok,proof 116.1 s + 7.0 s auth
+2026-10-01T05:25:15Z,1,solana,release,14.985,USDT,bridge,FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,4bWLPuZ87aAAGq2KQANytWrPZAerMqo8qduLGxkfCmUEZmwxWqKPXbLMHJKyWo1Wte1B1qeikUKNUGBTE6jRqxP,burn 12,14,ok,
+2026-10-01T05:27:48Z,2,ethereum,lock,22,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,rand:owner 89DS-4Q4X-HXSX-MBYW,0xda37aaf3e9d4aac47c549684e0debe032a66ab03fdf1e8806dec77289b810508,eth 2,,ok,kept as zUSD
+2026-10-01T05:28:02Z,2,bsc,lock,22,USDT,0xcf37d3657cc8ffc11e2b2ec46e02c5e37d11dd90,rand:owner 89DS-4Q4X-HXSX-MBYW,0x940ba345e279a5c97d835f605899d05c9a57a49726d46d43a28ea5f2d3fb27ee,bsc 2,,ok,kept as zUSD
+2026-10-01T05:29:57Z,2,tron,lock,30,USDT,TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW,rand:owner 89DS-4Q4X-HXSX-MBYW,3d084801768c7f8e713575a609a818c9db02b2659ccd72ba9bb37d53634921e2,tron 2,,ok,kept as zUSD
+2026-10-01T05:29:58Z,2,solana,lock,15,USDT,FKXy9NgLK3GJygzaTXJaGTEvs8V7XfnXXTgVPZ2c3KHv,rand:owner 89DS-4Q4X-HXSX-MBYW,659KmMEfkrrwQyFipU2MHUCPNTM7KK2zgaC4pCkFoo3k5Vt9oj7mAXn5LE9VF5aavruYcwKrF3VaGpDvduRH1bYt,sol 6,,ok,kept as zUSD
+2026-10-01T05:32:23Z,2,rand19,mint,22,zUSD,bridge (BSC),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,bsc 2,261,ok,
+2026-10-01T05:36:35Z,2,rand19,mint,30,zUSD,bridge (Tron),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,tron 2,398,ok,
+2026-10-01T05:40:31Z,2,rand19,mint,15,zUSD,bridge (Solana),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,sol 6,633,ok,
+2026-10-01T05:46:51Z,2,rand19,mint,22,zUSD,bridge (Ethereum),rand:owner 89DS-4Q4X-HXSX-MBYW,relayer bridge-mint,eth 2,1143,ok,mint subprocess 05:41:31-05:46:51 (320 s)
