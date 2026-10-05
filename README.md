@@ -1,5 +1,9 @@
 # Rand Bridge
 
+[![coverage](https://codecov.io/gh/randprotocol/bridge/graph/badge.svg)](https://codecov.io/gh/randprotocol/bridge)
+
+Line coverage of the Rust test suite, measured by `.github/workflows/coverage.yml` (cargo-llvm-cov) on every push to `main` and published to Codecov.
+
 The Rand bridge lets a user lock USDT or USDC on Ethereum, BNB Smart Chain, Tron, or Solana and
 receive the same amount, 1:1, as a bridged asset on the Rand fullnode. A holder of a bridged
 asset on Rand burns it and receives the locked tokens back on the asset's home chain. Every
