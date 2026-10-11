@@ -3,8 +3,6 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-
 use bridge_codec::Attestation;
 use bridge_daemons::config::{EvmConfig, EvmKind, Finality};
 use bridge_daemons::crypto::{self, recover, GuardianKey, RawSignature};
@@ -626,11 +624,10 @@ async fn tron_reads_that_return_nonsense_are_errors() {
 /// or `--attestation-file` argument to `<dir>/log`, then runs `tail`.
 fn fake_tool(dir: &std::path::Path, tail: &str) -> std::path::PathBuf {
     let path = dir.join("tool.sh");
-    std::fs::write(
+    write_script(
         &path,
-        format!(
-            r#"#!/bin/sh
-{{
+        &format!(
+            r#"{{
   echo "ARGS $*"
   echo "RPC ${{SOL_RPC_URL:-}}"
   prev=""
@@ -644,9 +641,7 @@ fn fake_tool(dir: &std::path::Path, tail: &str) -> std::path::PathBuf {
 "#,
             dir = dir.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 

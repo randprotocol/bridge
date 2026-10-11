@@ -221,6 +221,8 @@ pub fn guardian_keys(n: u8) -> Vec<bridge_daemons::crypto::GuardianKey> {
 
 // ---- subprocess helpers ------------------------------------------------------
 
+/// Only for an address nothing is meant to answer on. A daemon that must bind a port goes
+/// through `start_daemon`, which retries when the port was taken in between.
 pub fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -360,4 +362,77 @@ pub fn request(method: &str, url: &str, content_type: &str, body: &str) -> Optio
 pub fn get_json(url: &str) -> Option<(u16, Value)> {
     let (status, body) = request("GET", url, "application/json", "")?;
     Some((status, serde_json::from_str(&body).unwrap_or(Value::Null)))
+}
+
+/// Writes an executable `#!/bin/sh` script that is safe to exec at once.
+///
+/// Exec of a file that some other thread still holds open for writing fails with ETXTBSY
+/// ("text file busy"): another test thread that forked while the file was open keeps the
+/// descriptor until its own exec. So the script is written under a temporary name, synced and
+/// closed, renamed into place, and then exec'd once with `--etxtbsy-probe` (which every script
+/// answers by exiting 0) until the exec succeeds. After the descriptor is closed no new fork can
+/// inherit it, so once the probe has run, whoever execs the script next cannot hit ETXTBSY.
+pub fn write_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&tmp).unwrap();
+        write!(
+            file,
+            "#!/bin/sh\n[ \"$1\" = --etxtbsy-probe ] && exit 0\n{body}\n"
+        )
+        .unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+    std::fs::rename(&tmp, path).unwrap();
+    for _ in 0..500 {
+        match std::process::Command::new(path)
+            .arg("--etxtbsy-probe")
+            .status()
+        {
+            Ok(status) => {
+                assert!(status.success());
+                return;
+            }
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            Err(e) => panic!("cannot exec {}: {e}", path.display()),
+        }
+    }
+    panic!("{} stayed busy", path.display());
+}
+
+/// Starts a daemon that listens on a port of its own choosing from `launch(port)`, retrying
+/// with a fresh port when the daemon lost the race for it ("binding" in its log).
+pub fn start_daemon(
+    dir: &std::path::Path,
+    launch: impl Fn(u16) -> std::process::Command,
+) -> (Daemon, u16) {
+    for _ in 0..10 {
+        let port = free_port();
+        let mut daemon = Daemon::spawn(launch(port), dir);
+        let mut listening = false;
+        for _ in 0..300 {
+            if daemon.exited().is_some() {
+                break;
+            }
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                // A daemon that lost the race exits at once; give it a moment to do so.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                listening = daemon.exited().is_none();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if listening {
+            return (daemon, port);
+        }
+        let log = daemon.log();
+        assert!(log.contains("binding"), "daemon failed to start:\n{log}");
+        drop(daemon);
+    }
+    panic!("no free port after 10 attempts");
 }

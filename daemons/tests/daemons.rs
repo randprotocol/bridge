@@ -315,8 +315,8 @@ fn a_guardian_signs_what_it_watches_and_serves_it_until_interrupted() {
     let rand = rand_node(vec![burn.clone()], 14, &[]);
     // A Solana endpoint with no bridge account: warned about, never fatal.
     let sol = rpc(|m, _| (m == "getAccountInfo").then(|| Ok(json!({ "value": null }))));
-    let port = free_port();
-    let config = write_config(
+    let launch = |port: u16| {
+        let config = write_config(
         dir.path(),
         &base(
             dir.path(),
@@ -328,13 +328,15 @@ fn a_guardian_signs_what_it_watches_and_serves_it_until_interrupted() {
             ),
         ),
     );
-    // The Rand burn is only signed if the emitter matches: base() puts RAND_EMITTER in the config.
-    let mut cmd = guardian_cmd();
-    cmd.arg("--config")
-        .arg(&config)
-        .env("GUARDIAN_KEY", format!("{:064x}", 1))
-        .env("GUARDIAN_PQ_SEED", "07".repeat(32));
-    let mut daemon = Daemon::spawn(cmd, dir.path());
+        // The Rand burn is only signed if the emitter matches: base() puts RAND_EMITTER in the config.
+        let mut cmd = guardian_cmd();
+        cmd.arg("--config")
+            .arg(&config)
+            .env("GUARDIAN_KEY", format!("{:064x}", 1))
+            .env("GUARDIAN_PQ_SEED", "07".repeat(32));
+        cmd
+    };
+    let (mut daemon, port) = start_daemon(dir.path(), launch);
 
     let origin = format!("http://127.0.0.1:{port}");
     wait_until("both messages signed", || {
@@ -389,8 +391,8 @@ fn a_guardian_with_no_pq_seed_warns_and_signs_classically() {
     let deposit = eth_lock(0, [9; 32]);
     let eth = evm_node(vec![evm_log(CONTRACT, &deposit, 50)], false);
     let rand = rpc(|_, _| None); // a Rand node that serves no bridge: the source just fails and is retried
-    let port = free_port();
-    let config = write_config(
+    let launch = |port: u16| {
+        let config = write_config(
         dir.path(),
         &base(
             dir.path(),
@@ -398,11 +400,13 @@ fn a_guardian_with_no_pq_seed_warns_and_signs_classically() {
             &format!("[[evm]]\nname = \"eth\"\nchain = 2\nkind = \"evm\"\nrpc = {:?}\ncontract = {CONTRACT:?}\nfinality = \"latest\"\n\n[guardian]\nlisten = \"127.0.0.1:{port}\"\n", eth.url),
         ),
     );
-    let mut cmd = guardian_cmd();
-    cmd.arg("--config")
-        .arg(&config)
-        .env("GUARDIAN_KEY", format!("0x{:064x}", 1));
-    let mut daemon = Daemon::spawn(cmd, dir.path());
+        let mut cmd = guardian_cmd();
+        cmd.arg("--config")
+            .arg(&config)
+            .env("GUARDIAN_KEY", format!("0x{:064x}", 1));
+        cmd
+    };
+    let (mut daemon, port) = start_daemon(dir.path(), launch);
     let url = format!("http://127.0.0.1:{port}/v1/signature/2/0");
     wait_until("the lock signed", || {
         daemon.exited().is_none() && status_of(&url) == Some(200)
@@ -518,28 +522,26 @@ fn a_relayer_mints_a_deposit_for_a_registered_recipient_through_the_wallet() {
     // Rand serves no bridge state: the guardian set comes from the config.
     let rand = rpc(|_, _| None);
     let wallet = dir.path().join("wallet.sh");
-    std::fs::write(
+    write_script(
         &wallet,
-        format!(
-            "#!/bin/sh\necho \"$@\" > {:?}\necho minted-note\n",
+        &format!(
+            "echo \"$@\" > {:?}\necho minted-note",
             dir.path().join("wallet.args")
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wallet, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    );
     let recipients = dir.path().join("recipients.json");
     std::fs::write(
         &recipients,
         json!({ REAL_HASH: REAL_ADDRESS.trim() }).to_string(),
     )
     .unwrap();
-    let port = free_port();
     let addresses: Vec<String> = g
         .keys
         .iter()
         .map(|k| format!("0x{}", hex::encode(k.address())))
         .collect();
-    let config = write_config(
+    let launch = |port: u16| {
+        let config = write_config(
         dir.path(),
         &base(
             dir.path(),
@@ -552,9 +554,11 @@ fn a_relayer_mints_a_deposit_for_a_registered_recipient_through_the_wallet() {
             ),
         ),
     );
-    let mut cmd = relayer_cmd();
-    cmd.arg("--config").arg(&config);
-    let mut daemon = Daemon::spawn(cmd, dir.path());
+        let mut cmd = relayer_cmd();
+        cmd.arg("--config").arg(&config);
+        cmd
+    };
+    let (mut daemon, port) = start_daemon(dir.path(), launch);
     wait_until("the mint recorded", || {
         daemon.exited().is_none() && done_exists(dir.path(), 2, 0)
     });

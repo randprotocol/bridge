@@ -4,7 +4,6 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 
 use bridge_codec::{Body, GuardianSetUpgrade, Payload};
 use bridge_daemons::api::{self, GuardianClient, SignedMessage};
@@ -734,8 +733,7 @@ fn no_destinations() -> Destinations {
 
 fn tool(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     let path = dir.join("tool.sh");
-    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&path, script);
     path
 }
 

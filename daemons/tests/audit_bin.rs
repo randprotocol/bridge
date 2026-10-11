@@ -420,11 +420,11 @@ fn a_governance_audit_of_nothing_fails_every_coverage_rule() {
 #[test]
 fn an_unreachable_endpoint_is_a_failed_rule_not_a_crash() {
     let dir = tempfile::tempdir().unwrap();
-    let port = free_port();
+    // Nothing listens on port 1.
     let cfg = config(
         dir.path(),
         "http://127.0.0.1:1",
-        &evm_section("eth", 2, "evm", &format!("http://127.0.0.1:{port}")),
+        &evm_section("eth", 2, "evm", "http://127.0.0.1:1"),
     );
     let (ok, out, err) = run_governance(&cfg);
     assert!(!ok);
