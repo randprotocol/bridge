@@ -119,7 +119,9 @@ fn serve(mut stream: TcpStream, handler: &dyn Fn(&Seen) -> Reply, log: &Mutex<Ve
 
 /// A JSON-RPC 2.0 node: `methods(method, params)` returns the result, or the
 /// error object. Anything it declines (`None`) is a method-not-found error.
-pub fn rpc(methods: impl Fn(&str, &Value) -> Option<Result<Value, Value>> + Send + Sync + 'static) -> Fake {
+pub fn rpc(
+    methods: impl Fn(&str, &Value) -> Option<Result<Value, Value>> + Send + Sync + 'static,
+) -> Fake {
     http(move |seen| {
         let method = seen.body["method"].as_str().unwrap_or_default();
         let reply = match methods(method, &seen.body["params"]) {
@@ -136,7 +138,12 @@ pub fn rpc(methods: impl Fn(&str, &Value) -> Option<Result<Value, Value>> + Send
 pub fn word(addr: &str) -> [u8; 32] {
     let mut w = [0u8; 32];
     let digits = addr.trim_start_matches("0x");
-    let bytes = hex::decode(if digits.len() % 2 == 1 { format!("0{digits}") } else { digits.to_string() }).unwrap();
+    let bytes = hex::decode(if digits.len() % 2 == 1 {
+        format!("0{digits}")
+    } else {
+        digits.to_string()
+    })
+    .unwrap();
     w[32 - bytes.len()..].copy_from_slice(&bytes);
     w
 }
@@ -161,7 +168,13 @@ pub fn transfer_body(
     .encode()
 }
 
-pub fn transfer(amount: u128, fee: u128, token_chain: u16, to_chain: u16, to: [u8; 32]) -> Transfer {
+pub fn transfer(
+    amount: u128,
+    fee: u128,
+    token_chain: u16,
+    to_chain: u16,
+    to: [u8; 32],
+) -> Transfer {
     Transfer {
         amount: Transfer::u256_from_u128(amount),
         token_address: word("0x00000000000000000000000000000000000000dd"),
@@ -178,7 +191,13 @@ pub fn burn(sequence: u64, to_chain: u16, amount: u128, fee: u128) -> Observed {
         1,
         RAND_EMITTER,
         sequence,
-        transfer(amount, fee, to_chain, to_chain, word("0x000000000000000000000000000000000000cafe")),
+        transfer(
+            amount,
+            fee,
+            to_chain,
+            to_chain,
+            word("0x000000000000000000000000000000000000cafe"),
+        ),
     ))
     .unwrap()
 }
@@ -203,7 +222,11 @@ pub fn guardian_keys(n: u8) -> Vec<bridge_daemons::crypto::GuardianKey> {
 // ---- subprocess helpers ------------------------------------------------------
 
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 pub fn pad32(bytes: &[u8]) -> Vec<u8> {
@@ -246,7 +269,10 @@ impl Daemon {
             .stdout(file.try_clone().unwrap())
             .stderr(file)
             .env("NO_COLOR", "1");
-        Daemon { child: command.spawn().unwrap(), log }
+        Daemon {
+            child: command.spawn().unwrap(),
+            log,
+        }
     }
 
     pub fn log(&self) -> String {
@@ -307,9 +333,14 @@ pub fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
 /// nothing answers. Enough for polling a daemon's API without a blocking client.
 pub fn request(method: &str, url: &str, content_type: &str, body: &str) -> Option<(u16, String)> {
     let rest = url.strip_prefix("http://")?;
-    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let (host, path) = rest
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap_or((rest, "/".into()));
     let mut stream = TcpStream::connect(host).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok()?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -319,7 +350,10 @@ pub fn request(method: &str, url: &str, content_type: &str, body: &str) -> Optio
     let mut raw = String::new();
     stream.read_to_string(&mut raw).ok()?;
     let status = raw.split_whitespace().nth(1)?.parse().ok()?;
-    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
     Some((status, body))
 }
 
