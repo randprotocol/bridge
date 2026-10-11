@@ -199,3 +199,131 @@ pub fn guardian_keys(n: u8) -> Vec<bridge_daemons::crypto::GuardianKey> {
         .map(|i| bridge_daemons::crypto::GuardianKey::from_hex(&format!("{i:064x}")).unwrap())
         .collect()
 }
+
+// ---- subprocess helpers ------------------------------------------------------
+
+pub fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+pub fn pad32(bytes: &[u8]) -> Vec<u8> {
+    let mut v = bytes.to_vec();
+    v.resize(v.len().div_ceil(32) * 32, 0);
+    v
+}
+
+/// A `MessagePublished(uint64 indexed sequence, uint32 nonce, uint8 level, bytes payload)` log
+/// of `contract`, carrying the payload of `body`.
+pub fn evm_log(contract: &str, observed: &Observed, block: u64) -> Value {
+    let body = observed.decoded();
+    let mut data = Vec::new();
+    data.extend_from_slice(&word(&format!("{:x}", body.nonce)));
+    data.extend_from_slice(&word(&format!("{:x}", body.consistency_level)));
+    data.extend_from_slice(&word("60"));
+    data.extend_from_slice(&word(&format!("{:x}", body.payload.len())));
+    data.extend_from_slice(&pad32(&body.payload));
+    json!({
+        "address": contract,
+        "topics": ["0xabcd", format!("0x{}", hex::encode(word(&format!("{:x}", body.sequence))))],
+        "data": format!("0x{}", hex::encode(data)),
+        "blockNumber": format!("0x{block:x}"),
+        "removed": false,
+    })
+}
+
+/// A running daemon: stdout and stderr go to files, `stop` interrupts it the way an
+/// operator would and returns its exit status.
+pub struct Daemon {
+    child: std::process::Child,
+    pub log: std::path::PathBuf,
+}
+
+impl Daemon {
+    pub fn spawn(mut command: std::process::Command, dir: &std::path::Path) -> Daemon {
+        let log = dir.join("daemon.log");
+        let file = std::fs::File::create(&log).unwrap();
+        command
+            .stdout(file.try_clone().unwrap())
+            .stderr(file)
+            .env("NO_COLOR", "1");
+        Daemon { child: command.spawn().unwrap(), log }
+    }
+
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Whether it already exited (a startup error), with its status.
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().unwrap()
+    }
+
+    /// SIGINT, then wait (at most 20 s) for a clean exit.
+    pub fn stop(mut self) -> std::process::ExitStatus {
+        let _ = std::process::Command::new("kill")
+            .args(["-INT", &self.child.id().to_string()])
+            .status();
+        for _ in 0..200 {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = self.child.kill();
+        panic!("daemon did not stop on SIGINT:\n{}", self.log());
+    }
+
+    pub fn wait(mut self) -> std::process::ExitStatus {
+        for _ in 0..200 {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = self.child.kill();
+        panic!("daemon did not exit:\n{}", self.log());
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Polls `check` every 100 ms for up to 30 s.
+pub fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if check() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// A blocking HTTP/1.1 request over a plain socket: `(status, body)`, or `None` when
+/// nothing answers. Enough for polling a daemon's API without a blocking client.
+pub fn request(method: &str, url: &str, content_type: &str, body: &str) -> Option<(u16, String)> {
+    let rest = url.strip_prefix("http://")?;
+    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let mut stream = TcpStream::connect(host).ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok()?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .ok()?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).ok()?;
+    let status = raw.split_whitespace().nth(1)?.parse().ok()?;
+    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    Some((status, body))
+}
+
+pub fn get_json(url: &str) -> Option<(u16, Value)> {
+    let (status, body) = request("GET", url, "application/json", "")?;
+    Some((status, serde_json::from_str(&body).unwrap_or(Value::Null)))
+}
