@@ -79,6 +79,31 @@ impl EvmSource {
         u32::try_from(ts).map_err(|_| anyhow!("block {number} timestamp out of range"))
     }
 
+    /// The endpoint's `sequence()` as of `block`: how many messages it had
+    /// published through that block, since every `lock` emits one
+    /// `MessagePublished` and increments the counter (RandBridgeBase.sol).
+    async fn published_through(&self, block: u64) -> Result<u64> {
+        let selector = &keccak256(b"sequence()")[..4];
+        let result = self
+            .rpc
+            .call(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("0x{}", hex::encode(self.contract)),
+                        "data": format!("0x{}", hex::encode(selector)),
+                    },
+                    format!("0x{block:x}"),
+                ]),
+            )
+            .await?;
+        let word = hex_data(&result)?;
+        if word.len() != 32 || word[..24].iter().any(|b| *b != 0) {
+            bail!("sequence() did not return a uint64");
+        }
+        Ok(u64::from_be_bytes(word[24..].try_into().expect("8")))
+    }
+
     fn body_from_log(&self, log: &Value, timestamp: u32) -> Result<Vec<u8>> {
         let topics = log["topics"]
             .as_array()
@@ -154,7 +179,7 @@ impl Source for EvmSource {
             return Ok((Vec::new(), cursor.clone()));
         }
         let to = safe.min(cursor.next_block + self.cfg.max_log_range.max(1) - 1);
-        let logs = self
+        let logs = match self
             .rpc
             .call(
                 "eth_getLogs",
@@ -165,7 +190,49 @@ impl Source for EvmSource {
                     "toBlock": format!("0x{to:x}"),
                 }]),
             )
-            .await?;
+            .await
+        {
+            Ok(logs) => logs,
+            // The node will not serve this range: a public RPC that calls any
+            // range older than its log window "archive" (publicnode: HTTP 403
+            // past 10 000 blocks behind head, on Ethereum and BSC alike), so a
+            // daemon stopped for longer than that would otherwise never catch
+            // up. The endpoint's own counter settles whether the range holds
+            // anything: `sequence()` at the safe head equal to the sequence the
+            // cursor is waiting for means nothing was published through that
+            // block, and the scan may resume past it. Anything else keeps the
+            // cursor where it is, since a message would be missed.
+            Err(refused) => {
+                let published = match self.published_through(safe).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        return Err(refused.context(format!(
+                            "{}: and sequence() at block {safe} could not be read: {e:#}",
+                            self.cfg.name
+                        )))
+                    }
+                };
+                if published != cursor.next_sequence {
+                    return Err(refused.context(format!(
+                        "{}: blocks [{}, {to}] hold a message this node will not serve (sequence() is {published} at block {safe}, the cursor expects {}); use an RPC that serves that range",
+                        self.cfg.name, cursor.next_block, cursor.next_sequence
+                    )));
+                }
+                tracing::warn!(
+                    "{}: eth_getLogs [{}, {to}] refused ({refused:#}); sequence() at block {safe} is still {published}, nothing was published through it — resuming at {}",
+                    self.cfg.name,
+                    cursor.next_block,
+                    safe + 1
+                );
+                return Ok((
+                    Vec::new(),
+                    Cursor {
+                        next_block: safe + 1,
+                        next_sequence: cursor.next_sequence,
+                    },
+                ));
+            }
+        };
         let logs = logs
             .as_array()
             .ok_or_else(|| anyhow!("eth_getLogs: not an array"))?;

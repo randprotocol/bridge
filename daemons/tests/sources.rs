@@ -577,6 +577,132 @@ async fn a_rescan_after_a_restart_skips_what_was_already_seen() {
     assert_eq!(next.next_sequence, 6);
 }
 
+/// A node whose `eth_getLogs` is refused outright (publicnode: HTTP 403,
+/// "Archive requests require a personal token", for any range older than
+/// 10 000 blocks behind head) and whose endpoint answers `sequence()` with
+/// `published` at the block asked for.
+fn refusing_node(head: u64, published: Option<u64>) -> Fake {
+    http(move |seen| {
+        let method = seen.body["method"].as_str().unwrap_or_default();
+        let params = &seen.body["params"];
+        let ok = |v: Value| {
+            (
+                200,
+                json!({ "jsonrpc": "2.0", "id": 1, "result": v }).to_string(),
+            )
+        };
+        match method {
+            "eth_blockNumber" => ok(json!(format!("0x{head:x}"))),
+            "eth_getLogs" => (
+                403,
+                json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32602,
+                    "message": "Archive requests require a personal token" } })
+                .to_string(),
+            ),
+            "eth_call" => match published {
+                Some(n) => ok(json!(format!("0x{}", hex::encode(word(&format!("{n:x}")))))),
+                None => (
+                    200,
+                    json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32000, "message": "header not found" } })
+                        .to_string(),
+                ),
+            },
+            _ => {
+                let _ = params;
+                (200, json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "method not found" } }).to_string())
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_refused_log_range_is_passed_when_the_endpoint_published_nothing_in_it() {
+    // Head 20 000, 15 confirmations: the safe head is 19 985. The cursor is
+    // 12 000 blocks behind it, past the RPC's log window.
+    let node = refusing_node(20_000, Some(5));
+    let source = EvmSource::new(&evm_cfg(
+        &node.url,
+        EvmKind::Evm,
+        Finality::Confirmations(15),
+        1000,
+    ))
+    .unwrap();
+    let (messages, next) = source
+        .poll(&Cursor {
+            next_block: 7_985,
+            next_sequence: 5,
+        })
+        .await
+        .unwrap();
+    assert!(messages.is_empty());
+    assert_eq!(
+        next,
+        Cursor {
+            next_block: 19_986,
+            next_sequence: 5
+        },
+        "resumes right after the safe head whose sequence() was read"
+    );
+    // The counter was read at the safe head itself, from the endpoint, with
+    // the `sequence()` selector.
+    let call = node
+        .requests()
+        .into_iter()
+        .find(|s| s.rpc_method() == Some("eth_call"))
+        .expect("sequence() was asked for");
+    assert_eq!(call.body["params"][0]["to"], CONTRACT);
+    assert_eq!(call.body["params"][0]["data"], "0x529d15cc");
+    assert_eq!(call.body["params"][1], "0x4e11", "block 19 985");
+}
+
+#[tokio::test]
+async fn a_refused_log_range_with_a_message_in_it_stays_an_error() {
+    let node = refusing_node(20_000, Some(6));
+    let source = EvmSource::new(&evm_cfg(
+        &node.url,
+        EvmKind::Evm,
+        Finality::Confirmations(15),
+        1000,
+    ))
+    .unwrap();
+    let err = source
+        .poll(&Cursor {
+            next_block: 7_985,
+            next_sequence: 5,
+        })
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("403") && text.contains("sequence() is 6") && text.contains("expects 5"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_log_range_whose_counter_cannot_be_read_stays_an_error() {
+    let node = refusing_node(20_000, None);
+    let source = EvmSource::new(&evm_cfg(
+        &node.url,
+        EvmKind::Evm,
+        Finality::Confirmations(15),
+        1000,
+    ))
+    .unwrap();
+    let err = source
+        .poll(&Cursor {
+            next_block: 7_985,
+            next_sequence: 5,
+        })
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("403") && text.contains("header not found"),
+        "{text}"
+    );
+}
+
 #[test]
 fn an_evm_source_needs_a_valid_contract() {
     let mut cfg = evm_cfg(
