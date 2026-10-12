@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-codec"
-version = "0.7.1"
+version = "0.8.0"
 
 [[package]]
 name = "bs58"
