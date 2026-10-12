@@ -132,7 +132,7 @@ systemctl is-active rand-relayer || true   # inactive: it starts at 'start', aft
     ;;
   start)
     for g in 7 8; do
-      grep -q "^chain_id = $TO " "mainnet/guardian-$g.toml" || die "guardian-$g.toml is not on chain $TO"
+      grep -q "^chain_id = $TO " "mainnet/guardian-$g.toml" || { (( dry )) && echo "# (dry run: guardian-$g.toml is not on chain $TO yet; --yes would refuse)" || die "guardian-$g.toml is not on chain $TO"; }
     done
     echo "+ GUARDIAN_PQ_FROM_NEXT=1 mainnet/run-guardians-set1.sh"
     if (( yes )); then GUARDIAN_PQ_FROM_NEXT=1 mainnet/run-guardians-set1.sh; fi
