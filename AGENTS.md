@@ -6,6 +6,37 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+## State as of 2026-10-12 — bridge LIVE on Rand chain 21 (fullnode v0.8.0), cut with `daemons/mainnet/cut-chain21.sh`
+
+- **Rand chain 21** (fullnode **v0.8.0**, tag at `c0878c3f`; genesis
+  `ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a`, `binding_domain: 1`) was cut
+  2026-10-12 10:22Z, all 26 validators switched 10:31Z; the bridge daemons moved 10:34–10:39Z with
+  `daemons/mainnet/cut-chain21.sh` (fullnode `deploy/chain21-bridge-steps.md` and
+  `deploy/cut-records/chain21.record` are the record). Chain 20 ran 2026-10-01 06:17Z – 10-12.
+- **Carried from the chain-20 snapshot (height 814702, 07:41:55Z):** guardian set 1, `burn_sequence`
+  14, inbound floors `{2: 3, 3: 5, 4: 3, 5: 7}`, chain 20's emitters, `bridge.rotation` and
+  `bridge.fees` 10/10 bps to fingerprint 89DS-4Q4X-HXSX-MBYW; locked USDT 22 / 23.001999 / 30 / 25 =
+  100.001999 == custody == the zUSD carried (three genesis notes). Endpoints unchanged (the
+  2026-09-30 Ethereum/BSC/Tron ones, Solana as before).
+- **Daemons:** `chain_id = 21` everywhere (the repo's `daemons/mainnet/*.toml` match the hosts since
+  this audit's commit; before it guardian-1..6 still said 14 and relayer.toml 20). The relayer
+  (systemd `rand-relayer`) runs the **Linux v0.8.0 `rand`** (sha256 `e3a38e74…bbf4`), the 0.6.8 one
+  kept as `rand.pre-c21`; guardians 1–6 each run on their own host beside their own chain-21 node,
+  7–8 through `mainnet/run-guardians-set1.sh` (`GUARDIAN_PQ_FROM_NEXT=1`). The EVM getlogs-window
+  fix (`3400486`) was deployed 2026-10-12 12:22Z. The repo's `relayer.toml` is a template whose
+  `rand_cli`/`solana_cli` paths are rewritten for the host copy.
+- **Governance on a `binding_domain` chain:** chain 20 and 21 verify only the genesis-bound `…-2`
+  layouts (`spec/PQ-COSIGNATURE.md` §8). `rand-bridge-gov pause|pq-unpause|pq-list|pq-register`
+  take `--genesis <hex>` / `--rand-rpc <url>` since the BRG-901 fix (branch `audit/v10`); **a
+  kept-ready pause file is valid for one chain at one nonce — re-make it for chain 21** with the
+  genesis above. The mint co-signature stays chain-id-only, by design.
+- **Audit v10 fixes on `audit/v10` (not deployed as of 2026-10-15):** BRG-901 (above); BR-401 — a
+  Rand cursor past the chain's `burn_sequence` stops either daemon at startup and is an error on
+  every poll, the startup chain-id check is hard (a silent or contradicting node stops the daemon;
+  `Restart=always` retries), and `cut-chain21.sh` refuses a `BURN_SEQ` that is not the chain's own
+  `burn_sequence` (`RAND_RPC`, default the node-A tunnel). Rolling these needs each host's
+  `rand-guardian` / `rand-relayer` binary rebuilt; nothing in the configs changes.
+
 ## State as of 2026-10-01 — bridge LIVE on Rand chain 20 (zUSD fees), new endpoints, relayer on a droplet
 
 - **Rand chain 20** (fullnode v0.6.8 `c9c9bd3c`, genesis `6210cf07…5135`, live 06:17 UTC, cut by session
