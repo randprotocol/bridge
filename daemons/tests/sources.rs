@@ -742,9 +742,13 @@ fn rand_node(burn_sequence: u64, row: impl Fn(u64) -> Value + Send + Sync + 'sta
         }))),
         "rand_getBridgeBurn" => Some(Ok(row(p[0].as_u64().unwrap()))),
         "rand_chainId" => Some(Ok(json!(14))),
+        "rand_getGenesisHash" => Some(Ok(json!(CHAIN21_GENESIS))),
         _ => None,
     })
 }
+
+/// Chain 21's genesis hash (fullnode `deploy/cut-records/chain21.record`).
+const CHAIN21_GENESIS: &str = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a";
 
 #[tokio::test]
 async fn the_bridge_state_and_chain_id_are_read_from_the_node() {
@@ -760,6 +764,28 @@ async fn the_bridge_state_and_chain_id_are_read_from_the_node() {
         "an undecodable key is dropped"
     );
     assert_eq!(rand::chain_id(&client).await.unwrap(), 14);
+    assert_eq!(
+        hex::encode(rand::genesis_hash(&client).await.unwrap()),
+        CHAIN21_GENESIS
+    );
+}
+
+#[tokio::test]
+async fn a_genesis_hash_that_is_not_32_bytes_of_hex_is_refused() {
+    for (reply, why) in [
+        (json!("ca76c2"), "expected 32 bytes"),
+        (json!("zz".repeat(32)), "not hex"),
+        (json!(21), "not a string"),
+    ] {
+        let node = rpc(move |m, _| (m == "rand_getGenesisHash").then(|| Ok(reply.clone())));
+        let err = rand::genesis_hash(&JsonRpc::new(&node.url))
+            .await
+            .err()
+            .expect(why);
+        assert!(format!("{err:#}").contains(why), "{why}: {err:#}");
+    }
+    let mute = rpc(|_, _| None);
+    assert!(rand::genesis_hash(&JsonRpc::new(&mute.url)).await.is_err());
 }
 
 #[tokio::test]

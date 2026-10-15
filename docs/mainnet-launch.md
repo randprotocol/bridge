@@ -124,4 +124,5 @@ runs in this order; each step that signs or broadcasts needs the owner's explici
    (`GUARDIAN{i}_PQ_SEED` mapped from `NEW_GUARDIAN{i}_PQ_SEED`, `rand.chain_id = 14`) and a relayer,
    one round trip per chain from the tester wallets, `rand-bridge-audit`, then raise the caps after
    the external audit. An emergency stop on Rand is `rand-bridge-gov pause` (the single pause key);
-   resuming takes `pq-unpause` (a guardian quorum).
+   resuming takes `pq-unpause` (a guardian quorum). From chain 20 on both take the chain's
+   genesis hash (`--genesis` / `--rand-rpc`; `spec/PQ-COSIGNATURE.md` §8, the genesis-bound form).

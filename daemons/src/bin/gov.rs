@@ -5,6 +5,10 @@
 //!   verify       check any rotation attestation against the current set
 //!   submit-evm   send it to an Ethereum-style endpoint (anyone may)
 //!   submit-tron  send it to the Tron endpoint
+//!   pause, pq-unpause, pq-list, pq-register
+//!                the Rand-only governance messages (spec/PQ-COSIGNATURE.md §8);
+//!                on a chain cut with binding_domain (20 onward) they bind the
+//!                genesis hash: --genesis <hex> or --rand-rpc <url> (BRG-901)
 //!
 //! The same attestation goes to every chain: the three EVM-family endpoints,
 //! Solana (`rand-bridge-cli guardian-set-upgrade`) and Rand (a `BridgeAttest`
@@ -38,10 +42,64 @@ struct CurrentSet {
     current_guardians: Vec<String>,
 }
 
+/// Which form a Rand governance message takes (BRG-901, `pq_gov`): a chain cut
+/// without `binding_domain` (14-19) signs the chain-id layouts; every later
+/// chain binds its genesis hash under the `…-2` tags, so the hash is needed —
+/// given, or read from a node that is first checked to serve the chain.
+#[derive(Args)]
+struct BindingArgs {
+    /// The chain's 32-byte genesis hash, hex (chain 20 onward; refused for chains 14-19).
+    #[arg(long)]
+    genesis: Option<String>,
+    /// A Rand node to read the genesis hash from (`rand_getGenesisHash`), after checking
+    /// that it serves --rand-chain-id. With --genesis too, the two must agree.
+    #[arg(long)]
+    rand_rpc: Option<String>,
+}
+
+impl BindingArgs {
+    async fn resolve(&self, rand_chain_id: u64) -> Result<bridge_daemons::pq_gov::BindingDomain> {
+        use bridge_daemons::sources::rand;
+        let given = self
+            .genesis
+            .as_deref()
+            .map(bridge_daemons::config::hex32)
+            .transpose()
+            .context("--genesis")?;
+        let mut read = None;
+        if let Some(url) = &self.rand_rpc {
+            let rpc = bridge_daemons::rpc::JsonRpc::new(url);
+            let served = rand::chain_id(&rpc)
+                .await
+                .context("the node at --rand-rpc did not answer rand_chainId")?;
+            if served != rand_chain_id {
+                bail!("--rand-chain-id is {rand_chain_id} but the node at --rand-rpc serves chain {served}");
+            }
+            // A chain-id chain needs no hash; do not read one it would then refuse.
+            if !bridge_daemons::pq_gov::CHAIN_ID_BINDING_CHAIN_IDS.contains(&rand_chain_id) {
+                let g = rand::genesis_hash(&rpc).await?;
+                if let Some(given) = given {
+                    if given != g {
+                        bail!(
+                            "--genesis {} is not the genesis hash the node at --rand-rpc serves ({})",
+                            hex::encode(given),
+                            hex::encode(g)
+                        );
+                    }
+                }
+                read = Some(g);
+            }
+        }
+        bridge_daemons::pq_gov::binding_domain_for(rand_chain_id, given.or(read))
+    }
+}
+
 #[derive(Args)]
 struct PqQuorumArgs {
     #[arg(long)]
     rand_chain_id: u64,
+    #[command(flatten)]
+    binding: BindingArgs,
     /// The ledger's current nonce for this message kind (`list_nonce` or `pause_nonce`).
     #[arg(long)]
     nonce: u64,
@@ -95,7 +153,12 @@ fn pq_guardians(path: &PathBuf) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Signs `message` with the quorum the arguments name and writes pq.json.
-fn sign_governance(what: &str, message: &[u8], args: &PqQuorumArgs) -> Result<()> {
+fn sign_governance(
+    what: &str,
+    binding: &bridge_daemons::pq_gov::BindingDomain,
+    message: &[u8],
+    args: &PqQuorumArgs,
+) -> Result<()> {
     let guardians = pq_guardians(&args.pq_guardians_file)?;
     let signers = args
         .seed_envs
@@ -106,6 +169,7 @@ fn sign_governance(what: &str, message: &[u8], args: &PqQuorumArgs) -> Result<()
     std::fs::write(&args.out, serde_json::to_vec(&quorum)?)
         .with_context(|| format!("writing {}", args.out.display()))?;
     println!("{what}");
+    println!("binding    {}", binding.describe());
     println!(
         "message    0x{}  ({} bytes)",
         hex::encode(message),
@@ -200,6 +264,8 @@ enum Command {
     Pause {
         #[arg(long)]
         rand_chain_id: u64,
+        #[command(flatten)]
+        binding: BindingArgs,
         /// The ledger's current `pause_nonce` (rand_getBridgeState).
         #[arg(long)]
         nonce: u64,
@@ -417,13 +483,15 @@ async fn main() -> Result<()> {
             backing,
         } => {
             let b = backing.backing()?;
-            let m = bridge_daemons::pq_gov::list_message(
+            let binding = quorum.binding.resolve(quorum.rand_chain_id).await?;
+            let m = bridge_daemons::pq_gov::list_message_in(
+                &binding,
                 quorum.rand_chain_id,
                 quorum.nonce,
                 token_index,
                 &b,
             );
-            sign_governance(&format!("ListBacking: token {token_index} += chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &m, &quorum)?;
+            sign_governance(&format!("ListBacking: token {token_index} += chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &binding, &m, &quorum)?;
         }
         Command::PqRegister {
             quorum,
@@ -433,7 +501,9 @@ async fn main() -> Result<()> {
             backing,
         } => {
             let b = backing.backing()?;
-            let m = bridge_daemons::pq_gov::register_message(
+            let binding = quorum.binding.resolve(quorum.rand_chain_id).await?;
+            let m = bridge_daemons::pq_gov::register_message_in(
+                &binding,
                 quorum.rand_chain_id,
                 quorum.nonce,
                 &name,
@@ -441,30 +511,39 @@ async fn main() -> Result<()> {
                 &bridge_daemons::config::hex32(&salt)?,
                 &b,
             )?;
-            sign_governance(&format!("RegisterBridgedToken: {name} ({symbol}), first backing chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &m, &quorum)?;
+            sign_governance(&format!("RegisterBridgedToken: {name} ({symbol}), first backing chain {} coin 0x{} ({} decimals), list_nonce {}", b.chain, hex::encode(b.token), b.decimals, quorum.nonce), &binding, &m, &quorum)?;
         }
         Command::PqUnpause { quorum } => {
-            let m = bridge_daemons::pq_gov::unpause_message(quorum.rand_chain_id, quorum.nonce);
+            let binding = quorum.binding.resolve(quorum.rand_chain_id).await?;
+            let m = bridge_daemons::pq_gov::unpause_message_in(
+                &binding,
+                quorum.rand_chain_id,
+                quorum.nonce,
+            );
             sign_governance(
                 &format!(
                     "UNPAUSE minting on Rand chain {}, pause_nonce {}",
                     quorum.rand_chain_id, quorum.nonce
                 ),
+                &binding,
                 &m,
                 &quorum,
             )?;
         }
         Command::Pause {
             rand_chain_id,
+            binding,
             nonce,
             seed_env,
             out,
         } => {
             let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(&seed_env)?)?;
-            let m = bridge_daemons::pq_gov::pause_message(rand_chain_id, nonce);
+            let binding = binding.resolve(rand_chain_id).await?;
+            let m = bridge_daemons::pq_gov::pause_message_in(&binding, rand_chain_id, nonce);
             std::fs::write(&out, hex::encode(key.sign_raw(&m)))
                 .with_context(|| format!("writing {}", out.display()))?;
             println!("PAUSE minting on Rand chain {rand_chain_id}, pause_nonce {nonce}");
+            println!("binding    {}", binding.describe());
             println!("message    0x{}", hex::encode(&m));
             println!("signature  -> {}", out.display());
         }

@@ -85,6 +85,32 @@ A superseded set keeps verifying *transfers* for 86,400 s, so leave a day betwee
 exposed keys and whitelisting anything. The Dilithium2 set is not changed by a rotation
 (`spec/PQ-COSIGNATURE.md` §5).
 
+## Governance on Rand: pause, unpause, list, register
+
+The Rand-only messages (`spec/PQ-COSIGNATURE.md` §8) are signed by the same tool: `pause` with the
+single genesis pause key (`RAND_BRIDGE_PAUSE_KEY_SEED`), `pq-unpause`, `pq-list` and `pq-register`
+with a PQ guardian quorum (`--seed-envs`, `--pq-guardians-file`). Each takes the ledger's current
+nonce (`rand_getBridgeState`: `pause_nonce` or `list_nonce`) and the chain id, and **on a chain cut
+with `binding_domain` (chain 20 onward) the chain's genesis hash**, which the message binds under
+the `…-2` tags — without it the fullnode refuses the signature, and the tool refuses to sign:
+
+```sh
+# the emergency stop on chain 21: the pause file binds chain 21's genesis
+RAND_BRIDGE_PAUSE_KEY_SEED=… rand-bridge-gov pause --rand-chain-id 21 --nonce <pause_nonce> \
+    --genesis ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a --out pause.sig
+# or read the hash from a node, which is first checked to serve chain 21
+rand-bridge-gov pause --rand-chain-id 21 --nonce <pause_nonce> --rand-rpc http://127.0.0.1:8545 --out pause.sig
+rand-bridge-gov pq-unpause --rand-chain-id 21 --nonce <pause_nonce> --genesis ca76c276… \
+    --pq-guardians-file pq.json --seed-envs PQ_SEED_1,PQ_SEED_2,… --out unpause.json
+```
+
+Which form a chain takes is decided by its chain id (`pq_gov::CHAIN_ID_BINDING_CHAIN_IDS`): chains
+14–19 sign the chain-id layouts and refuse a `--genesis`; every other chain needs one. Given both
+`--genesis` and `--rand-rpc`, the two must agree. The tool prints the form it signed (`binding`) and
+the message bytes, so a second person can re-derive them by hand. The wallet carries the files:
+`rand bridge-pause --sig @pause.sig`, `rand bridge-unpause --pq @unpause.json`. A pause file is
+only ever valid at one nonce on one chain — re-make the kept-ready one after every cut.
+
 ## Audit
 
 `rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved

@@ -652,6 +652,292 @@ fn pause_signs_with_the_single_pause_key_and_pq_public_key_prints_the_key_not_th
     assert!(!out(&o).contains(&seed(1)));
 }
 
+/// Chain 21's genesis hash (fullnode `deploy/cut-records/chain21.record`).
+const CHAIN21_GENESIS: &str = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a";
+
+fn chain21_domain() -> pq_gov::BindingDomain {
+    pq_gov::BindingDomain::Genesis(hex::decode(CHAIN21_GENESIS).unwrap().try_into().unwrap())
+}
+
+/// `pause` for `chain` at nonce 3 with `extra` binding arguments: the output and the signature.
+fn pause(dir: &Path, chain: &str, extra: &[&str]) -> (Output, Vec<u8>) {
+    let outfile = dir.join("pause.sig");
+    let _ = std::fs::remove_file(&outfile);
+    let o = gov()
+        .args(["pause", "--rand-chain-id", chain, "--nonce", "3", "--out"])
+        .arg(&outfile)
+        .args(extra)
+        .env("RAND_BRIDGE_PAUSE_KEY_SEED", seed(9))
+        .output()
+        .unwrap();
+    let sig = std::fs::read_to_string(&outfile)
+        .ok()
+        .map(|t| hex::decode(t).unwrap())
+        .unwrap_or_default();
+    (o, sig)
+}
+
+#[test]
+fn chain_21_governance_signs_the_genesis_bound_layouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = PqKey::from_seed_hex(&seed(9)).unwrap();
+    let genesis = ["--genesis", CHAIN21_GENESIS];
+
+    // The pause key signs "rand-bridge-pause-2" ‖ genesis ‖ 21 ‖ 3, the bytes the fullnode
+    // verifies on chain 21 — written out by hand here, not built by the code under test.
+    let (o, sig) = pause(dir.path(), "21", &genesis);
+    assert!(o.status.success(), "{}", err(&o));
+    let message = pq_gov::pause_message_in(&chain21_domain(), 21, 3);
+    assert_eq!(
+        hex::encode(&message),
+        "72616e642d6272696467652d70617573652d32ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a00000000000000150000000000000003"
+    );
+    assert!(pq::verify_raw(&key.public_key(), &message, &sig));
+    assert!(
+        !pq::verify_raw(&key.public_key(), &pq_gov::pause_message(21, 3), &sig),
+        "not the chain-id form"
+    );
+    assert!(out(&o).contains("PAUSE minting on Rand chain 21, pause_nonce 3"));
+    assert!(out(&o).contains(&format!("message    0x{}", hex::encode(&message))));
+    assert!(
+        out(&o).contains(&format!("binding    genesis {CHAIN21_GENESIS}")),
+        "{}",
+        out(&o)
+    );
+    // A 0x prefix on the hash is fine.
+    let (o, sig0x) = pause(
+        dir.path(),
+        "21",
+        &["--genesis", &format!("0x{CHAIN21_GENESIS}")],
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(sig0x, sig, "deterministic signing, same message");
+
+    // The quorum messages take the same argument.
+    let pq_file = pq_set(dir.path(), &[1, 2, 3, 4]);
+    let guardians: Vec<Vec<u8>> = (1..=4)
+        .map(|i| PqKey::from_seed_hex(&seed(i)).unwrap().public_key())
+        .collect();
+    let token = "ab".repeat(32);
+    let backing = pq_gov::Backing {
+        chain: 2,
+        token: [0xab; 32],
+        decimals: 6,
+    };
+    let run = |sub: &[&str], name: &str| -> (Output, Vec<PqSignature>) {
+        let outfile = dir.path().join(name);
+        let mut c = gov();
+        c.args(sub)
+            .args([
+                "--rand-chain-id",
+                "21",
+                "--nonce",
+                "7",
+                "--genesis",
+                CHAIN21_GENESIS,
+                "--seed-envs",
+                "PQ1,PQ2,PQ3",
+                "--pq-guardians-file",
+            ])
+            .arg(&pq_file)
+            .arg("--out")
+            .arg(&outfile);
+        with_seeds(&mut c, &[1, 2, 3]);
+        let o = c.output().unwrap();
+        let list = std::fs::read(&outfile)
+            .ok()
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap_or_default();
+        (o, list)
+    };
+    let (o, list) = run(&["pq-unpause"], "unpause.json");
+    assert!(o.status.success(), "{}", err(&o));
+    let m = pq_gov::unpause_message_in(&chain21_domain(), 21, 7);
+    pq::check_raw(&list, &guardians, &m).unwrap();
+    assert!(pq::check_raw(&list, &guardians, &pq_gov::unpause_message(21, 7)).is_err());
+    assert!(out(&o).contains(&format!("binding    genesis {CHAIN21_GENESIS}")));
+
+    let (o, list) = run(
+        &[
+            "pq-list",
+            "--token-index",
+            "1",
+            "--chain",
+            "2",
+            "--token",
+            &token,
+            "--decimals",
+            "6",
+        ],
+        "list.json",
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    let m = pq_gov::list_message_in(&chain21_domain(), 21, 7, 1, &backing);
+    pq::check_raw(&list, &guardians, &m).unwrap();
+
+    let salt = "5a".repeat(32);
+    let (o, list) = run(
+        &[
+            "pq-register",
+            "--name",
+            "Shielded USD",
+            "--symbol",
+            "zUSD",
+            "--salt",
+            &salt,
+            "--chain",
+            "2",
+            "--token",
+            &token,
+            "--decimals",
+            "6",
+        ],
+        "reg.json",
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    let m = pq_gov::register_message_in(
+        &chain21_domain(),
+        21,
+        7,
+        "Shielded USD",
+        "zUSD",
+        &[0x5a; 32],
+        &backing,
+    )
+    .unwrap();
+    pq::check_raw(&list, &guardians, &m).unwrap();
+}
+
+#[test]
+fn a_genesis_bound_chain_needs_its_genesis_and_a_chain_id_chain_refuses_one() {
+    let dir = tempfile::tempdir().unwrap();
+    // Chain 21 without a genesis hash: nothing to sign.
+    let (o, sig) = pause(dir.path(), "21", &[]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(
+        err(&o).contains("Rand chain 21 binds its genesis hash")
+            && err(&o).contains("--genesis")
+            && err(&o).contains("--rand-rpc"),
+        "{}",
+        err(&o)
+    );
+    // Chain 14 keeps the chain-id form and refuses a genesis.
+    let (o, sig) = pause(dir.path(), "14", &["--genesis", CHAIN21_GENESIS]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(
+        err(&o).contains("chain 14 was cut without binding_domain"),
+        "{}",
+        err(&o)
+    );
+    let (o, _) = pause(dir.path(), "14", &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("binding    chain id only"), "{}", out(&o));
+    // Not a 32-byte hash.
+    let (o, sig) = pause(dir.path(), "21", &["--genesis", "ca76c2"]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(err(&o).contains("expected 32 bytes"), "{}", err(&o));
+    // The quorum commands refuse the same way.
+    let pq_file = pq_set(dir.path(), &[1, 2, 3]);
+    let mut c = gov();
+    c.args([
+        "pq-unpause",
+        "--rand-chain-id",
+        "21",
+        "--nonce",
+        "0",
+        "--seed-envs",
+        "PQ1,PQ2,PQ3",
+        "--pq-guardians-file",
+    ])
+    .arg(&pq_file)
+    .arg("--out")
+    .arg(dir.path().join("o.json"));
+    with_seeds(&mut c, &[1, 2, 3]);
+    let o = c.output().unwrap();
+    assert!(!o.status.success());
+    assert!(
+        err(&o).contains("Rand chain 21 binds its genesis hash"),
+        "{}",
+        err(&o)
+    );
+    assert!(!dir.path().join("o.json").exists());
+}
+
+#[test]
+fn the_genesis_hash_is_read_from_a_rand_node_that_must_serve_the_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = |chain: u64, genesis: &'static str| {
+        rpc(move |m, _| match m {
+            "rand_chainId" => Some(Ok(json!(chain))),
+            "rand_getGenesisHash" => Some(Ok(json!(genesis))),
+            _ => None,
+        })
+    };
+    let key = PqKey::from_seed_hex(&seed(9)).unwrap();
+    let message = pq_gov::pause_message_in(&chain21_domain(), 21, 3);
+
+    // Read from the node: the genesis-bound form over the hash it serves.
+    let good = node(21, CHAIN21_GENESIS);
+    let (o, sig) = pause(dir.path(), "21", &["--rand-rpc", &good.url]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(pq::verify_raw(&key.public_key(), &message, &sig));
+    assert_eq!(
+        good.rpc_methods(),
+        vec!["rand_chainId", "rand_getGenesisHash"],
+        "the chain id is checked before the hash is trusted"
+    );
+    // Given and read: they must agree.
+    let (o, sig) = pause(
+        dir.path(),
+        "21",
+        &["--rand-rpc", &good.url, "--genesis", CHAIN21_GENESIS],
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(pq::verify_raw(&key.public_key(), &message, &sig));
+    let other = "11".repeat(32);
+    let (o, sig) = pause(
+        dir.path(),
+        "21",
+        &["--rand-rpc", &good.url, "--genesis", &other],
+    );
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(
+        err(&o).contains("is not the genesis hash the node"),
+        "{}",
+        err(&o)
+    );
+
+    // A node on another chain, or one that does not answer, signs nothing.
+    let wrong = node(20, CHAIN21_GENESIS);
+    let (o, sig) = pause(dir.path(), "21", &["--rand-rpc", &wrong.url]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(
+        err(&o).contains("--rand-chain-id is 21 but the node at --rand-rpc serves chain 20"),
+        "{}",
+        err(&o)
+    );
+    let mute = rpc(|_, _| None);
+    let (o, sig) = pause(dir.path(), "21", &["--rand-rpc", &mute.url]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(err(&o).contains("rand_chainId"), "{}", err(&o));
+    let (o, sig) = pause(dir.path(), "21", &["--rand-rpc", "http://127.0.0.1:1"]);
+    assert!(!o.status.success() && sig.is_empty());
+
+    // A chain-id chain (14) with a node: the chain id is still checked, the hash is not used.
+    let fourteen = node(14, CHAIN21_GENESIS);
+    let (o, sig) = pause(dir.path(), "14", &["--rand-rpc", &fourteen.url]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(pq::verify_raw(
+        &key.public_key(),
+        &pq_gov::pause_message(14, 3),
+        &sig
+    ));
+    assert_eq!(fourteen.rpc_methods(), vec!["rand_chainId"]);
+    let (o, sig) = pause(dir.path(), "14", &["--rand-rpc", &good.url]);
+    assert!(!o.status.success() && sig.is_empty());
+    assert!(err(&o).contains("serves chain 21"), "{}", err(&o));
+}
+
 #[test]
 fn the_cli_refuses_missing_arguments_and_unknown_subcommands() {
     for args in [

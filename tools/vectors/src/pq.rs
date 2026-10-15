@@ -16,6 +16,10 @@ use sha3::{Digest, Keccak256};
 const DOMAIN: &[u8] = b"rand-bridge-pq-cosign-1";
 const TEST_CHAIN_ID: u64 = 99;
 const N: usize = 6;
+/// Chain 21 and its genesis hash: the first chain the genesis-bound governance vectors are
+/// made for (fullnode `deploy/cut-records/chain21.record`).
+const CHAIN21_ID: u64 = 21;
+const CHAIN21_GENESIS: &str = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a";
 
 fn keccak256(data: &[u8]) -> [u8; 32] {
     Keccak256::digest(data).into()
@@ -153,6 +157,35 @@ fn render() -> String {
                    "message": hex::encode(&pause_m), "signature": hex::encode(pause_key.sign(&pause_m)) },
     });
 
+    // The genesis-bound form (spec §8, "The genesis-bound form"; BRG-901): the same tails
+    // behind `tag_v2 ‖ genesis ‖ chain_id ‖ nonce`, for chain 21 at its real genesis hash
+    // (fullnode deploy/cut-records/chain21.record). Written out by hand, like `gov` above.
+    let c21_genesis: [u8; 32] = hex::decode(CHAIN21_GENESIS).unwrap().try_into().unwrap();
+    let gov2 = |domain: &[u8], nonce: u64, tail: &[u8]| {
+        let mut m = domain.to_vec();
+        m.extend_from_slice(&c21_genesis);
+        m.extend_from_slice(&CHAIN21_ID.to_be_bytes());
+        m.extend_from_slice(&nonce.to_be_bytes());
+        m.extend_from_slice(tail);
+        m
+    };
+    let pause2_m = gov2(b"rand-bridge-pause-2", 0, &[]);
+    let register2_m = gov2(b"rand-bridge-pq-register-2", 0, &register_tail);
+    let list2_m = gov2(b"rand-bridge-pq-list-2", 1, &list_tail);
+    let unpause2_m = gov2(b"rand-bridge-pq-unpause-2", 1, &[]);
+    let governance_v2 = json!({
+        "rand_chain_id": CHAIN21_ID, "genesis": CHAIN21_GENESIS, "binding_domain": 1,
+        "register": { "list_nonce": 0, "name": "zUSD", "symbol": "zUSD", "salt": hex::encode([0x5a; 32]),
+                      "chain": 2, "token": hex::encode(usdt), "decimals": 6,
+                      "message": hex::encode(&register2_m), "pq_signatures": quorum_over(&register2_m) },
+        "list": { "list_nonce": 1, "token_index": 1, "chain": 5, "token": hex::encode(sol_usdc), "decimals": 6,
+                  "message": hex::encode(&list2_m), "pq_signatures": quorum_over(&list2_m) },
+        "unpause": { "pause_nonce": 1, "message": hex::encode(&unpause2_m), "pq_signatures": quorum_over(&unpause2_m) },
+        "pause": { "pause_nonce": 0, "pause_key_seed": hex::encode(pause_seed),
+                   "pause_key": hex::encode(pause_key.public.to_bytes()),
+                   "message": hex::encode(&pause2_m), "signature": hex::encode(pause_key.sign(&pause2_m)) },
+    });
+
     let guardians: Vec<Value> = (0..N as u8)
         .map(|i| json!({ "index": i, "seed": hex::encode(seed(i)), "public_key": hex::encode(keypair(i).public.to_bytes()) }))
         .collect();
@@ -166,6 +199,7 @@ fn render() -> String {
         "bodies": bodies,
         "cases": cases,
         "governance": governance,
+        "governance_v2": governance_v2,
     });
     let mut out = serde_json::to_string_pretty(&file).expect("json");
     out.push('\n');

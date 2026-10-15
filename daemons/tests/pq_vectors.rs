@@ -358,6 +358,150 @@ fn governance_messages_and_quorums_match_the_vectors() {
     );
 }
 
+/// The genesis-bound governance layouts (spec §8, BRG-901) for chain 21 at its real genesis
+/// hash, against the generator's hand-written bytes: the `_in` builders under
+/// `BindingDomain::Genesis`, and the quorums and the pause signature over them.
+#[test]
+fn genesis_bound_governance_messages_match_the_chain_21_vectors() {
+    use bridge_daemons::pq_gov::{self, Backing, BindingDomain};
+    let f = file();
+    let guardians = guardians(&f);
+    let keys: Vec<PqKey> = f["pq_guardians"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| PqKey::from_seed_hex(g["seed"].as_str().unwrap()).unwrap())
+        .collect();
+    let g = &f["governance_v2"];
+    let chain_id = g["rand_chain_id"].as_u64().unwrap();
+    assert_eq!(chain_id, 21);
+    assert_eq!(g["binding_domain"], 1);
+    let word = |v: &Value| -> [u8; 32] {
+        hex::decode(v.as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    };
+    let genesis = word(&g["genesis"]);
+    assert_eq!(
+        hex::encode(genesis),
+        "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a",
+        "chain 21's genesis (fullnode deploy/cut-records/chain21.record)"
+    );
+    let domain = pq_gov::binding_domain_for(chain_id, Some(genesis)).unwrap();
+    assert_eq!(domain, BindingDomain::Genesis(genesis));
+    let backing = |v: &Value| Backing {
+        chain: v["chain"].as_u64().unwrap() as u16,
+        token: word(&v["token"]),
+        decimals: v["decimals"].as_u64().unwrap() as u8,
+    };
+
+    let r = &g["register"];
+    let register = pq_gov::register_message_in(
+        &domain,
+        chain_id,
+        r["list_nonce"].as_u64().unwrap(),
+        r["name"].as_str().unwrap(),
+        r["symbol"].as_str().unwrap(),
+        &word(&r["salt"]),
+        &backing(r),
+    )
+    .unwrap();
+    let l = &g["list"];
+    let list_m = pq_gov::list_message_in(
+        &domain,
+        chain_id,
+        l["list_nonce"].as_u64().unwrap(),
+        l["token_index"].as_u64().unwrap() as u32,
+        &backing(l),
+    );
+    let unpause = pq_gov::unpause_message_in(
+        &domain,
+        chain_id,
+        g["unpause"]["pause_nonce"].as_u64().unwrap(),
+    );
+    let pause = pq_gov::pause_message_in(
+        &domain,
+        chain_id,
+        g["pause"]["pause_nonce"].as_u64().unwrap(),
+    );
+
+    for (name, message) in [
+        ("register", &register),
+        ("list", &list_m),
+        ("unpause", &unpause),
+        ("pause", &pause),
+    ] {
+        assert_eq!(
+            hex::encode(message),
+            g[name]["message"].as_str().unwrap(),
+            "{name} layout"
+        );
+    }
+    assert_eq!(
+        list_m.len(),
+        21 + 32 + 8 + 8 + 39,
+        "the genesis adds 32 bytes to the list message"
+    );
+
+    // The same tails as the chain-id vectors: only the tag's digit and the genesis differ.
+    let v1 = &f["governance"];
+    for (name, tag) in [
+        ("register", 25usize),
+        ("list", 21),
+        ("unpause", 24),
+        ("pause", 19),
+    ] {
+        let v1_m = hex::decode(v1[name]["message"].as_str().unwrap()).unwrap();
+        let v2_m = hex::decode(g[name]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            &v2_m[tag..tag + 32],
+            &genesis,
+            "{name}: the genesis follows the tag"
+        );
+        // Past the chain id (the vectors' chains differ: 99 against 21) the tails agree.
+        assert_eq!(
+            &v2_m[tag + 32 + 8..],
+            &v1_m[tag + 8..],
+            "{name}: the tail is the §8 tail"
+        );
+    }
+
+    for (name, message) in [
+        ("register", &register),
+        ("list", &list_m),
+        ("unpause", &unpause),
+    ] {
+        let quorum = pq_gov::sign_quorum(message, &guardians, &keys).unwrap();
+        assert_eq!(
+            quorum,
+            super_list(&g[name]["pq_signatures"]),
+            "{name} quorum"
+        );
+        assert_eq!(pq::check_raw(&quorum, &guardians, message), Ok(()));
+        // A quorum for the chain-id form of the same message is not one for the genesis-bound form.
+        let v1_m = hex::decode(v1[name]["message"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            pq::check_raw(&quorum, &guardians, &v1_m),
+            Err(PqError::PqBadSignature)
+        );
+    }
+
+    let pause_key = PqKey::from_seed_hex(g["pause"]["pause_key_seed"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(pause_key.sign_raw(&pause)),
+        g["pause"]["signature"].as_str().unwrap()
+    );
+    assert!(
+        !pq::verify_raw(
+            &pause_key.public_key(),
+            &pq_gov::pause_message(chain_id, g["pause"]["pause_nonce"].as_u64().unwrap()),
+            &pause_key.sign_raw(&pause)
+        ),
+        "a genesis-bound pause signature is not a chain-id one"
+    );
+}
+
 fn super_list(v: &Value) -> Vec<PqSignature> {
     list(v)
 }

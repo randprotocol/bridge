@@ -134,6 +134,30 @@ ledger's current value and moves on acceptance. `rand_getBridgeState` serves `mi
 order opens a window in which a lock succeeds on the endpoint and its attestation is refused
 `UnlistedToken` on Rand — the funds are safe in custody but stuck until the listing lands.
 
+**The genesis-bound form (chain 20 onward; BRG-901).** A chain cut with `binding_domain: 1` in its
+genesis (chain 20 was the first; chain 21, genesis `ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a`,
+is live) verifies none of the layouts above. It verifies each with the tag's version digit at `2`
+and the 32-byte genesis hash between the tag and the chain id, the tail unchanged:
+
+| message | bytes |
+|---|---|
+| pause minting | `"rand-bridge-pause-2" ‖ genesis [32] ‖ rand_chain_id u64 ‖ pause_nonce u64` |
+| unpause | `"rand-bridge-pq-unpause-2" ‖ genesis [32] ‖ rand_chain_id u64 ‖ pause_nonce u64` |
+| list a backing | `"rand-bridge-pq-list-2" ‖ genesis [32] ‖ rand_chain_id u64 ‖ list_nonce u64 ‖ token_index u32 ‖ chain u16 ‖ token [32] ‖ decimals u8` |
+| register a bridged token | `"rand-bridge-pq-register-2" ‖ genesis [32] ‖ rand_chain_id u64 ‖ list_nonce u64 ‖ u8 len ‖ name ‖ u8 len ‖ symbol ‖ salt [32] ‖ chain u16 ‖ token [32] ‖ decimals u8` |
+
+A pause signature or a quorum made for one chain then verifies on no re-cut that keeps the chain id,
+the guardians and the pause key. **Which form a chain takes is decided by its chain id, never by
+what a node claims:** chains 14–19 (cut without the field) take the chain-id form above, every
+other chain id the genesis-bound form. The genesis hash itself is safe to take from a node
+(`rand_getGenesisHash`, after `rand_chainId` is checked): a lie there makes the signature valid on
+the chain the liar described and on no other. The fullnode's builders are
+`crates/randprotocol-core/src/bridge/gov.rs` (`*_message_in`); the daemons' are
+`daemons/src/pq_gov.rs`, pinned byte for byte by `daemons/tests/pq_gov.rs` (chain 21 vectors) and
+`vectors/pq-cosignatures.json` (`governance_v2`). `rand-bridge-gov pause | pq-unpause | pq-list |
+pq-register` take `--genesis <hex>` or `--rand-rpc <url>` on such a chain and refuse to sign without
+one; the mint co-signature of §3 stays chain-id-only on every chain, by design.
+
 These are signed by a deliberate, offline-style CLI (with the guardian-set rotation), never by the
 guardian daemon. Also decided for chain 14: an inbound mint cap of 100,000 zUSD per backing per day
 and a forward bound on block timestamps.

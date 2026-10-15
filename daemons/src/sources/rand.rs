@@ -46,6 +46,16 @@ pub async fn chain_id(rpc: &JsonRpc) -> Result<u64> {
         .ok_or_else(|| anyhow!("rand_chainId: not a number"))
 }
 
+/// The chain's genesis hash, as the node serves it (`rand_getGenesisHash`,
+/// 32 bytes as hex). What a genesis-bound governance message binds.
+pub async fn genesis_hash(rpc: &JsonRpc) -> Result<[u8; 32]> {
+    let v = rpc.call("rand_getGenesisHash", json!([])).await?;
+    let text = v
+        .as_str()
+        .ok_or_else(|| anyhow!("rand_getGenesisHash: not a string"))?;
+    crate::config::hex32(text).map_err(|e| anyhow!("rand_getGenesisHash: {e:#}"))
+}
+
 pub async fn bridge_state(rpc: &JsonRpc) -> Result<Option<BridgeState>> {
     let v = rpc.call("rand_getBridgeState", json!([])).await?;
     if v["enabled"].as_bool() != Some(true) {
