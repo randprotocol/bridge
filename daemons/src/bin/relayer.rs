@@ -14,7 +14,7 @@ use bridge_daemons::relayer::{
     self, Destinations, EndpointSubmitter, GuardianSet, Progress, RegistrationError,
 };
 use bridge_daemons::rpc::JsonRpc;
-use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource};
+use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource, Source};
 use bridge_daemons::store::Store;
 use bridge_daemons::submit::evm::EvmSubmitter;
 use bridge_daemons::submit::process::{RandSubmitter, SolanaSubmitter};
@@ -201,6 +201,17 @@ async fn main() -> Result<()> {
     let solana = config.solana.as_ref().map(SolanaSource::new).transpose()?;
     let rand = RandSource::new(&config.rand);
     let rand_rpc = JsonRpc::new(&config.rand.rpc);
+
+    // Before the first poll (BR-401): the Rand node answers and serves
+    // `rand.chain_id` when it is configured, and the Rand cursor this data dir
+    // resumes from is not past the chain's burn_sequence. Any of these stops
+    // the relayer here, with the reason, instead of relaying against the wrong
+    // chain or polling a cursor the chain can never reach.
+    {
+        let cursor = store.cursor(rand.name())?.unwrap_or_else(|| rand.start());
+        bridge_daemons::sources::rand::check_startup(&rand_rpc, config.rand.chain_id, &cursor)
+            .await?;
+    }
 
     loop {
         for source in &evm {

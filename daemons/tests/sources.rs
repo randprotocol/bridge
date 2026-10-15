@@ -899,6 +899,81 @@ async fn a_node_with_no_bridge_or_a_missing_burn_yields_nothing() {
     assert_eq!((messages.len(), next.next_sequence), (2, 2));
 }
 
+/// BR-401: a cursor past the chain's `burn_sequence` (a cursor kept from another chain, or a
+/// node on the wrong chain) used to be accepted in silence — `poll` found nothing to fetch and
+/// returned the cursor unchanged. It is refused at startup and shouted about on every poll.
+#[tokio::test]
+async fn a_cursor_ahead_of_the_chain_is_refused_at_startup_and_on_every_poll() {
+    let node = rand_node(3, burn_row);
+    let client = JsonRpc::new(&node.url);
+    let at = |n: u64| Cursor {
+        next_block: 0,
+        next_sequence: n,
+    };
+    // At or behind the chain: fine.
+    rand::check_startup(&client, Some(14), &at(3))
+        .await
+        .unwrap();
+    rand::check_startup(&client, Some(14), &at(0))
+        .await
+        .unwrap();
+    rand::check_startup(&client, None, &at(3)).await.unwrap();
+    // Ahead: refused, naming both numbers.
+    let err = format!(
+        "{:#}",
+        rand::check_startup(&client, Some(14), &at(4))
+            .await
+            .unwrap_err()
+    );
+    assert!(
+        err.contains("ahead of the chain")
+            && err.contains("next_sequence 4")
+            && err.contains("burn_sequence 3"),
+        "{err}"
+    );
+    // The poll says so too, instead of returning the cursor unchanged.
+    let source = RandSource::new(&rand_cfg(&node.url, 0));
+    let err = format!("{:#}", source.poll(&at(4)).await.unwrap_err());
+    assert!(err.contains("ahead of the chain"), "{err}");
+    let (none, same) = source.poll(&at(3)).await.unwrap();
+    assert!(none.is_empty() && same == at(3), "caught up is still quiet");
+
+    // The chain id is checked when configured: a node on another chain, or one that does not
+    // answer, stops the daemon rather than being skipped.
+    let err = format!(
+        "{:#}",
+        rand::check_startup(&client, Some(15), &at(0))
+            .await
+            .unwrap_err()
+    );
+    assert!(
+        err.contains("rand.chain_id is 15 but the node at rand.rpc serves chain 14"),
+        "{err}"
+    );
+    let mute = rpc(|_, _| None);
+    let err = format!(
+        "{:#}",
+        rand::check_startup(&JsonRpc::new(&mute.url), Some(14), &at(0))
+            .await
+            .unwrap_err()
+    );
+    assert!(err.contains("rand_chainId"), "{err}");
+    // Without a configured chain id there is nothing to compare, but the bridge state must still
+    // answer so the cursor can be checked.
+    let err = format!(
+        "{:#}",
+        rand::check_startup(&JsonRpc::new(&mute.url), None, &at(0))
+            .await
+            .unwrap_err()
+    );
+    assert!(err.contains("rand_getBridgeState"), "{err}");
+    // A chain without a bridge has no burn sequence to be ahead of.
+    let off = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
+    rand::check_startup(&JsonRpc::new(&off.url), None, &at(9))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn a_burn_that_disagrees_with_its_slot_or_its_digest_is_refused() {
     let poll = |row: Value| async move {

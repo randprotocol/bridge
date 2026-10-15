@@ -4,7 +4,7 @@
 //! committed storage: a Rand block is final when it commits, so there is no
 //! confirmation depth to wait out.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 
 use super::{Cursor, Source};
@@ -86,6 +86,48 @@ pub async fn bridge_state(rpc: &JsonRpc) -> Result<Option<BridgeState>> {
     }))
 }
 
+/// The message for a Rand cursor past the chain: a cursor kept from another chain, or a node
+/// on another chain than the cursor was made for. Named in full so an operator can act on it.
+fn ahead(cursor: &Cursor, burn_sequence: u64) -> anyhow::Error {
+    anyhow!(
+        "rand: the cursor is ahead of the chain — cursors/rand.json expects next_sequence {} but \
+         rand_getBridgeState says burn_sequence {burn_sequence}: this cursor was not made for \
+         this chain (a cursor kept across a cut, or a node on the wrong chain). Fix the cursor \
+         or the node; nothing is read until then",
+        cursor.next_sequence
+    )
+}
+
+/// What a daemon settles with its Rand node before it reads anything (BR-401): the node answers
+/// and serves the configured chain (`rand.chain_id`, when set), and the Rand cursor it would
+/// resume from is not past the chain's `burn_sequence`. Every failure is an error — a node that
+/// does not answer is not skipped over, a cursor ahead of the chain is not polled in silence.
+pub async fn check_startup(
+    rpc: &JsonRpc,
+    configured_chain_id: Option<u64>,
+    cursor: &Cursor,
+) -> Result<()> {
+    if let Some(expected) = configured_chain_id {
+        let served = chain_id(rpc).await.context(
+            "the Rand node at rand.rpc did not answer rand_chainId; a daemon does not start \
+             without confirming its chain",
+        )?;
+        if served != expected {
+            bail!("rand.chain_id is {expected} but the node at rand.rpc serves chain {served}");
+        }
+    }
+    let state = bridge_state(rpc).await.context(
+        "the Rand node at rand.rpc did not serve rand_getBridgeState; the Rand cursor cannot be \
+         checked against the chain",
+    )?;
+    if let Some(state) = state {
+        if cursor.next_sequence > state.burn_sequence {
+            return Err(ahead(cursor, state.burn_sequence));
+        }
+    }
+    Ok(())
+}
+
 impl Source for RandSource {
     fn name(&self) -> &str {
         "rand"
@@ -102,6 +144,12 @@ impl Source for RandSource {
         let Some(state) = bridge_state(&self.rpc).await? else {
             return Ok((Vec::new(), cursor.clone())); // a chain without a bridge
         };
+        if cursor.next_sequence > state.burn_sequence {
+            // Never quietly: before this, a cursor past the chain polled forever as "caught up".
+            let e = ahead(cursor, state.burn_sequence);
+            tracing::error!("{e:#}");
+            return Err(e);
+        }
         let mut out = Vec::new();
         let mut next = cursor.next_sequence;
         while next < state.burn_sequence && (out.len() as u64) < BATCH {

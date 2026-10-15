@@ -127,6 +127,13 @@ GUARDIAN_KEY=0x… target/release/rand-guardian --config guardian.toml
 RELAYER_EVM_KEY=0x… RELAYER_TRON_KEY=0x… SOL_KEYPAIR=… target/release/rand-relayer --config relayer.toml
 ```
 
+Neither daemon starts until its Rand node has answered (BR-401): `rand_chainId` must equal
+`rand.chain_id` when it is set — a node that is silent or on another chain stops the daemon with the
+reason, it is not skipped over — and the Rand cursor in `data_dir/cursors/rand.json` must not be past
+the chain's `burn_sequence` (a cursor kept across a cut, or a node on the wrong chain, used to poll
+forever as "caught up"). The poll refuses the same cursor with an error-level log should it ever
+happen while running. Fix the cursor or the node; the daemon never rewrites the cursor itself.
+
 `cargo test` pins signing and assembly to the shared vectors byte for byte and, when Foundry is
 installed, runs a lock and a release against the real `EthereumRandBridge` on anvil.
 

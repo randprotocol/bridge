@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use bridge_daemons::config::Config;
 use bridge_daemons::crypto::GuardianKey;
-use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource};
+use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource, Source};
 use bridge_daemons::store::Store;
 use bridge_daemons::{api, guardian};
 use clap::Parser;
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
 
     // The post-quantum half (spec/PQ-COSIGNATURE.md): a second key, and the
     // Rand chain id its co-signatures name. The id is configuration, checked
-    // against the node when the node answers — never taken from it.
+    // against the node before the first poll (below) — never taken from it.
     let pq = match std::env::var(&section.pq_seed_env)
         .ok()
         .filter(|v| !v.is_empty())
@@ -71,18 +71,6 @@ async fn main() -> Result<()> {
             None
         }
     };
-    if let Some(pq) = &pq {
-        let rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
-        if let Ok(served) = bridge_daemons::sources::rand::chain_id(&rpc).await {
-            if served != pq.rand_chain_id {
-                return Err(anyhow!(
-                    "rand.chain_id is {} but the node at rand.rpc serves chain {served}",
-                    pq.rand_chain_id
-                ));
-            }
-        }
-    }
-
     let store = Store::open(&config.data_dir)?;
     let emitters = config.emitters()?;
 
@@ -104,6 +92,17 @@ async fn main() -> Result<()> {
         .collect::<Result<_>>()?;
     let solana = config.solana.as_ref().map(SolanaSource::new).transpose()?;
     let rand = RandSource::new(&config.rand);
+
+    // Before the first poll (BR-401): the Rand node answers and serves
+    // `rand.chain_id` — configured, never taken from the node, and the node
+    // must agree, not merely be silent — and the Rand cursor this data dir
+    // resumes from is not past the chain's burn_sequence. Any of these stops
+    // the daemon here, with the reason; systemd restarts it once it is fixed.
+    {
+        let rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
+        let cursor = store.cursor(rand.name())?.unwrap_or_else(|| rand.start());
+        bridge_daemons::sources::rand::check_startup(&rpc, config.rand.chain_id, &cursor).await?;
+    }
 
     loop {
         // A source that fails is retried on the next round; one chain's RPC

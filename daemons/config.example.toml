@@ -14,7 +14,9 @@ emitter = "0000000000000000000000000000000000000000000000000000000000000000"
 start_sequence = 0
 # The Rand chain id. Required to co-sign (spec/PQ-COSIGNATURE.md): it is part of
 # what the Dilithium2 co-signature is over, so it is configured, never asked of a node.
-# chain_id = 14
+# At startup the node at `rpc` must answer and serve this chain, and the stored Rand
+# cursor must not be past the chain's burn_sequence (BR-401); otherwise the daemon stops.
+# chain_id = 21
 
 # ---- source endpoints ------------------------------------------------------
 # `finality` is what the guardian waits for before it signs. A signature

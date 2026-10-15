@@ -208,6 +208,116 @@ fn a_guardian_refuses_a_chain_id_the_node_contradicts() {
 }
 
 #[test]
+fn a_guardian_refuses_to_start_when_its_rand_node_does_not_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    // A node that serves nothing, and no node at all: neither is skipped over (BR-401).
+    let mute = rpc(|_, _| None);
+    for (url, expect) in [
+        (mute.url.as_str(), "rand_chainId"),
+        ("http://127.0.0.1:1", "rand_chainId"),
+    ] {
+        let config = write_config(
+            dir.path(),
+            &base(
+                dir.path(),
+                url,
+                "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+            ),
+        );
+        let text = run_failing(
+            guardian_cmd().env("GUARDIAN_KEY", format!("{:064x}", 1)),
+            &config,
+        );
+        assert!(text.contains(expect), "{text}");
+    }
+    // Without a chain id there is nothing to compare, but the bridge state must still answer.
+    let config = write_config(
+        dir.path(),
+        &base(
+            dir.path(),
+            &mute.url,
+            "[guardian]\nlisten = \"127.0.0.1:0\"",
+        ),
+    );
+    let text = run_failing(
+        guardian_cmd().env("GUARDIAN_KEY", format!("{:064x}", 1)),
+        &config,
+    );
+    assert!(text.contains("rand_getBridgeState"), "{text}");
+}
+
+#[test]
+fn a_relayer_refuses_a_chain_id_the_node_contradicts_or_does_not_confirm() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = rpc(|m, _| (m == "rand_chainId").then(|| Ok(json!(15))));
+    let config = write_config(
+        dir.path(),
+        &base(
+            dir.path(),
+            &node.url,
+            "chain_id = 14\n[relayer]\nguardians = []",
+        ),
+    );
+    let text = run_failing(&mut relayer_cmd(), &config);
+    assert!(
+        text.contains("rand.chain_id is 14 but the node at rand.rpc serves chain 15"),
+        "{text}"
+    );
+    let mute = rpc(|_, _| None);
+    let config = write_config(
+        dir.path(),
+        &base(
+            dir.path(),
+            &mute.url,
+            "chain_id = 14\n[relayer]\nguardians = []",
+        ),
+    );
+    let text = run_failing(&mut relayer_cmd(), &config);
+    assert!(text.contains("rand_chainId"), "{text}");
+}
+
+#[test]
+fn a_rand_cursor_ahead_of_the_chain_stops_either_daemon_at_startup() {
+    // The chain has one burn (burn_sequence 1); a cursor left over from another chain says 9.
+    let burn = burn(0, 2, 50_000_000, 1_000_000);
+    for (name, mut cmd, extra) in [
+        (
+            "guardian",
+            guardian_cmd(),
+            "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+        ),
+        (
+            "relayer",
+            relayer_cmd(),
+            "chain_id = 14\n[relayer]\nguardians = []",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let rand = rand_node(vec![burn.clone()], 14, &[]);
+        std::fs::create_dir_all(dir.path().join("data/cursors")).unwrap();
+        std::fs::write(
+            dir.path().join("data/cursors/rand.json"),
+            r#"{"next_block": 0, "next_sequence": 9}"#,
+        )
+        .unwrap();
+        let config = write_config(dir.path(), &base(dir.path(), &rand.url, extra));
+        let text = run_failing(cmd.env("GUARDIAN_KEY", format!("{:064x}", 1)), &config);
+        assert!(
+            text.contains("ahead of the chain")
+                && text.contains("next_sequence 9")
+                && text.contains("burn_sequence 1"),
+            "{name}: {text}"
+        );
+        // The cursor file is left as it was: an operator fixes it, the daemon does not.
+        assert!(
+            std::fs::read_to_string(dir.path().join("data/cursors/rand.json"))
+                .unwrap()
+                .contains("9")
+        );
+    }
+}
+
+#[test]
 fn a_relayer_refuses_a_recipients_file_whose_hash_does_not_match() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("recipients.json");
@@ -390,7 +500,8 @@ fn a_guardian_with_no_pq_seed_warns_and_signs_classically() {
     let dir = tempfile::tempdir().unwrap();
     let deposit = eth_lock(0, [9; 32]);
     let eth = evm_node(vec![evm_log(CONTRACT, &deposit, 50)], false);
-    let rand = rpc(|_, _| None); // a Rand node that serves no bridge: the source just fails and is retried
+    // A Rand node without a bridge: the source has nothing to offer and says so.
+    let rand = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
     let launch = |port: u16| {
         let config = write_config(
         dir.path(),
@@ -519,8 +630,8 @@ fn a_relayer_mints_a_deposit_for_a_registered_recipient_through_the_wallet() {
     let deposit = eth_lock(0, recipient);
     let g = guardians(&[&deposit]);
     let eth = evm_node(vec![evm_log(CONTRACT, &deposit, 50)], false);
-    // Rand serves no bridge state: the guardian set comes from the config.
-    let rand = rpc(|_, _| None);
+    // Rand serves no bridge: the guardian set comes from the config.
+    let rand = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
     let wallet = dir.path().join("wallet.sh");
     write_script(
         &wallet,
