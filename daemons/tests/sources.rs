@@ -780,8 +780,7 @@ async fn a_genesis_hash_that_is_not_32_bytes_of_hex_is_refused() {
         let node = rpc(move |m, _| (m == "rand_getGenesisHash").then(|| Ok(reply.clone())));
         let err = rand::genesis_hash(&JsonRpc::new(&node.url))
             .await
-            .err()
-            .expect(why);
+            .expect_err(why);
         assert!(format!("{err:#}").contains(why), "{why}: {err:#}");
     }
     let mute = rpc(|_, _| None);
