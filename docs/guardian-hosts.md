@@ -110,3 +110,33 @@ allows SSH only. It pays gas with copies of the deployer keys, at the owner's ch
 - `daemons/mainnet/move-relayer-to-droplet.sh check | move | back` moves the relayer's config, data
   directory and Rand wallet across and back; one relayer at a time, since two on one EVM key race
   each other's nonces.
+
+## Rebuild on a second DigitalOcean account (2026-10-22)
+
+The first account was locked for billing and its droplets powered off on 2026-10-16 (they must never
+be powered on again: the guardian keys now sign on the new droplets). The six guardians, the relayer
+and randbridge-web were rebuilt on new droplets with the same names, from local material only. The
+new IPs are in `~/.rand-bridge/mainnet-set1/hosts.txt` and `~/.rand-bridge/relayer-host/host.txt`
+(the old files are kept beside them as `*.old-droplet-2026-10-22`).
+
+- **Binaries.** Built on the new relayer host (Ubuntu 24.04, Rust 1.91.1) from bridge `55a7f23`
+  with fullnode `246cb5f9` beside it: `cargo build --release --locked` in `daemons/`, and
+  `cargo build --release -p rand-bridge-cli` in `solana/` (its `Cargo.lock` still names
+  bridge-codec 0.5.7, so `--locked` refuses; the only lock change is that version, to 0.8.0).
+  sha256: `rand-guardian` `750965aa…2fb0`, `rand-relayer` `f7b673e0…792a`,
+  `rand-bridge-cli` `090a0dae…2076`; `rand` is the signed v0.8.0 release (`e3a38e74…bbf4`).
+- **Guardians.** `/etc/rand-guardian*`, `/var/lib/rand-guardian` (cursors **and** `signed/`, the
+  equivocation log) and the unit restored from the `configuration/` fleet snapshot of 2026-10-12.
+  Each re-observed and re-signed the two messages of 2026-10-12 that the snapshot predates
+  (Ethereum lock 3, Rand burn 14), byte-identical bodies, so no equivocation.
+- **Catch-up past publicnode's window.** Ethereum lock 3 (block 26 176 705) was ~70 000 blocks
+  behind the head, outside publicnode's log window, and `sequence()` (4) no longer equalled the
+  cursors' 3, so the fallback rightly refused to skip it. The Ethereum `rpc` was pointed at
+  `https://gateway.tenderly.co/public/mainnet` (serves archive `eth_getLogs` keyless) until each
+  cursor was inside publicnode's window, then put back.
+- **Relayer.** Config is `mainnet/relayer.toml` with the droplet paths and `chain_id = 21`. Data
+  rebuilt: `done/` from the copy taken at the chain-21 cut (`~/.rand-chain21/relayer-done/done`),
+  `recipients/` from the laptop's `data/mainnet/relayer` (registrations made on the old droplet
+  after 2026-09-30 are lost), cursors at the cut's values. The tunnels are
+  `rand-relayer-tunnel@1..6.service` running `/usr/local/bin/rand-relayer-tunnel <i>`, with the
+  relayer's new key `/etc/rand-relayer/tunnel_ed25519` authorized for each guardian's `tunnel` user.
