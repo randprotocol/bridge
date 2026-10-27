@@ -903,6 +903,8 @@ fn tool_evm_consumed(consumed: bool) -> (EndpointSubmitter, Fake) {
         finality: bridge_daemons::config::Finality::Tag("latest".into()),
         start_block: 0,
         max_log_range: 1,
+        rpcs: Vec::new(),
+        rpc_quorum: None,
     };
     let key = "0000000000000000000000000000000000000000000000000000000000000001";
     (

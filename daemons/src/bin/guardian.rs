@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use bridge_daemons::config::Config;
 use bridge_daemons::crypto::GuardianKey;
-use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource, Source};
+use bridge_daemons::sources::{self, Source};
 use bridge_daemons::store::Store;
 use bridge_daemons::{api, guardian};
 use clap::Parser;
@@ -85,13 +85,31 @@ async fn main() -> Result<()> {
         }
     });
 
-    let evm: Vec<EvmSource> = config
+    // Each chain through its configured providers (BR-4): with two or more,
+    // nothing is signed that one provider alone reports.
+    let evm = config
         .evm
         .iter()
-        .map(EvmSource::new)
-        .collect::<Result<_>>()?;
-    let solana = config.solana.as_ref().map(SolanaSource::new).transpose()?;
-    let rand = RandSource::new(&config.rand);
+        .map(|cfg| {
+            let (urls, quorum) = cfg.providers();
+            sources::describe_providers(&cfg.name, &urls, quorum);
+            sources::evm_quorum(cfg)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let solana = config
+        .solana
+        .as_ref()
+        .map(|cfg| {
+            let (urls, quorum) = cfg.providers();
+            sources::describe_providers(&cfg.name, &urls, quorum);
+            sources::solana_quorum(cfg)
+        })
+        .transpose()?;
+    let rand = {
+        let (urls, quorum) = config.rand.providers();
+        sources::describe_providers("rand", &urls, quorum);
+        sources::rand_quorum(&config.rand)?
+    };
 
     // Before the first poll (BR-401): the Rand node answers and serves
     // `rand.chain_id` — configured, never taken from the node, and the node

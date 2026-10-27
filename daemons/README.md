@@ -24,6 +24,11 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
 - Reads each source only past its **consistency level** (`finality` in the config: `finalized`
   on Ethereum, 15 confirmations on BSC, 19 on Tron; Solana at `finalized` commitment; a Rand
   block is final when it commits).
+- Reads each chain through **several providers** when `rpcs` is configured (BR-4): a message is
+  signed only when `rpc_quorum` of them (default a majority) independently report the same body in
+  the same block, final at their own consistency level, and an EVM scan must match the endpoint's
+  `sequence()` counter at a quorum of providers, so a provider that invents, alters or leaves out a
+  lock cannot get one signed. One `rpc` alone still works, with a startup warning.
 - Rebuilds the body from the event plus the block timestamp, the emitter chain id and the
   emitter address (`spec/ATTESTATION.md` §3.2), checks it re-encodes canonically, and signs it
   only if the destination would accept it: registered emitter, `to_chain` / `token_chain` rules,

@@ -335,6 +335,8 @@ fn endpoint(name: &str, kind: EvmKind, rpc: &str, contract: &str) -> EvmConfig {
         finality: Finality::Tag("latest".into()),
         start_block: 0,
         max_log_range: 1,
+        rpcs: Vec::new(),
+        rpc_quorum: None,
     }
 }
 

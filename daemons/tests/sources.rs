@@ -178,6 +178,8 @@ fn evm_cfg(url: &str, kind: EvmKind, finality: Finality, range: u64) -> EvmConfi
         finality,
         start_block: 7,
         max_log_range: range,
+        rpcs: Vec::new(),
+        rpc_quorum: None,
     }
 }
 
@@ -720,6 +722,8 @@ fn an_evm_source_needs_a_valid_contract() {
 fn rand_cfg(url: &str, start: u64) -> RandConfig {
     RandConfig {
         rpc: url.into(),
+        rpcs: Vec::new(),
+        rpc_quorum: None,
         emitter: hex::encode(RAND_EMITTER),
         start_sequence: start,
         chain_id: Some(14),
@@ -1071,6 +1075,8 @@ fn sol_cfg(url: &str, start: u64) -> SolanaConfig {
     SolanaConfig {
         name: "sol".into(),
         rpc: url.into(),
+        rpcs: Vec::new(),
+        rpc_quorum: None,
         program: PROGRAM_B58.into(),
         start_sequence: start,
     }

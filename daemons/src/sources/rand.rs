@@ -7,7 +7,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 
-use super::{Cursor, Source};
+use super::{Confirm, Cursor, Located, Source};
 use crate::config::RandConfig;
 use crate::message::Observed;
 use crate::rpc::{hex_data, JsonRpc};
@@ -21,8 +21,13 @@ pub struct RandSource {
 
 impl RandSource {
     pub fn new(cfg: &RandConfig) -> RandSource {
+        Self::with_rpc(cfg, &cfg.rpc)
+    }
+
+    /// The source read through `rpc`, one of `cfg`'s providers.
+    pub fn with_rpc(cfg: &RandConfig, rpc: &str) -> RandSource {
         RandSource {
-            rpc: JsonRpc::new(&cfg.rpc),
+            rpc: JsonRpc::new(rpc),
             cfg: cfg.clone(),
         }
     }
@@ -141,6 +146,11 @@ impl Source for RandSource {
     }
 
     async fn poll(&self, cursor: &Cursor) -> Result<(Vec<Observed>, Cursor)> {
+        let (located, next) = self.poll_located(cursor).await?;
+        Ok((located.into_iter().map(|l| l.message).collect(), next))
+    }
+
+    async fn poll_located(&self, cursor: &Cursor) -> Result<(Vec<Located>, Cursor)> {
         let Some(state) = bridge_state(&self.rpc).await? else {
             return Ok((Vec::new(), cursor.clone())); // a chain without a bridge
         };
@@ -174,7 +184,13 @@ impl Source for RandSource {
                     );
                 }
             }
-            out.push(observed);
+            out.push(Located {
+                message: observed,
+                resume: Cursor {
+                    next_block: 0,
+                    next_sequence: next,
+                },
+            });
             next += 1;
         }
         Ok((
@@ -184,5 +200,20 @@ impl Source for RandSource {
                 next_sequence: next,
             },
         ))
+    }
+}
+
+impl Confirm for RandSource {
+    /// This node serves the same burn body under that sequence.
+    async fn confirm(&self, located: &Located) -> Result<bool> {
+        let sequence = located.message.sequence;
+        let row = self
+            .rpc
+            .call("rand_getBridgeBurn", json!([sequence]))
+            .await?;
+        if row.is_null() {
+            return Ok(false);
+        }
+        Ok(hex_data(&row["body_hex"])? == located.message.body)
     }
 }

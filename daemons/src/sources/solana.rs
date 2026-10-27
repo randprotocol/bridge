@@ -11,7 +11,7 @@ use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::{Cursor, Source};
+use super::{Confirm, Cursor, Located, Source};
 use crate::config::{pubkey32, SolanaConfig};
 use crate::message::Observed;
 use crate::rpc::JsonRpc;
@@ -32,8 +32,13 @@ pub struct SolanaSource {
 
 impl SolanaSource {
     pub fn new(cfg: &SolanaConfig) -> Result<SolanaSource> {
+        Self::with_rpc(cfg, &cfg.rpc)
+    }
+
+    /// The source read through `rpc`, one of `cfg`'s providers.
+    pub fn with_rpc(cfg: &SolanaConfig, rpc: &str) -> Result<SolanaSource> {
         Ok(SolanaSource {
-            rpc: JsonRpc::new(&cfg.rpc),
+            rpc: JsonRpc::new(rpc),
             program: pubkey32(&cfg.program)?,
             cfg: cfg.clone(),
         })
@@ -124,6 +129,11 @@ impl Source for SolanaSource {
     }
 
     async fn poll(&self, cursor: &Cursor) -> Result<(Vec<Observed>, Cursor)> {
+        let (located, next) = self.poll_located(cursor).await?;
+        Ok((located.into_iter().map(|l| l.message).collect(), next))
+    }
+
+    async fn poll_located(&self, cursor: &Cursor) -> Result<(Vec<Located>, Cursor)> {
         let head = self.program_sequence().await?;
         let mut out = Vec::new();
         let mut next = cursor.next_sequence;
@@ -143,7 +153,13 @@ impl Source for SolanaSource {
                     observed.emitter_chain
                 );
             }
-            out.push(observed);
+            out.push(Located {
+                message: observed,
+                resume: Cursor {
+                    next_block: 0,
+                    next_sequence: next,
+                },
+            });
             next += 1;
         }
         Ok((
@@ -153,6 +169,19 @@ impl Source for SolanaSource {
                 next_sequence: next,
             },
         ))
+    }
+}
+
+impl Confirm for SolanaSource {
+    /// The message account for that sequence, at `finalized` on this
+    /// provider, holds the same body.
+    async fn confirm(&self, located: &Located) -> Result<bool> {
+        let sequence = located.message.sequence;
+        let (key, _) = find_program_address(&[b"msg", &sequence.to_le_bytes()], &self.program)?;
+        let Some(data) = self.account(&key).await? else {
+            return Ok(false);
+        };
+        Ok(parse_posted_message(&data, sequence)? == located.message.body)
     }
 }
 

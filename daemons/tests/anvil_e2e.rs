@@ -204,6 +204,8 @@ async fn lock_is_signed_and_a_burn_is_released_on_anvil() {
         finality: Finality::Tag("latest".into()),
         start_block: 0,
         max_log_range: 2_000,
+        rpcs: Vec::new(),
+        rpc_quorum: None,
     };
     let emitters = Emitters {
         rand: RAND_EMITTER,

@@ -38,6 +38,14 @@ fn default_poll_secs() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct RandConfig {
     pub rpc: String,
+    /// More providers of the same chain (BR-4). A guardian signs a message
+    /// only when `rpc_quorum` of `[rpc] + rpcs` report it identically and
+    /// final; one RPC alone still works, with a warning at startup.
+    #[serde(default)]
+    pub rpcs: Vec<String>,
+    /// How many providers must agree; default a majority (`n / 2 + 1`).
+    #[serde(default)]
+    pub rpc_quorum: Option<usize>,
     /// The 32-byte Rand burn emitter (genesis `bridge.emitter`), hex.
     pub emitter: String,
     /// First burn sequence to look at on a fresh data dir.
@@ -68,6 +76,14 @@ pub struct EvmConfig {
     pub kind: EvmKind,
     /// JSON-RPC URL (for Tron: the API origin, e.g. `https://nile.trongrid.io`).
     pub rpc: String,
+    /// More providers of the same chain (BR-4). A guardian signs a message
+    /// only when `rpc_quorum` of `[rpc] + rpcs` report it identically and
+    /// final; one RPC alone still works, with a warning at startup.
+    #[serde(default)]
+    pub rpcs: Vec<String>,
+    /// How many providers must agree; default a majority (`n / 2 + 1`).
+    #[serde(default)]
+    pub rpc_quorum: Option<usize>,
     /// The endpoint contract, `0x` + 40 hex (Tron: the EVM form of the address).
     pub contract: String,
     /// `"finalized"`, `"safe"`, or a number of confirmations behind `latest`.
@@ -97,6 +113,14 @@ pub struct SolanaConfig {
     #[serde(default = "default_solana_name")]
     pub name: String,
     pub rpc: String,
+    /// More providers of the same chain (BR-4). A guardian signs a message
+    /// only when `rpc_quorum` of `[rpc] + rpcs` report it identically and
+    /// final; one RPC alone still works, with a warning at startup.
+    #[serde(default)]
+    pub rpcs: Vec<String>,
+    /// How many providers must agree; default a majority (`n / 2 + 1`).
+    #[serde(default)]
+    pub rpc_quorum: Option<usize>,
     /// The bridge program id, base58.
     pub program: String,
     #[serde(default)]
@@ -328,6 +352,12 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         hex32(&self.rand.emitter).context("rand.emitter")?;
+        check_providers(
+            "rand",
+            &self.rand.rpc,
+            &self.rand.rpcs,
+            self.rand.rpc_quorum,
+        )?;
         let mut chains = Vec::new();
         for e in &self.evm {
             if !matches!(e.chain, 2..=4) {
@@ -341,6 +371,7 @@ impl Config {
             }
             chains.push(e.chain);
             address20(&e.contract).with_context(|| format!("evm.{}.contract", e.name))?;
+            check_providers(&format!("evm.{}", e.name), &e.rpc, &e.rpcs, e.rpc_quorum)?;
             if let Finality::Tag(t) = &e.finality {
                 if t != "finalized" && t != "safe" && t != "latest" {
                     bail!("evm.{}: finality must be \"finalized\", \"safe\", \"latest\" or a confirmation count", e.name);
@@ -349,6 +380,7 @@ impl Config {
         }
         if let Some(s) = &self.solana {
             pubkey32(&s.program).context("solana.program")?;
+            check_providers("solana", &s.rpc, &s.rpcs, s.rpc_quorum)?;
         }
         if let Some(g) = &self.governance {
             g.validate()?;
@@ -371,6 +403,54 @@ impl Config {
             rand: hex32(&self.rand.emitter)?,
             endpoints,
         })
+    }
+}
+
+/// `[rpc] + rpcs`, without repeats, in order, and the quorum over them.
+pub fn providers(rpc: &str, rpcs: &[String], quorum: Option<usize>) -> (Vec<String>, usize) {
+    let mut list: Vec<String> = Vec::new();
+    for url in std::iter::once(rpc).chain(rpcs.iter().map(String::as_str)) {
+        let url = url.trim().to_string();
+        if !url.is_empty() && !list.contains(&url) {
+            list.push(url);
+        }
+    }
+    let n = list.len();
+    (
+        list,
+        quorum.unwrap_or_else(|| crate::sources::default_quorum(n)),
+    )
+}
+
+fn check_providers(what: &str, rpc: &str, rpcs: &[String], quorum: Option<usize>) -> Result<()> {
+    let (list, q) = providers(rpc, rpcs, quorum);
+    if list.is_empty() {
+        bail!("{what}: no rpc");
+    }
+    if q == 0 || q > list.len() {
+        bail!(
+            "{what}: rpc_quorum {q} is not between 1 and the {} distinct RPCs configured",
+            list.len()
+        );
+    }
+    Ok(())
+}
+
+impl EvmConfig {
+    pub fn providers(&self) -> (Vec<String>, usize) {
+        providers(&self.rpc, &self.rpcs, self.rpc_quorum)
+    }
+}
+
+impl SolanaConfig {
+    pub fn providers(&self) -> (Vec<String>, usize) {
+        providers(&self.rpc, &self.rpcs, self.rpc_quorum)
+    }
+}
+
+impl RandConfig {
+    pub fn providers(&self) -> (Vec<String>, usize) {
+        providers(&self.rpc, &self.rpcs, self.rpc_quorum)
     }
 }
 
