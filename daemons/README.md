@@ -67,9 +67,10 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   the record, then the directory fsynced. A record that is still unreadable (zero-length,
   truncated, not JSON) fails that `(emitter chain, sequence)` alone: the guardian signs nothing
   for it, writes the reason to `data_dir/refused/<chain>/<sequence>.json`, logs it, and signs the
-  rest of the source as usual. To recover, restore the record from a backup, or — if this
-  guardian is known never to have served a signature for it — delete the file and rewind that
-  source's cursor so the lock is read again.
+  rest of the source as usual. To recover, restore the record from a backup. Delete the file and
+  rewind the source's cursor only after checking the peers and the relayer for a signature this
+  guardian made over that `(chain, sequence)`: once the record is gone, the guardian signs
+  whatever the providers report now.
 - **Co-signs deposits with Dilithium2** when `GUARDIAN_PQ_SEED` and `rand.chain_id` are set
   (`spec/PQ-COSIGNATURE.md`): a second quorum the chain-14 ledger requires on every mint, over
   `"rand-bridge-pq-cosign-1" ‖ rand_chain_id ‖ mu`. Releases stay classical. The seed is generated on

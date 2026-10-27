@@ -74,15 +74,31 @@ impl Store {
         }
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming into {}", path.display()))?;
-        if let Some(dir) = path.parent() {
-            // The rename is durable once the directory entry is; a directory
-            // just created needs its own entry in its parent synced too.
-            sync_dir(dir)?;
-            if let Some(up) = dir.parent().filter(|up| up.starts_with(&self.root)) {
-                sync_dir(up)?;
-            }
+        // The rename is durable once the directory entry is; a directory
+        // just created needs its own entry in its parent synced too, up to
+        // the root (a store's first `signed/` lives in the root).
+        for dir in self.dirs_to_sync(&path) {
+            sync_dir(&dir)?;
         }
         Ok(())
+    }
+
+    /// Every directory from `path`'s own up to the root, inclusive: what a
+    /// write syncs after its rename.
+    pub fn dirs_to_sync(&self, path: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if !d.starts_with(&self.root) {
+                break;
+            }
+            out.push(d.to_path_buf());
+            if d == self.root {
+                break;
+            }
+            dir = d.parent();
+        }
+        out
     }
 
     pub fn cursor(&self, source: &str) -> Result<Option<Cursor>> {

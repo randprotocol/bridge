@@ -497,6 +497,20 @@ async fn an_empty_signed_record_fails_only_its_own_sequence() {
     assert!(err.downcast_ref::<guardian::UnreadableRecord>().is_some(), "{err:#}");
 }
 
+/// BR-951: a write syncs every directory up to the root, so a store's first `signed/` entry
+/// (created in the root) survives a power cut.
+#[test]
+fn a_write_syncs_every_directory_up_to_the_root() {
+    let (dir, store) = store();
+    let root = dir.path().join("data");
+    let path = root.join("signed").join("2").join("00000000000000000000.json");
+    assert_eq!(
+        store.dirs_to_sync(&path),
+        vec![root.join("signed/2"), root.join("signed"), root.clone()]
+    );
+    assert_eq!(store.dirs_to_sync(&root.join("x.json")), vec![root.clone()]);
+}
+
 #[test]
 fn a_store_write_leaves_a_complete_record_and_ignores_a_stale_temp_file() {
     let (dir, store) = store();
