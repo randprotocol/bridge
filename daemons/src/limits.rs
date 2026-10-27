@@ -10,9 +10,14 @@
 //! The window is this guardian's own clock at signing, never a timestamp a
 //! message carries, so backdated bodies cannot slip under it.
 //!
-//! On a breach the message is refused (written to `refused/` with the
-//! reason) and **signing pauses** for every source until an operator clears
-//! the pause (`rand-guardian --resume-signing`) after looking at it.
+//! A transfer over the per-transfer cap is **withheld**: not signed, written
+//! to `held/<chain>/<sequence>.json` with the reason, logged at error level,
+//! and signed only when an operator releases that one `(chain, sequence)`
+//! (`rand-guardian --release-held <chain>:<sequence>`); every other transfer
+//! keeps flowing. A transfer that would overrun its window is **deferred**:
+//! the source stops at it and reads it again each poll, and it is signed on
+//! its own once the window has room. The global pause (`limits/paused.json`)
+//! is never set automatically, only by `rand-guardian --pause-signing`.
 
 use anyhow::{anyhow, bail, Context, Result};
 use bridge_codec::{Payload, CHAIN_RAND, CHAIN_SOLANA};
@@ -88,12 +93,59 @@ pub struct Entry {
     pub sequence: u64,
 }
 
-/// Why signing is paused, as written to `limits/paused.json`.
+/// What the caps say about one transfer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Within both caps; counted in its window.
+    Admit,
+    /// Over the per-transfer cap: withheld until an operator releases it.
+    Hold(String),
+    /// The window has no room for it yet: read it again later.
+    Defer(String),
+}
+
+/// A withheld transfer, as written to `held/<chain>/<sequence>.json`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Held {
+    pub message: Observed,
+    pub at: u64,
+    pub reason: String,
+}
+
+pub const HELD: &str = "held";
+
+/// Every withheld `(chain, sequence)`.
+pub fn held(store: &Store) -> Result<Vec<(u16, u64)>> {
+    let mut out = Vec::new();
+    let dir = store.root().join(HELD);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+    };
+    for entry in entries {
+        let Some(chain) = entry?.file_name().to_str().and_then(|c| c.parse::<u16>().ok()) else {
+            continue;
+        };
+        for sequence in store.sequences(HELD, chain)? {
+            out.push((chain, sequence));
+        }
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// Removes the held record of `(chain, sequence)`.
+pub fn unhold(store: &Store, chain: u16, sequence: u64) -> Result<()> {
+    let parts = Store::message_parts(HELD, chain, sequence);
+    let path = store.root().join(&parts[0]).join(&parts[1]).join(&parts[2]);
+    std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))
+}
+
+/// Why signing is paused, as written to `limits/paused.json` by an operator.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Paused {
     pub at: u64,
-    pub chain: u16,
-    pub sequence: u64,
     pub reason: String,
 }
 
@@ -114,11 +166,16 @@ pub fn resume(store: &Store) -> Result<Option<Paused>> {
     Ok(was)
 }
 
+/// A token: its home chain and its 32-byte wire word.
+type TokenKey = (u16, [u8; 32]);
+/// `(per_transfer, per_window)`.
+type Caps = (u64, u64);
+
 /// The limits in force, parsed.
 #[derive(Clone, Debug)]
 pub struct Limits {
     cfg: LimitsConfig,
-    overrides: Vec<((u16, [u8; 32]), (u64, u64))>,
+    overrides: Vec<(TokenKey, Caps)>,
 }
 
 /// A token as its 32-byte wire word.
@@ -188,28 +245,30 @@ impl Limits {
         self.cfg.window_secs
     }
 
-    /// Checks `message` against the caps at `now` and, when it fits, counts
-    /// it in its window (before the signature is made: a crash in between
-    /// over-counts, never under-counts). `Err(reason)` inside `Ok` is a
-    /// breach; the outer error is a store failure.
+    /// Checks `message` against the caps at `now` and, when it is admitted,
+    /// counts it in its window (before the signature is made: a crash in
+    /// between over-counts, never under-counts). `released`: an operator
+    /// released this held transfer, so neither cap applies, but it is still
+    /// counted. The error is a store failure.
     pub fn admit(
         &self,
         store: &Store,
         message: &Observed,
         now: u64,
-    ) -> Result<std::result::Result<(), String>> {
+        released: bool,
+    ) -> Result<Verdict> {
         let Ok(Payload::Transfer(t)) = Payload::decode(&message.decoded().payload) else {
-            return Ok(Err("not a transfer".into()));
+            return Ok(Verdict::Hold("not a transfer".into()));
         };
         let amount = match t.amount_u128().and_then(|a| u64::try_from(a).ok()) {
             Some(a) => a,
-            None => return Ok(Err("amount above u64".into())),
+            None => return Ok(Verdict::Hold("amount above u64".into())),
         };
         let (per_transfer, per_window) = self.caps(t.token_chain, &t.token_address);
         let direction = Direction::of(message);
         let token = format!("chain {} token 0x{}", t.token_chain, hex::encode(t.token_address));
-        if amount > per_transfer {
-            return Ok(Err(format!(
+        if amount > per_transfer && !released {
+            return Ok(Verdict::Hold(format!(
                 "{} of {amount} on {token} is above the per-transfer cap {per_transfer}",
                 direction.label()
             )));
@@ -227,13 +286,13 @@ impl Limits {
         let parts = [parts[0].as_str(), parts[1].as_str(), parts[2].as_str()];
         let mut entries: Vec<Entry> = store
             .read(&parts)
-            .context("reading the cap window (an unreadable window pauses nothing; repair it)")?
+            .context("reading the cap window (nothing on this token is signed until it is repaired)")?
             .unwrap_or_default();
         let since = now.saturating_sub(self.cfg.window_secs);
         entries.retain(|e| e.at > since);
         let used: u64 = entries.iter().map(|e| e.amount).fold(0u64, u64::saturating_add);
-        if used.saturating_add(amount) > per_window {
-            return Ok(Err(format!(
+        if used.saturating_add(amount) > per_window && !released {
+            return Ok(Verdict::Defer(format!(
                 "{} of {amount} on {token} would bring the last {} s to {} (cap {per_window})",
                 direction.label(),
                 self.cfg.window_secs,
@@ -247,18 +306,16 @@ impl Limits {
             sequence: message.sequence,
         });
         store.write(&parts, &entries)?;
-        Ok(Ok(()))
+        Ok(Verdict::Admit)
     }
 }
 
-/// Pauses signing with `reason`.
-pub fn pause(store: &Store, message: &Observed, now: u64, reason: &str) -> Result<()> {
+/// Pauses all signing with `reason`: an operator's act, never automatic.
+pub fn pause(store: &Store, now: u64, reason: &str) -> Result<()> {
     store.write(
         &PAUSED,
         &Paused {
             at: now,
-            chain: message.emitter_chain,
-            sequence: message.sequence,
             reason: reason.to_string(),
         },
     )

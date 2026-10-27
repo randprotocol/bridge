@@ -149,9 +149,30 @@ pub async fn step<S: Source>(
     step_guarded(source, store, key, pq, emitters, &Guards::default()).await
 }
 
-/// [`step`] under `guards`. While signing is paused (a cap was breached)
-/// nothing is read, so nothing is passed over: the cursor stays where the
-/// pause found it.
+/// A transfer that would overrun its rolling window (BRG-1): it is not
+/// signed now, and the source resumes at it so it is read again.
+#[derive(Debug)]
+pub struct Deferred {
+    pub chain: u16,
+    pub sequence: u64,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "chain {} sequence {} deferred until its window has room: {}",
+            self.chain, self.sequence, self.reason
+        )
+    }
+}
+
+impl std::error::Error for Deferred {}
+
+/// [`step`] under `guards`. While an operator has paused signing nothing is
+/// read, so nothing is passed over. A transfer over its window is deferred:
+/// the poll stops there and the cursor stays on it.
 pub async fn step_guarded<S: Source>(
     source: &S,
     store: &Store,
@@ -162,12 +183,10 @@ pub async fn step_guarded<S: Source>(
 ) -> Result<usize> {
     if let Some(p) = limits::paused(store).context("reading the signing pause; signing stays off")? {
         tracing::warn!(
-            "{}: signing is paused since {} (chain {} sequence {}: {}); clear it with \
+            "{}: signing is paused by an operator since {} ({}); clear it with \
              rand-guardian --resume-signing",
             source.name(),
             p.at,
-            p.chain,
-            p.sequence,
             p.reason
         );
         return Ok(0);
@@ -178,8 +197,7 @@ pub async fn step_guarded<S: Source>(
     };
     let (located, mut next) = source.poll_located(&cursor).await?;
     let mut signed = 0;
-    let mut queue = located.into_iter().peekable();
-    while let Some(Located { message, .. }) = queue.next() {
+    for Located { message, resume } in located {
         if !guards.peers.is_empty() && !has_record(store, &message) {
             if let Some(reason) = peer_conflict(guards.peers, guards.known, &message).await {
                 tracing::error!("{reason}");
@@ -211,14 +229,13 @@ pub async fn step_guarded<S: Source>(
                     tracing::error!("recording the refusal: {w:#}");
                 }
             }
-            Err(e) => return Err(e),
-        }
-        if limits::paused(store).unwrap_or(None).is_some() {
-            // This message was the breach: the next one is where to resume.
-            if let Some(after) = queue.peek() {
-                next = after.resume.clone();
+            Err(e) if e.downcast_ref::<Deferred>().is_some() => {
+                // Read it again next poll, and nothing after it on this source yet.
+                tracing::warn!("{}: {e:#}", source.name());
+                next = resume;
+                break;
             }
-            break;
+            Err(e) => return Err(e),
         }
     }
     // Only now: a crash before this line re-reads the same messages, and
@@ -250,8 +267,9 @@ pub fn sign_one(
     sign_one_guarded(store, key, pq, emitters, &Guards::default(), message, limits::now())
 }
 
-/// [`sign_one`] under `guards`, at time `now` (unix seconds). A message over
-/// a cap is refused and pauses signing (BRG-1).
+/// [`sign_one`] under `guards`, at time `now` (unix seconds). A transfer over
+/// the per-transfer cap is withheld (`held/`, `Ok(false)`); one over its
+/// window is [`Deferred`] (an error, nothing written) (BRG-1).
 pub fn sign_one_guarded(
     store: &Store,
     key: &GuardianKey,
@@ -260,6 +278,46 @@ pub fn sign_one_guarded(
     guards: &Guards<'_>,
     message: &Observed,
     now: u64,
+) -> Result<bool> {
+    sign_checked(store, key, pq, emitters, guards, message, now, false)
+}
+
+/// Signs a withheld transfer an operator has released, by `(chain,
+/// sequence)`: the body is the one recorded when it was held, every policy
+/// check but the caps runs again, and it is counted in its window.
+#[allow(clippy::too_many_arguments)]
+pub fn release_held(
+    store: &Store,
+    key: &GuardianKey,
+    pq: Option<&PqSigner>,
+    emitters: &Emitters,
+    guards: &Guards<'_>,
+    chain: u16,
+    sequence: u64,
+    now: u64,
+) -> Result<bool> {
+    let held: limits::Held = store
+        .read_message(limits::HELD, chain, sequence)?
+        .ok_or_else(|| anyhow::anyhow!("chain {chain} sequence {sequence} is not held"))?;
+    let message = Observed::new(held.message.body.clone())?;
+    if message != held.message {
+        anyhow::bail!("the held record for chain {chain} sequence {sequence} is inconsistent");
+    }
+    let signed = sign_checked(store, key, pq, emitters, guards, &message, now, true)?;
+    limits::unhold(store, chain, sequence)?;
+    Ok(signed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_checked(
+    store: &Store,
+    key: &GuardianKey,
+    pq: Option<&PqSigner>,
+    emitters: &Emitters,
+    guards: &Guards<'_>,
+    message: &Observed,
+    now: u64,
+    released: bool,
 ) -> Result<bool> {
     let (chain, sequence) = (message.emitter_chain, message.sequence);
     let existing = store
@@ -298,19 +356,35 @@ pub fn sign_one_guarded(
         return Ok(false);
     }
     if let Some(limits) = guards.limits {
-        if let Err(reason) = limits.admit(store, message, now)? {
-            tracing::error!(chain, sequence, "cap breached, refusing and pausing signing: {reason}");
-            store.write_message(
-                REFUSED,
-                chain,
-                sequence,
-                &Refused {
-                    message: message.clone(),
-                    reason: format!("cap breached: {reason}"),
-                },
-            )?;
-            limits::pause(store, message, now, &reason)?;
-            return Ok(false);
+        match limits.admit(store, message, now, released)? {
+            limits::Verdict::Admit => {}
+            limits::Verdict::Hold(reason) => {
+                tracing::error!(
+                    chain,
+                    sequence,
+                    "WITHHELD, not signed: {reason}; release it with rand-guardian \
+                     --release-held {chain}:{sequence} after review"
+                );
+                store.write_message(
+                    limits::HELD,
+                    chain,
+                    sequence,
+                    &limits::Held {
+                        message: message.clone(),
+                        at: now,
+                        reason,
+                    },
+                )?;
+                return Ok(false);
+            }
+            limits::Verdict::Defer(reason) => {
+                return Err(Deferred {
+                    chain,
+                    sequence,
+                    reason,
+                }
+                .into())
+            }
         }
     }
     let signature = key.sign(&message.digest)?;

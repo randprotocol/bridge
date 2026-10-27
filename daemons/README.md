@@ -37,10 +37,16 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
 - **Caps every message before it signs** (BRG-1, `[guardian.limits]`): a per-transfer cap and a
   per-window cap (default 86,400 s, rolling, on the guardian's own clock), per token and direction
   (deposits and releases counted apart), in attested 8-decimal units, with per-token overrides. The
-  mainnet configs carry the published caps: 100 per transfer, 1,000 per day. A message over either
-  cap is refused and **pauses all signing**; `/v1/health` shows the pause, and
-  `rand-guardian --config <file> --resume-signing` clears it after review. This bounds loss without
-  any contract change; a guardian without the section warns at startup.
+  mainnet configs carry the published caps: 100 per transfer, 1,000 per day. A transfer over the
+  per-transfer cap is **withheld**: not signed, recorded in `data_dir/held/<chain>/<sequence>.json`
+  with the reason, logged at error level and listed in `/v1/health` (`held`) and by
+  `rand-guardian --config <file> --list-held`; it is signed only when an operator releases that one
+  transfer (`--release-held <chain>:<sequence>`, which re-runs every check but the caps and counts it
+  in its window). Every other transfer keeps flowing. A transfer that would overrun its window is
+  **deferred**: that source stops at it and reads it again each poll, and it is signed on its own
+  once the window has room. Nothing pauses signing automatically; `--pause-signing <reason>` and
+  `--resume-signing` are the operator's global brake. This bounds loss without any contract change;
+  a guardian without the section warns at startup.
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
 - **Asks its peers before a first signature** (BR-502, `guardian.peers`): replay protection on

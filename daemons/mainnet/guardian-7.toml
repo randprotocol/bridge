@@ -46,8 +46,8 @@ key_env = "GUARDIAN7_PRIV_KEY"
 pq_seed_env = "GUARDIAN7_PQ_SEED"   # unset: the PQ quorum comes from the droplets
 
 # BRG-1: the published caps (100 per transfer, 1,000 per day, every token), in attested 8-decimal
-# units, held by this guardian before it signs. A breach is refused and pauses signing until
-# `rand-guardian --resume-signing`.
+# units, held by this guardian before it signs. A transfer over per_transfer is withheld until
+# `rand-guardian --release-held <chain>:<sequence>`; one over the day's window waits for room.
 [guardian.limits]
 per_transfer = 10000000000      # 100 tokens
 per_window = 100000000000       # 1,000 tokens

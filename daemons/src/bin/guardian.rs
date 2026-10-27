@@ -15,10 +15,20 @@ struct Cli {
     /// The TOML configuration file (see daemons/config.example.toml).
     #[arg(long, env = "RAND_BRIDGE_CONFIG")]
     config: PathBuf,
-    /// Clear a signing pause (a cap breach, BRG-1) after reviewing it, then
-    /// exit. Prints what the pause was; needs no key.
+    /// Pause all signing (an operator's act; nothing pauses on its own), then
+    /// exit. Needs no key.
+    #[arg(long, value_name = "REASON")]
+    pause_signing: Option<String>,
+    /// Clear an operator's pause, then exit. Needs no key.
     #[arg(long)]
     resume_signing: bool,
+    /// Sign one transfer withheld over the per-transfer cap (BRG-1), after
+    /// review, then exit: `<chain>:<sequence>`. Needs the guardian's keys.
+    #[arg(long, value_name = "CHAIN:SEQUENCE")]
+    release_held: Option<String>,
+    /// List the withheld transfers and exit.
+    #[arg(long)]
+    list_held: bool,
 }
 
 #[tokio::main]
@@ -34,14 +44,27 @@ async fn main() -> Result<()> {
         .guardian
         .clone()
         .ok_or_else(|| anyhow!("the config has no [guardian] section"))?;
+    if let Some(reason) = &cli.pause_signing {
+        let store = Store::open(&config.data_dir)?;
+        bridge_daemons::limits::pause(&store, bridge_daemons::limits::now(), reason)?;
+        println!("signing paused: {reason}");
+        return Ok(());
+    }
     if cli.resume_signing {
         let store = Store::open(&config.data_dir)?;
         match bridge_daemons::limits::resume(&store)? {
-            Some(p) => println!(
-                "signing resumed; it was paused at {} on chain {} sequence {}: {}",
-                p.at, p.chain, p.sequence, p.reason
-            ),
+            Some(p) => println!("signing resumed; it was paused at {}: {}", p.at, p.reason),
             None => println!("signing was not paused"),
+        }
+        return Ok(());
+    }
+    if cli.list_held {
+        let store = Store::open(&config.data_dir)?;
+        for (chain, sequence) in bridge_daemons::limits::held(&store)? {
+            let h: bridge_daemons::limits::Held = store
+                .read_message(bridge_daemons::limits::HELD, chain, sequence)?
+                .ok_or_else(|| anyhow!("held record {chain}/{sequence} vanished"))?;
+            println!("{chain}:{sequence}  held at {}  {}", h.at, h.reason);
         }
         return Ok(());
     }
@@ -105,12 +128,44 @@ async fn main() -> Result<()> {
             "no [guardian.limits]: this guardian signs without per-transfer or per-window caps (BRG-1)"
         ),
     }
+    if let Some(target) = &cli.release_held {
+        let (chain, sequence) = target
+            .split_once(':')
+            .and_then(|(c, s)| Some((c.parse::<u16>().ok()?, s.parse::<u64>().ok()?)))
+            .ok_or_else(|| anyhow!("--release-held takes <chain>:<sequence>, got {target:?}"))?;
+        let guards = guardian::Guards {
+            limits: limits.as_ref(),
+            ..Default::default()
+        };
+        let signed = guardian::release_held(
+            &store,
+            &key,
+            pq.as_ref(),
+            &emitters,
+            &guards,
+            chain,
+            sequence,
+            bridge_daemons::limits::now(),
+        )?;
+        println!(
+            "chain {chain} sequence {sequence} released: {}",
+            if signed { "signed" } else { "not signed (see the log)" }
+        );
+        return Ok(());
+    }
     if let Some(p) = bridge_daemons::limits::paused(&store)? {
         tracing::warn!(
-            "signing is PAUSED (chain {} sequence {}: {}); rand-guardian --resume-signing clears it",
-            p.chain,
-            p.sequence,
+            "signing is PAUSED by an operator ({}); rand-guardian --resume-signing clears it",
             p.reason
+        );
+    }
+    let held = bridge_daemons::limits::held(&store)?;
+    if !held.is_empty() {
+        tracing::error!(
+            "{} transfer(s) withheld over the per-transfer cap: {:?}; review, then \
+             rand-guardian --release-held <chain>:<sequence>",
+            held.len(),
+            held
         );
     }
     // BR-502: the peers asked before a first signature, and the set whose
