@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod gov_audit;
 pub mod governance;
 pub mod guardian;
+pub mod limits;
 pub mod message;
 pub mod pq;
 pub mod pq_gov;

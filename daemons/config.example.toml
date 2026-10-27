@@ -72,6 +72,21 @@ listen = "127.0.0.1:7071"            # put TLS / a reverse proxy in front for re
 key_env = "GUARDIAN_KEY"             # 0x + 64 hex; one key per guardian, one guardian per host
 pq_seed_env = "GUARDIAN_PQ_SEED"     # 32-byte Dilithium2 seed, generated ON this host; unset = no co-signature
 
+# Caps this guardian holds every message to before it signs (BRG-1). Amounts are attested
+# 8-decimal units; deposits and releases are counted in separate windows, per token, on this
+# guardian's own clock. A breach is refused (data_dir/refused/) and PAUSES all signing until
+# `rand-guardian --config <file> --resume-signing`; /v1/health shows the pause. Absent, the
+# guardian signs without caps and warns at startup.
+# [guardian.limits]
+# per_transfer = 10000000000         # 100 tokens
+# per_window = 100000000000          # 1,000 tokens per window
+# window_secs = 86400
+# [[guardian.limits.token]]          # optional per-token override
+# chain = 2
+# address = "0x…"                    # EVM 0x+40 hex, 0x+64 hex wire word, Tron T…, Solana mint
+# per_transfer = 10000000000
+# per_window = 100000000000
+
 # ---- relayer -----------------------------------------------------------------
 [relayer]
 guardians = [

@@ -34,6 +34,13 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   only if the destination would accept it: registered emitter, `to_chain` / `token_chain` rules,
   `fee <= amount`, non-zero, within `u64`, EVM address padding. A refused message is written to
   `data_dir/refused/` with the reason. **Rotations are never signed by the daemon.**
+- **Caps every message before it signs** (BRG-1, `[guardian.limits]`): a per-transfer cap and a
+  per-window cap (default 86,400 s, rolling, on the guardian's own clock), per token and direction
+  (deposits and releases counted apart), in attested 8-decimal units, with per-token overrides. The
+  mainnet configs carry the published caps: 100 per transfer, 1,000 per day. A message over either
+  cap is refused and **pauses all signing**; `/v1/health` shows the pause, and
+  `rand-guardian --config <file> --resume-signing` clears it after review. This bounds loss without
+  any contract change; a guardian without the section warns at startup.
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
 - Every record under `data_dir` is written durably (BR-951): a temp file, fsynced, renamed over

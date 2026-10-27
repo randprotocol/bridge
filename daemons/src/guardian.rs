@@ -1,13 +1,14 @@
 //! The guardian loop: read final messages off each source, check them
 //! against the signing policy, sign, persist.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::api::{SignedMessage, SIGNED};
 use crate::crypto::GuardianKey;
 use crate::message::{check_signable, Emitters, Observed};
 use crate::pq::PqKey;
-use crate::sources::Source;
+use crate::limits::{self, Limits};
+use crate::sources::{Located, Source};
 use crate::store::Store;
 
 pub const REFUSED: &str = "refused";
@@ -74,6 +75,13 @@ pub struct PqSigner {
     pub rand_chain_id: u64,
 }
 
+/// What a guardian checks beyond the signing policy before it signs.
+#[derive(Default)]
+pub struct Guards<'a> {
+    /// The per-transfer and per-window caps (BRG-1), when configured.
+    pub limits: Option<&'a Limits>,
+}
+
 /// One poll of one source. Returns how many messages were signed.
 pub async fn step<S: Source>(
     source: &S,
@@ -82,14 +90,41 @@ pub async fn step<S: Source>(
     pq: Option<&PqSigner>,
     emitters: &Emitters,
 ) -> Result<usize> {
+    step_guarded(source, store, key, pq, emitters, &Guards::default()).await
+}
+
+/// [`step`] under `guards`. While signing is paused (a cap was breached)
+/// nothing is read, so nothing is passed over: the cursor stays where the
+/// pause found it.
+pub async fn step_guarded<S: Source>(
+    source: &S,
+    store: &Store,
+    key: &GuardianKey,
+    pq: Option<&PqSigner>,
+    emitters: &Emitters,
+    guards: &Guards<'_>,
+) -> Result<usize> {
+    if let Some(p) = limits::paused(store).context("reading the signing pause; signing stays off")? {
+        tracing::warn!(
+            "{}: signing is paused since {} (chain {} sequence {}: {}); clear it with \
+             rand-guardian --resume-signing",
+            source.name(),
+            p.at,
+            p.chain,
+            p.sequence,
+            p.reason
+        );
+        return Ok(0);
+    }
     let cursor = match store.cursor(source.name())? {
         Some(c) => c,
         None => source.start(),
     };
-    let (messages, next) = source.poll(&cursor).await?;
+    let (located, mut next) = source.poll_located(&cursor).await?;
     let mut signed = 0;
-    for message in messages {
-        match sign_one(store, key, pq, emitters, &message) {
+    let mut queue = located.into_iter().peekable();
+    while let Some(Located { message, .. }) = queue.next() {
+        match sign_one_guarded(store, key, pq, emitters, guards, &message, limits::now()) {
             Ok(true) => signed += 1,
             Ok(false) => {}
             Err(e) if e.downcast_ref::<UnreadableRecord>().is_some() => {
@@ -106,6 +141,13 @@ pub async fn step<S: Source>(
                 }
             }
             Err(e) => return Err(e),
+        }
+        if limits::paused(store).unwrap_or(None).is_some() {
+            // This message was the breach: the next one is where to resume.
+            if let Some(after) = queue.peek() {
+                next = after.resume.clone();
+            }
+            break;
         }
     }
     // Only now: a crash before this line re-reads the same messages, and
@@ -124,6 +166,20 @@ pub fn sign_one(
     pq: Option<&PqSigner>,
     emitters: &Emitters,
     message: &Observed,
+) -> Result<bool> {
+    sign_one_guarded(store, key, pq, emitters, &Guards::default(), message, limits::now())
+}
+
+/// [`sign_one`] under `guards`, at time `now` (unix seconds). A message over
+/// a cap is refused and pauses signing (BRG-1).
+pub fn sign_one_guarded(
+    store: &Store,
+    key: &GuardianKey,
+    pq: Option<&PqSigner>,
+    emitters: &Emitters,
+    guards: &Guards<'_>,
+    message: &Observed,
+    now: u64,
 ) -> Result<bool> {
     let (chain, sequence) = (message.emitter_chain, message.sequence);
     let existing = store
@@ -160,6 +216,22 @@ pub fn sign_one(
             },
         )?;
         return Ok(false);
+    }
+    if let Some(limits) = guards.limits {
+        if let Err(reason) = limits.admit(store, message, now)? {
+            tracing::error!(chain, sequence, "cap breached, refusing and pausing signing: {reason}");
+            store.write_message(
+                REFUSED,
+                chain,
+                sequence,
+                &Refused {
+                    message: message.clone(),
+                    reason: format!("cap breached: {reason}"),
+                },
+            )?;
+            limits::pause(store, message, now, &reason)?;
+            return Ok(false);
+        }
     }
     let signature = key.sign(&message.digest)?;
     // Only what Rand will verify is co-signed: releases stay classical.

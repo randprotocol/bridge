@@ -44,6 +44,9 @@ pub struct Collected {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Health {
     pub guardian: String,
+    /// Why signing is paused (a cap breach, BRG-1); absent while it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<String>,
 }
 
 struct ApiState {
@@ -63,8 +66,13 @@ pub fn router(store: Store, guardian: [u8; 20]) -> Router {
 }
 
 async fn health(State(state): State<Arc<ApiState>>) -> Json<Health> {
+    let paused = match crate::limits::paused(&state.store) {
+        Ok(p) => p.map(|p| format!("chain {} sequence {}: {}", p.chain, p.sequence, p.reason)),
+        Err(e) => Some(format!("the pause record is unreadable: {e:#}")),
+    };
     Json(Health {
         guardian: state.guardian.clone(),
+        paused,
     })
 }
 

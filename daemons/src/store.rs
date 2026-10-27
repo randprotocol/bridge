@@ -32,6 +32,11 @@ impl Store {
         })
     }
 
+    /// The data directory.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn path(&self, parts: &[&str]) -> PathBuf {
         parts.iter().fold(self.root.clone(), |p, part| p.join(part))
     }

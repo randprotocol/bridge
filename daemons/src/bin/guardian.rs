@@ -15,6 +15,10 @@ struct Cli {
     /// The TOML configuration file (see daemons/config.example.toml).
     #[arg(long, env = "RAND_BRIDGE_CONFIG")]
     config: PathBuf,
+    /// Clear a signing pause (a cap breach, BRG-1) after reviewing it, then
+    /// exit. Prints what the pause was; needs no key.
+    #[arg(long)]
+    resume_signing: bool,
 }
 
 #[tokio::main]
@@ -30,6 +34,17 @@ async fn main() -> Result<()> {
         .guardian
         .clone()
         .ok_or_else(|| anyhow!("the config has no [guardian] section"))?;
+    if cli.resume_signing {
+        let store = Store::open(&config.data_dir)?;
+        match bridge_daemons::limits::resume(&store)? {
+            Some(p) => println!(
+                "signing resumed; it was paused at {} on chain {} sequence {}: {}",
+                p.at, p.chain, p.sequence, p.reason
+            ),
+            None => println!("signing was not paused"),
+        }
+        return Ok(());
+    }
 
     // The key comes from the environment only, and leaves it at once so no
     // child process or crash dump of the environment carries it.
@@ -73,6 +88,34 @@ async fn main() -> Result<()> {
     };
     let store = Store::open(&config.data_dir)?;
     let emitters = config.emitters()?;
+    let limits = section
+        .limits
+        .as_ref()
+        .map(bridge_daemons::limits::Limits::new)
+        .transpose()?;
+    match &section.limits {
+        Some(l) => tracing::info!(
+            "caps: {} per transfer, {} per {} s per token and direction ({} token overrides)",
+            l.per_transfer,
+            l.per_window,
+            l.window_secs,
+            l.token.len()
+        ),
+        None => tracing::warn!(
+            "no [guardian.limits]: this guardian signs without per-transfer or per-window caps (BRG-1)"
+        ),
+    }
+    if let Some(p) = bridge_daemons::limits::paused(&store)? {
+        tracing::warn!(
+            "signing is PAUSED (chain {} sequence {}: {}); rand-guardian --resume-signing clears it",
+            p.chain,
+            p.sequence,
+            p.reason
+        );
+    }
+    let guards = guardian::Guards {
+        limits: limits.as_ref(),
+    };
 
     let listener = tokio::net::TcpListener::bind(&section.listen)
         .await
@@ -129,18 +172,18 @@ async fn main() -> Result<()> {
         for source in &evm {
             report(
                 source_name(source),
-                guardian::step(source, &store, &key, pq.as_ref(), &emitters).await,
+                guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards).await,
             )?;
         }
         if let Some(source) = &solana {
             report(
                 source_name(source),
-                guardian::step(source, &store, &key, pq.as_ref(), &emitters).await,
+                guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards).await,
             )?;
         }
         report(
             "rand",
-            guardian::step(&rand, &store, &key, pq.as_ref(), &emitters).await,
+            guardian::step_guarded(&rand, &store, &key, pq.as_ref(), &emitters, &guards).await,
         )?;
 
         tokio::select! {

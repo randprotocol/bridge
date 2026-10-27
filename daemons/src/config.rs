@@ -143,6 +143,9 @@ pub struct GuardianConfig {
     /// When it is set the guardian co-signs every message addressed to Rand.
     #[serde(default = "default_guardian_pq_env")]
     pub pq_seed_env: String,
+    /// Per-transfer and per-window caps this guardian holds every message to
+    /// before it signs (BRG-1). Absent, it signs without them and warns.
+    pub limits: Option<crate::limits::LimitsConfig>,
 }
 
 fn default_guardian_pq_env() -> String {
@@ -384,6 +387,9 @@ impl Config {
         }
         if let Some(g) = &self.governance {
             g.validate()?;
+        }
+        if let Some(limits) = self.guardian.as_ref().and_then(|g| g.limits.as_ref()) {
+            crate::limits::Limits::new(limits)?;
         }
         Ok(())
     }

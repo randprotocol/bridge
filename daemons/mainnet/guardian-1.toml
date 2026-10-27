@@ -44,3 +44,11 @@ program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
 listen = "127.0.0.1:7071"
 key_env = "GUARDIAN1_PRIV_KEY"
 pq_seed_env = "GUARDIAN1_PQ_SEED"
+
+# BRG-1: the published caps (100 per transfer, 1,000 per day, every token), in attested 8-decimal
+# units, held by this guardian before it signs. A breach is refused and pauses signing until
+# `rand-guardian --resume-signing`.
+[guardian.limits]
+per_transfer = 10000000000      # 100 tokens
+per_window = 100000000000       # 1,000 tokens
+window_secs = 86400
