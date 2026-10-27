@@ -34,6 +34,31 @@ impl std::fmt::Display for Equivocation {
 
 impl std::error::Error for Equivocation {}
 
+/// This guardian's own record for `(chain, sequence)` exists but cannot be
+/// read: empty, truncated or not JSON (BR-951). Whether it signed that
+/// sequence, and which body, is unknown, so it signs nothing for it until an
+/// operator repairs or removes the file — but every other sequence is signed
+/// as usual: one bad file never stops a source.
+#[derive(Debug)]
+pub struct UnreadableRecord {
+    pub chain: u16,
+    pub sequence: u64,
+    pub error: String,
+}
+
+impl std::fmt::Display for UnreadableRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the signed record for chain {} sequence {} is unreadable ({}); not signing it until \
+             an operator repairs or removes the file",
+            self.chain, self.sequence, self.error
+        )
+    }
+}
+
+impl std::error::Error for UnreadableRecord {}
+
 /// A message the policy turned down, kept so an operator can see why a
 /// transfer is not moving.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -64,8 +89,23 @@ pub async fn step<S: Source>(
     let (messages, next) = source.poll(&cursor).await?;
     let mut signed = 0;
     for message in messages {
-        if sign_one(store, key, pq, emitters, &message)? {
-            signed += 1;
+        match sign_one(store, key, pq, emitters, &message) {
+            Ok(true) => signed += 1,
+            Ok(false) => {}
+            Err(e) if e.downcast_ref::<UnreadableRecord>().is_some() => {
+                // That sequence alone: recorded where an operator looks, and on.
+                tracing::error!("{e:#}");
+                let refused = Refused {
+                    message: message.clone(),
+                    reason: format!("{e:#}"),
+                };
+                if let Err(w) =
+                    store.write_message(REFUSED, message.emitter_chain, message.sequence, &refused)
+                {
+                    tracing::error!("recording the refusal: {w:#}");
+                }
+            }
+            Err(e) => return Err(e),
         }
     }
     // Only now: a crash before this line re-reads the same messages, and
@@ -86,7 +126,14 @@ pub fn sign_one(
     message: &Observed,
 ) -> Result<bool> {
     let (chain, sequence) = (message.emitter_chain, message.sequence);
-    if let Some(existing) = store.read_message::<SignedMessage>(SIGNED, chain, sequence)? {
+    let existing = store
+        .read_message::<SignedMessage>(SIGNED, chain, sequence)
+        .map_err(|e| UnreadableRecord {
+            chain,
+            sequence,
+            error: format!("{e:#}"),
+        })?;
+    if let Some(existing) = existing {
         if existing.message.digest != message.digest {
             // Two final bodies under one (emitter, sequence) cannot both be
             // honest. Signing the second would hand an attacker a quorum for

@@ -450,6 +450,71 @@ async fn a_failing_source_leaves_the_cursor_where_it_was() {
     assert_eq!(store.cursor("script").unwrap(), None);
 }
 
+/// BR-951: a zero-length record under signed/ (a write cut short by a crash) fails that
+/// (chain, sequence) alone, with an error naming it; the next lock on the same source is
+/// signed in the same poll and the cursor moves on.
+#[tokio::test]
+async fn an_empty_signed_record_fails_only_its_own_sequence() {
+    let (dir, store) = store();
+    let key = &guardian_keys(1)[0];
+    let first = eth_lock(0, [9; 32]);
+    let second = eth_lock(1, [9; 32]);
+    let parts = Store::message_parts(api::SIGNED, 2, 0);
+    let empty = dir.path().join("data").join(&parts[0]).join(&parts[1]).join(&parts[2]);
+    std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+    std::fs::write(&empty, b"").unwrap();
+
+    let next = Cursor {
+        next_block: 9,
+        next_sequence: 2,
+    };
+    let source = script(vec![Ok((vec![first.clone(), second.clone()], next.clone()))]);
+    assert_eq!(
+        guardian::step(&source, &store, key, None, &emitters())
+            .await
+            .unwrap(),
+        1,
+        "the second lock is signed"
+    );
+    assert!(store
+        .read_message::<SignedMessage>(api::SIGNED, 2, 1)
+        .unwrap()
+        .is_some());
+    assert_eq!(store.cursor("script").unwrap(), Some(next));
+    let refused: Refused = store
+        .read_message(guardian::REFUSED, 2, 0)
+        .unwrap()
+        .unwrap();
+    assert!(
+        refused.reason.contains("chain 2 sequence 0") && refused.reason.contains("is empty"),
+        "{}",
+        refused.reason
+    );
+    assert_eq!(std::fs::read(&empty).unwrap(), b"", "the bad file is left for the operator");
+
+    // `sign_one` on its own names the record too.
+    let err = guardian::sign_one(&store, key, None, &emitters(), &first).unwrap_err();
+    assert!(err.downcast_ref::<guardian::UnreadableRecord>().is_some(), "{err:#}");
+}
+
+#[test]
+fn a_store_write_leaves_a_complete_record_and_ignores_a_stale_temp_file() {
+    let (dir, store) = store();
+    let message = eth_lock(4, [9; 32]);
+    // What a crash in the middle of an earlier write leaves behind.
+    let parts = Store::message_parts("observed", 2, 4);
+    let chain_dir = dir.path().join("data").join(&parts[0]).join(&parts[1]);
+    std::fs::create_dir_all(&chain_dir).unwrap();
+    std::fs::write(chain_dir.join("00000000000000000004.tmp"), b"{\"trunc").unwrap();
+    store.write_message("observed", 2, 4, &message).unwrap();
+    assert_eq!(
+        store.read_message::<Observed>("observed", 2, 4).unwrap(),
+        Some(message)
+    );
+    assert_eq!(store.sequences("observed", 2).unwrap(), vec![4]);
+    assert!(!chain_dir.join("00000000000000000004.tmp").exists());
+}
+
 #[test]
 fn signing_is_idempotent_for_a_body_and_fatal_for_a_second_body() {
     let (_dir, store) = store();

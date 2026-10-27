@@ -1,6 +1,9 @@
-//! On-disk state: small JSON files, written atomically (temp file, then
-//! rename). A guardian must never sign a sequence twice with different
-//! bodies, so what it signed is on disk before its cursor moves past it.
+//! On-disk state: small JSON files, written atomically and durably (BR-951):
+//! a temp file is written and fsynced, renamed over the record, and the
+//! directory is fsynced, so after a crash or a power cut a record is either
+//! the old one or the new one, never empty or half written. A guardian must
+//! never sign a sequence twice with different bodies, so what it signed is on
+//! disk before its cursor moves past it.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +15,13 @@ use crate::sources::Cursor;
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+}
+
+/// fsync a directory, so the renames into it survive a power cut.
+fn sync_dir(dir: &Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("syncing directory {}", dir.display()))
 }
 
 impl Store {
@@ -29,6 +39,10 @@ impl Store {
     pub fn read<T: DeserializeOwned>(&self, parts: &[&str]) -> Result<Option<T>> {
         let path = self.path(parts);
         match std::fs::read(&path) {
+            Ok(bytes) if bytes.is_empty() => Err(anyhow::anyhow!(
+                "{} is empty (a write cut short before records were synced?)",
+                path.display()
+            )),
             Ok(bytes) => Ok(Some(
                 serde_json::from_slice(&bytes)
                     .with_context(|| format!("parsing {}", path.display()))?,
@@ -44,10 +58,25 @@ impl Store {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)
+                .with_context(|| format!("creating {}", tmp.display()))?;
+            file.write_all(&serde_json::to_vec_pretty(value)?)
+                .with_context(|| format!("writing {}", tmp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("syncing {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming into {}", path.display()))?;
+        if let Some(dir) = path.parent() {
+            // The rename is durable once the directory entry is; a directory
+            // just created needs its own entry in its parent synced too.
+            sync_dir(dir)?;
+            if let Some(up) = dir.parent().filter(|up| up.starts_with(&self.root)) {
+                sync_dir(up)?;
+            }
+        }
         Ok(())
     }
 
