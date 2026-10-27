@@ -43,6 +43,14 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   any contract change; a guardian without the section warns at startup.
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
+- **Asks its peers before a first signature** (BR-502, `guardian.peers`): replay protection on
+  the destinations is by body digest, so two bodies of one lock could each be redeemed. The
+  guardian's own `signed/` record stops a second body only while it exists; a `data_dir` restored
+  from a snapshot taken before the first signature has lost it. So for every `(chain, sequence)`
+  it holds no record of, the guardian fetches the peers' records and refuses (recorded under
+  `refused/`) when one is a valid signature by a member of the current guardian set over a
+  different body. At startup it reports how many peers answer, or warns that none are configured.
+  After restoring a `data_dir` from any backup, configure the peers before the first poll.
 - Every record under `data_dir` is written durably (BR-951): a temp file, fsynced, renamed over
   the record, then the directory fsynced. A record that is still unreadable (zero-length,
   truncated, not JSON) fails that `(emitter chain, sequence)` alone: the guardian signs nothing

@@ -113,9 +113,33 @@ async fn main() -> Result<()> {
             p.reason
         );
     }
-    let guards = guardian::Guards {
-        limits: limits.as_ref(),
-    };
+    // BR-502: the peers asked before a first signature, and the set whose
+    // signatures count there (refreshed every round from the Rand node).
+    let peers: Vec<bridge_daemons::api::GuardianClient> = section
+        .peers
+        .iter()
+        .map(|p| bridge_daemons::api::GuardianClient::new(p))
+        .collect();
+    if peers.is_empty() {
+        tracing::warn!(
+            "no guardian.peers: a second body for a (chain, sequence) is refused only while this \
+             guardian's own signed/ record of the first one exists (BR-502)"
+        );
+    } else {
+        let mut up = 0;
+        for p in &peers {
+            match p.record(0, 0).await {
+                Ok(_) => up += 1,
+                Err(e) => tracing::warn!("peer {}: {e:#}", p.origin()),
+            }
+        }
+        tracing::info!(
+            "{up} of {} peers answer; each first signature is checked against them",
+            peers.len()
+        );
+    }
+    let rand_rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
+    let mut known: Vec<[u8; 20]> = Vec::new();
 
     let listener = tokio::net::TcpListener::bind(&section.listen)
         .await
@@ -166,6 +190,18 @@ async fn main() -> Result<()> {
     }
 
     loop {
+        if !peers.is_empty() {
+            match bridge_daemons::sources::rand::bridge_state(&rand_rpc).await {
+                Ok(Some(state)) => known = state.guardians,
+                Ok(None) => {}
+                Err(e) => tracing::warn!("reading the guardian set for the peer check: {e:#}"),
+            }
+        }
+        let guards = guardian::Guards {
+            limits: limits.as_ref(),
+            peers: &peers,
+            known: &known,
+        };
         // A source that fails is retried on the next round; one chain's RPC
         // being down must not stop the others from being signed. An
         // equivocation is the exception: it is fatal by design.

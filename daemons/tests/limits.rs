@@ -54,6 +54,7 @@ fn sign(store: &Store, limits: &Limits, m: &Observed, now: u64) -> bool {
     let key = &guardian_keys(1)[0];
     let guards = Guards {
         limits: Some(limits),
+        ..Default::default()
     };
     guardian::sign_one_guarded(store, key, None, &emitters(), &guards, m, now).unwrap()
 }
@@ -172,7 +173,7 @@ async fn a_breach_stops_the_poll_and_nothing_is_read_until_the_pause_is_cleared(
         next: Cursor { next_block: 13, next_sequence: 3 },
     };
     let key = &guardian_keys(1)[0];
-    let guards = Guards { limits: Some(&l) };
+    let guards = Guards { limits: Some(&l), ..Default::default() };
     let n = guardian::step_guarded(&source, &store, key, None, &emitters(), &guards).await.unwrap();
     assert_eq!(n, 1, "lock 0 only");
     assert_eq!(

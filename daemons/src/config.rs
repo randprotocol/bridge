@@ -146,6 +146,13 @@ pub struct GuardianConfig {
     /// Per-transfer and per-window caps this guardian holds every message to
     /// before it signs (BRG-1). Absent, it signs without them and warns.
     pub limits: Option<crate::limits::LimitsConfig>,
+    /// The other guardians' signature API origins (BR-502). Before signing
+    /// a `(chain, sequence)` it holds no record of, the guardian asks them,
+    /// and refuses if one has signed a different body for it — the guard
+    /// that survives this guardian's own store being restored from an old
+    /// snapshot. Empty: only the local record guards, with a startup warning.
+    #[serde(default)]
+    pub peers: Vec<String>,
 }
 
 fn default_guardian_pq_env() -> String {

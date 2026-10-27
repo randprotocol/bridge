@@ -116,6 +116,28 @@ impl GuardianClient {
         &self.origin
     }
 
+    /// Whatever record this guardian serves for `(chain, sequence)`, unchecked:
+    /// the caller decides what it proves (BR-502).
+    pub async fn record(&self, chain: u16, sequence: u64) -> Result<Option<SignedMessage>> {
+        let url = format!("{}/v1/signature/{chain}/{sequence}", self.origin);
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            response
+                .error_for_status()?
+                .json()
+                .await
+                .with_context(|| format!("GET {url}"))?,
+        ))
+    }
+
     /// This guardian's signature over `expected`, if it has one yet.
     ///
     /// Nothing the guardian says is taken on trust: the signature must

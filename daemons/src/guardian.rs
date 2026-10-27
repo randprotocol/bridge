@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::api::{SignedMessage, SIGNED};
+use crate::api::{GuardianClient, SignedMessage, SIGNED};
 use crate::crypto::GuardianKey;
 use crate::message::{check_signable, Emitters, Observed};
 use crate::pq::PqKey;
@@ -80,6 +80,62 @@ pub struct PqSigner {
 pub struct Guards<'a> {
     /// The per-transfer and per-window caps (BRG-1), when configured.
     pub limits: Option<&'a Limits>,
+    /// The other guardians, asked before a first signature (BR-502).
+    pub peers: &'a [GuardianClient],
+    /// The guardian set a peer's record must be signed by to count; empty,
+    /// the address the record names.
+    pub known: &'a [[u8; 20]],
+}
+
+/// What the peers say about `message`'s `(chain, sequence)`: `Some(reason)`
+/// when one of them holds a valid signature, by a guardian, over a
+/// different body (BR-502). Peers that cannot be reached, have no record or
+/// serve something malformed prove nothing and are passed over.
+pub async fn peer_conflict(
+    peers: &[GuardianClient],
+    known: &[[u8; 20]],
+    message: &Observed,
+) -> Option<String> {
+    let (chain, sequence) = (message.emitter_chain, message.sequence);
+    for peer in peers {
+        let record = match peer.record(chain, sequence).await {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::debug!("peer {}: {e:#}", peer.origin());
+                continue;
+            }
+        };
+        // The record must be what it says: its body hashes to its digest,
+        // names this (chain, sequence), and is signed by a guardian.
+        let Ok(body) = Observed::new(record.message.body.clone()) else {
+            continue;
+        };
+        if body.digest != record.message.digest
+            || (body.emitter_chain, body.sequence) != (chain, sequence)
+        {
+            continue;
+        }
+        let Ok(signer) = crate::crypto::recover(&body.digest, &record.signature) else {
+            continue;
+        };
+        let counts = if known.is_empty() {
+            hex::decode(&record.guardian).ok().as_deref() == Some(&signer[..])
+        } else {
+            known.contains(&signer)
+        };
+        if counts && body.digest != message.digest {
+            return Some(format!(
+                "guardian 0x{} (at {}) signed digest {} for chain {chain} sequence {sequence}, \
+                 this guardian observed {}: not signing a second body (BR-502)",
+                hex::encode(signer),
+                peer.origin(),
+                hex::encode(body.digest),
+                hex::encode(message.digest)
+            ));
+        }
+    }
+    None
 }
 
 /// One poll of one source. Returns how many messages were signed.
@@ -124,6 +180,21 @@ pub async fn step_guarded<S: Source>(
     let mut signed = 0;
     let mut queue = located.into_iter().peekable();
     while let Some(Located { message, .. }) = queue.next() {
+        if !guards.peers.is_empty() && !has_record(store, &message) {
+            if let Some(reason) = peer_conflict(guards.peers, guards.known, &message).await {
+                tracing::error!("{reason}");
+                store.write_message(
+                    REFUSED,
+                    message.emitter_chain,
+                    message.sequence,
+                    &Refused {
+                        message: message.clone(),
+                        reason,
+                    },
+                )?;
+                continue;
+            }
+        }
         match sign_one_guarded(store, key, pq, emitters, guards, &message, limits::now()) {
             Ok(true) => signed += 1,
             Ok(false) => {}
@@ -156,6 +227,15 @@ pub async fn step_guarded<S: Source>(
         store.set_cursor(source.name(), &next)?;
     }
     Ok(signed)
+}
+
+/// Whether this guardian has a signed record (readable or not) for
+/// `message`'s `(chain, sequence)`: then `sign_one` decides on its own.
+fn has_record(store: &Store, message: &Observed) -> bool {
+    !matches!(
+        store.read_message::<serde_json::Value>(SIGNED, message.emitter_chain, message.sequence),
+        Ok(None)
+    )
 }
 
 /// Signs `message` unless the policy refuses it. `Ok(true)` when a new
