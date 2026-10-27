@@ -138,6 +138,15 @@ the message bytes, so a second person can re-derive them by hand. The wallet car
 `rand bridge-pause --sig @pause.sig`, `rand bridge-unpause --pq @unpause.json`. A pause file is
 only ever valid at one nonce on one chain — re-make the kept-ready one after every cut.
 
+**Rotating the PQ guardian set and the pause key** (BRG-14): `pq-rotate-pq` and `pq-rotate-pause`
+sign the fullnode's `M_rotate_pq` / `M_rotate_pause` (genesis-bound on chain 20 onward) at the
+bridge's `rotation_nonce` — a PQ quorum of the current set (`--seed-envs`) and, where the chain
+requires it, each new key's proof of possession (`--possession-seed-envs`), as `index:signature`
+lines that signers on separate machines append to. `pq-rotate-submit` re-reads the chain, checks
+the quorum and the possession lines under the ledger's rules and sends the rotation through
+`rand-node bridge-gov rotate-pq|rotate-pause submit`; `pq-cancel-rotation` is the pause key's
+cancel of a pending one. Runbook: `docs/pq-rotation.md`.
+
 ## Audit
 
 `rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved

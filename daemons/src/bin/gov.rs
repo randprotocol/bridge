@@ -9,6 +9,11 @@
 //!                the Rand-only governance messages (spec/PQ-COSIGNATURE.md §8);
 //!                on a chain cut with binding_domain (20 onward) they bind the
 //!                genesis hash: --genesis <hex> or --rand-rpc <url> (BRG-901)
+//!   pq-rotate-pq, pq-rotate-pause, pq-cancel-rotation, pq-rotate-submit
+//!                rotate the post-quantum guardian set or the pause key on Rand
+//!                (BRG-14): build the genesis-bound message, sign it (a PQ
+//!                quorum of the current set, and each new key's proof of
+//!                possession), check it, submit it (docs/pq-rotation.md)
 //!
 //! The same attestation goes to every chain: the three EVM-family endpoints,
 //! Solana (`rand-bridge-cli guardian-set-upgrade`) and Rand (a `BridgeAttest`
@@ -183,6 +188,36 @@ fn sign_governance(
     Ok(())
 }
 
+/// What a PQ rotation is signed over and by whom (BRG-14).
+#[derive(Args)]
+struct RotateArgs {
+    #[arg(long)]
+    rand_chain_id: u64,
+    #[command(flatten)]
+    binding: BindingArgs,
+    /// The bridge's current `rotation_nonce` (rand_getBridgeState). With --rand-rpc it is
+    /// checked against the node, and so is --pq-guardians-file.
+    #[arg(long)]
+    nonce: u64,
+    /// `{"pq_guardians": ["<hex>", …]}` — the CURRENT PQ guardian set.
+    #[arg(long)]
+    pq_guardians_file: PathBuf,
+    /// Environment variables holding 32-byte seeds of CURRENT PQ guardians, comma-separated:
+    /// each signs the quorum. Any number, a quorum across every run.
+    #[arg(long, value_delimiter = ',')]
+    seed_envs: Vec<String>,
+    /// Environment variables holding seeds of NEW keys, comma-separated: each signs its proof of
+    /// possession (bridge.rotation.needs_possession).
+    #[arg(long, value_delimiter = ',')]
+    possession_seed_envs: Vec<String>,
+    /// Where to append the quorum's `index:signature` lines.
+    #[arg(long)]
+    out: PathBuf,
+    /// Where to append the possession `index:signature` lines.
+    #[arg(long)]
+    possession_out: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     Rotate {
@@ -274,6 +309,65 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Rand-only (BRG-14): sign the rotation of the whole PQ guardian set.
+    PqRotatePq {
+        #[command(flatten)]
+        rotate: RotateArgs,
+        /// `{"pq_guardians": ["<hex>", …]}` — the NEW set, in index order.
+        #[arg(long)]
+        new_pq_guardians_file: PathBuf,
+    },
+    /// Rand-only (BRG-14): sign the rotation of the pause key.
+    PqRotatePause {
+        #[command(flatten)]
+        rotate: RotateArgs,
+        /// The new pause key: Dilithium2 public key hex, or `@file` holding it.
+        #[arg(long)]
+        new_pause_key: String,
+    },
+    /// Rand-only (BRG-14): the current pause key's signature dropping a pending rotation.
+    PqCancelRotation {
+        #[arg(long)]
+        rand_chain_id: u64,
+        #[command(flatten)]
+        binding: BindingArgs,
+        /// The bridge's current `rotation_nonce`.
+        #[arg(long)]
+        nonce: u64,
+        #[arg(long, value_parser = ["pq", "pause"])]
+        kind: String,
+        #[arg(long, default_value = "RAND_BRIDGE_PAUSE_KEY_SEED")]
+        seed_env: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Rand-only (BRG-14): check the collected lines against what the node serves, then submit
+    /// the rotation through `rand-node bridge-gov rotate-pq|rotate-pause submit`.
+    PqRotateSubmit {
+        #[arg(long, value_parser = ["pq", "pause"])]
+        kind: String,
+        /// For --kind pq: the NEW set, `{"pq_guardians": [...]}`.
+        #[arg(long)]
+        new_pq_guardians_file: Option<PathBuf>,
+        /// For --kind pause: the new pause key, hex or `@file`.
+        #[arg(long)]
+        new_pause_key: Option<String>,
+        /// The quorum lines (`index:signature`), as pq-rotate-* wrote them.
+        #[arg(long)]
+        quorum: PathBuf,
+        /// The possession lines, on a chain that requires them.
+        #[arg(long)]
+        possession: Option<PathBuf>,
+        /// The Rand node to read the chain from and submit to.
+        #[arg(long)]
+        rand_rpc: String,
+        /// The fullnode's `rand-node` binary, which encodes and sends the action.
+        #[arg(long, default_value = "rand-node")]
+        rand_node: PathBuf,
+        /// Check everything and print the command, but do not run it.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print the Dilithium2 public key a seed derives (and its sha256 prefix), never the seed.
     PqPublicKey {
         #[arg(long)]
@@ -305,6 +399,158 @@ enum Command {
         #[arg(long, default_value_t = 300_000_000)]
         fee_limit: u64,
     },
+}
+
+/// A Dilithium2 public key from hex or `@file`.
+fn pq_key_arg(arg: &str) -> Result<Vec<u8>> {
+    let text = match arg.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
+        None => arg.to_string(),
+    };
+    let key = hex::decode(text.trim().trim_start_matches("0x")).context("the key is not hex")?;
+    if key.len() != bridge_daemons::pq::PUBLIC_KEY_LEN {
+        bail!("a Dilithium2 public key is {} bytes, got {}", bridge_daemons::pq::PUBLIC_KEY_LEN, key.len());
+    }
+    Ok(key)
+}
+
+/// What a rotation reads from the node: `rand_getBridgeState` as served.
+struct RotationView {
+    chain_id: u64,
+    binding: bridge_daemons::pq_gov::BindingDomain,
+    nonce: u64,
+    guardians: usize,
+    pq_guardians: Vec<Vec<u8>>,
+    pause_key: Option<Vec<u8>>,
+    needs_possession: bool,
+}
+
+async fn rotation_view(url: &str) -> Result<RotationView> {
+    use bridge_daemons::sources::rand;
+    let rpc = bridge_daemons::rpc::JsonRpc::new(url);
+    let chain_id = rand::chain_id(&rpc).await.context("rand_chainId")?;
+    let genesis = if bridge_daemons::pq_gov::CHAIN_ID_BINDING_CHAIN_IDS.contains(&chain_id) {
+        None
+    } else {
+        Some(rand::genesis_hash(&rpc).await?)
+    };
+    let binding = bridge_daemons::pq_gov::binding_domain_for(chain_id, genesis)?;
+    let state = rpc.call("rand_getBridgeState", serde_json::json!([])).await?;
+    if state["enabled"].as_bool() != Some(true) {
+        bail!("the node serves no bridge");
+    }
+    if state["rules_v2"].is_null() {
+        bail!("this chain has no bridge rules v2: it has no rotations");
+    }
+    let hexes = |v: &serde_json::Value| -> Result<Vec<Vec<u8>>> {
+        v.as_array()
+            .ok_or_else(|| anyhow!("not an array"))?
+            .iter()
+            .map(|k| hex::decode(k.as_str().unwrap_or_default()).context("not hex"))
+            .collect()
+    };
+    Ok(RotationView {
+        chain_id,
+        binding,
+        nonce: state["rotation_nonce"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("the node serves no rotation_nonce"))?,
+        guardians: state["guardians"].as_array().map_or(0, |g| g.len()),
+        pq_guardians: hexes(&state["pq_guardians"]).context("pq_guardians")?,
+        pause_key: match state["pause_key"].as_str() {
+            Some(k) => Some(hex::decode(k).context("pause_key")?),
+            None => None,
+        },
+        needs_possession: state["rotation_rules"]["needs_possession"].as_bool() == Some(true),
+    })
+}
+
+/// Appends `lines` to `path`, one per line.
+fn append_lines(path: &PathBuf, lines: &[String]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    for l in lines {
+        writeln!(f, "{l}")?;
+    }
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Signs a rotation message: the current-set seeds for the quorum, the new
+/// keys' seeds for possession; every line is checked before it is written.
+async fn sign_rotation_message(what: &str, args: &RotateArgs, new_keys: &[Vec<u8>], pause: bool) -> Result<()> {
+    use bridge_daemons::pq_gov;
+    let current = pq_guardians(&args.pq_guardians_file)?;
+    if let Some(url) = &args.binding.rand_rpc {
+        let v = rotation_view(url).await?;
+        if v.nonce != args.nonce {
+            bail!("--nonce is {} but the node's rotation_nonce is {}", args.nonce, v.nonce);
+        }
+        if v.pq_guardians != current {
+            bail!("--pq-guardians-file is not the PQ guardian set the node serves");
+        }
+    }
+    let binding = args.binding.resolve(args.rand_chain_id).await?;
+    let message = if pause {
+        pq_gov::rotate_pause_message_in(&binding, args.rand_chain_id, args.nonce, &new_keys[0])?
+    } else {
+        pq_gov::rotate_pq_message_in(&binding, args.rand_chain_id, args.nonce, new_keys)?
+    };
+    if args.seed_envs.is_empty() && args.possession_seed_envs.is_empty() {
+        bail!("--seed-envs and --possession-seed-envs name no key");
+    }
+    let mut quorum = Vec::new();
+    for var in &args.seed_envs {
+        let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(var)?)?;
+        let index = current
+            .iter()
+            .position(|k| *k == key.public_key())
+            .ok_or_else(|| anyhow!("{var} is not the seed of a key in the current PQ guardian set"))?;
+        quorum.push(pq_gov::signature_line(index as u8, &key.sign_raw(&message)));
+    }
+    let mut possession = Vec::new();
+    for var in &args.possession_seed_envs {
+        let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(var)?)?;
+        let index = new_keys
+            .iter()
+            .position(|k| *k == key.public_key())
+            .ok_or_else(|| anyhow!("{var} is not the seed of a new key"))?;
+        possession.push(pq_gov::signature_line(index as u8, &key.sign_raw(&message)));
+    }
+    if !quorum.is_empty() {
+        append_lines(&args.out, &quorum)?;
+    }
+    if !possession.is_empty() {
+        let out = args
+            .possession_out
+            .as_ref()
+            .ok_or_else(|| anyhow!("--possession-seed-envs needs --possession-out"))?;
+        append_lines(out, &possession)?;
+    }
+    let collected = if args.out.exists() {
+        pq_gov::parse_signature_lines(&std::fs::read_to_string(&args.out)?)?.len()
+    } else {
+        0
+    };
+    println!("{what}");
+    println!("binding    {}", binding.describe());
+    println!("rotation_nonce {}", args.nonce);
+    println!("message    0x{}  ({} bytes)", hex::encode(&message), message.len());
+    println!(
+        "quorum     {} line(s) in {} — the current set of {} needs {}",
+        collected,
+        args.out.display(),
+        current.len(),
+        bridge_daemons::pq::quorum(current.len())
+    );
+    if !possession.is_empty() {
+        println!("possession {} line(s) appended", possession.len());
+    }
+    Ok(())
 }
 
 fn addresses(list: &[String]) -> Result<Vec<[u8; 20]>> {
@@ -548,6 +794,134 @@ async fn main() -> Result<()> {
             println!("binding    {}", binding.describe());
             println!("message    0x{}", hex::encode(&m));
             println!("signature  -> {}", out.display());
+        }
+        Command::PqRotatePq {
+            rotate,
+            new_pq_guardians_file,
+        } => {
+            let new = pq_guardians(&new_pq_guardians_file)?;
+            sign_rotation_message(
+                &format!("ROTATE the PQ guardian set on Rand chain {} to {} keys", rotate.rand_chain_id, new.len()),
+                &rotate,
+                &new,
+                false,
+            )
+            .await?;
+        }
+        Command::PqRotatePause {
+            rotate,
+            new_pause_key,
+        } => {
+            let new = vec![pq_key_arg(&new_pause_key)?];
+            sign_rotation_message(
+                &format!("ROTATE the pause key on Rand chain {}", rotate.rand_chain_id),
+                &rotate,
+                &new,
+                true,
+            )
+            .await?;
+        }
+        Command::PqCancelRotation {
+            rand_chain_id,
+            binding,
+            nonce,
+            kind,
+            seed_env,
+            out,
+        } => {
+            use bridge_daemons::pq_gov::{cancel_rotation_message_in, signature_line, RotationKind};
+            let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(&seed_env)?)?;
+            let kind = if kind == "pause" { RotationKind::PauseKey } else { RotationKind::PqGuardians };
+            let binding = binding.resolve(rand_chain_id).await?;
+            let m = cancel_rotation_message_in(&binding, rand_chain_id, nonce, kind);
+            std::fs::write(&out, signature_line(0, &key.sign_raw(&m)) + "\n")
+                .with_context(|| format!("writing {}", out.display()))?;
+            println!("CANCEL the pending {kind:?} rotation on Rand chain {rand_chain_id}, rotation_nonce {nonce}");
+            println!("binding    {}", binding.describe());
+            println!("message    0x{}", hex::encode(&m));
+            println!("signature  -> {}", out.display());
+        }
+        Command::PqRotateSubmit {
+            kind,
+            new_pq_guardians_file,
+            new_pause_key,
+            quorum,
+            possession,
+            rand_rpc,
+            rand_node,
+            dry_run,
+        } => {
+            use bridge_daemons::pq_gov;
+            let v = rotation_view(&rand_rpc).await?;
+            let pause = kind == "pause";
+            let new = if pause {
+                vec![pq_key_arg(new_pause_key.as_deref().ok_or_else(|| anyhow!("--kind pause needs --new-pause-key"))?)?]
+            } else {
+                pq_guardians(new_pq_guardians_file.as_ref().ok_or_else(|| anyhow!("--kind pq needs --new-pq-guardians-file"))?)?
+            };
+            // The ledger's shape rules, before anything is sent.
+            if pause {
+                if v.pq_guardians.contains(&new[0]) {
+                    bail!("the new pause key is a PQ guardian's key");
+                }
+            } else {
+                if new.len() != v.guardians {
+                    bail!("the new PQ set has {} keys, the guardian set {}", new.len(), v.guardians);
+                }
+                if v.pause_key.as_ref().is_some_and(|p| new.contains(p)) {
+                    bail!("the new PQ set contains the pause key");
+                }
+            }
+            let message = if pause {
+                pq_gov::rotate_pause_message_in(&v.binding, v.chain_id, v.nonce, &new[0])?
+            } else {
+                pq_gov::rotate_pq_message_in(&v.binding, v.chain_id, v.nonce, &new)?
+            };
+            let lines = pq_gov::parse_signature_lines(&std::fs::read_to_string(&quorum).with_context(|| format!("reading {}", quorum.display()))?)?;
+            // Exactly a quorum, lowest indices first, as the ledger counts it.
+            let need = bridge_daemons::pq::quorum(v.pq_guardians.len());
+            let lines: Vec<_> = lines.into_iter().take(need).collect();
+            pq_gov::check_quorum_lines(&lines, &v.pq_guardians, &message)
+                .context("the quorum lines do not hold for this chain's current set, rotation_nonce and binding")?;
+            match (&possession, v.needs_possession) {
+                (Some(p), true) => {
+                    let lines = pq_gov::parse_signature_lines(&std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?)?;
+                    pq_gov::check_possession_lines(&lines, &new, &message)?;
+                }
+                (None, true) => bail!("this chain requires a proof of possession: pass --possession"),
+                (Some(_), false) => bail!("this chain does not take a proof of possession: drop --possession"),
+                (None, false) => {}
+            }
+            // The quorum file handed on holds exactly the lines checked.
+            let checked = quorum.with_extension("checked");
+            std::fs::write(&checked, lines.iter().map(|(i, s)| pq_gov::signature_line(*i, s) + "\n").collect::<String>())?;
+            let mut cmd = std::process::Command::new(&rand_node);
+            cmd.args(["bridge-gov", if pause { "rotate-pause" } else { "rotate-pq" }, "submit"]);
+            for k in &new {
+                cmd.args(["--new-key", &hex::encode(k)]);
+            }
+            cmd.arg("--quorum").arg(format!("@{}", checked.display()));
+            if let Some(p) = &possession {
+                cmd.arg("--possession").arg(format!("@{}", p.display()));
+            }
+            cmd.args(["--rpc", &rand_rpc]);
+            println!(
+                "checked    {} rotation on Rand chain {}, rotation_nonce {}, {} quorum line(s){}",
+                if pause { "pause-key" } else { "PQ guardian" },
+                v.chain_id,
+                v.nonce,
+                lines.len(),
+                if possession.is_some() { ", possession" } else { "" }
+            );
+            println!("binding    {}", v.binding.describe());
+            if dry_run {
+                println!("would run  {} bridge-gov {} submit --new-key … --quorum @{} --rpc {}", rand_node.display(), if pause { "rotate-pause" } else { "rotate-pq" }, checked.display(), rand_rpc);
+                return Ok(());
+            }
+            let status = cmd.status().with_context(|| format!("running {}", rand_node.display()))?;
+            if !status.success() {
+                bail!("{} exited with {status}", rand_node.display());
+            }
         }
         Command::PqPublicKey { seed_env } => {
             use sha2::{Digest, Sha256};

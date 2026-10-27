@@ -23,6 +23,19 @@ pub const DOMAIN_UNPAUSE: &[u8] = b"rand-bridge-pq-unpause-1";
 pub const DOMAIN_LIST: &[u8] = b"rand-bridge-pq-list-1";
 pub const DOMAIN_REGISTER: &[u8] = b"rand-bridge-pq-register-1";
 
+/// The rotations of the PQ guardian set and of the pause key (BRG-14), as
+/// the fullnode builds them (`bridge/gov.rs` `rotate_pq_message`,
+/// `rotate_pause_message`, `cancel_rotation_message`; its `docs/bridge.md`
+/// §21): signed by a PQ quorum of the current set at `rotation_nonce`; with
+/// `bridge.rotation.needs_possession`, also by each new key.
+pub const DOMAIN_ROTATE_PQ: &[u8] = b"rand-bridge-pq-rotate-pq-1";
+pub const DOMAIN_ROTATE_PAUSE: &[u8] = b"rand-bridge-pq-rotate-pause-1";
+/// Signed by the current pause key to drop a pending (delayed) rotation.
+pub const DOMAIN_CANCEL_ROTATION: &[u8] = b"rand-bridge-cancel-rotation-1";
+pub const DOMAIN_ROTATE_PQ_V2: &[u8] = b"rand-bridge-pq-rotate-pq-2";
+pub const DOMAIN_ROTATE_PAUSE_V2: &[u8] = b"rand-bridge-pq-rotate-pause-2";
+pub const DOMAIN_CANCEL_ROTATION_V2: &[u8] = b"rand-bridge-cancel-rotation-2";
+
 /// The genesis-bound tags: the §8 tags with their version digit at `2`.
 pub const DOMAIN_PAUSE_V2: &[u8] = b"rand-bridge-pause-2";
 pub const DOMAIN_UNPAUSE_V2: &[u8] = b"rand-bridge-pq-unpause-2";
@@ -213,6 +226,177 @@ pub fn register_message_in(
 ) -> Result<Vec<u8>> {
     let v1 = register_message(rand_chain_id, list_nonce, name, symbol, salt, backing)?;
     Ok(rebind(domain, DOMAIN_REGISTER, DOMAIN_REGISTER_V2, v1))
+}
+
+fn check_pq_key(what: &str, key: &[u8]) -> Result<()> {
+    if key.len() != pq::PUBLIC_KEY_LEN {
+        bail!(
+            "{what} is {} bytes, a Dilithium2 public key is {}",
+            key.len(),
+            pq::PUBLIC_KEY_LEN
+        );
+    }
+    Ok(())
+}
+
+/// `M_rotate_pq`: `tag ‖ chain_id ‖ rotation_nonce ‖ u32 count ‖ key [1312] …`,
+/// the new set in index order.
+pub fn rotate_pq_message(
+    rand_chain_id: u64,
+    rotation_nonce: u64,
+    new_pq_guardians: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    if new_pq_guardians.is_empty() {
+        bail!("a PQ guardian set needs at least one key");
+    }
+    let mut m = head(DOMAIN_ROTATE_PQ, rand_chain_id, rotation_nonce);
+    m.extend_from_slice(&(new_pq_guardians.len() as u32).to_be_bytes());
+    for (i, k) in new_pq_guardians.iter().enumerate() {
+        check_pq_key(&format!("new PQ guardian {i}"), k)?;
+        if new_pq_guardians[..i].contains(k) {
+            bail!("new PQ guardian {i} repeats an earlier key");
+        }
+        m.extend_from_slice(k);
+    }
+    Ok(m)
+}
+
+/// [`rotate_pq_message`] on a chain of `domain`.
+pub fn rotate_pq_message_in(
+    domain: &BindingDomain,
+    rand_chain_id: u64,
+    rotation_nonce: u64,
+    new_pq_guardians: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    let v1 = rotate_pq_message(rand_chain_id, rotation_nonce, new_pq_guardians)?;
+    Ok(rebind(domain, DOMAIN_ROTATE_PQ, DOMAIN_ROTATE_PQ_V2, v1))
+}
+
+/// `M_rotate_pause`: `tag ‖ chain_id ‖ rotation_nonce ‖ key [1312]`.
+pub fn rotate_pause_message(
+    rand_chain_id: u64,
+    rotation_nonce: u64,
+    new_pause_key: &[u8],
+) -> Result<Vec<u8>> {
+    check_pq_key("the new pause key", new_pause_key)?;
+    let mut m = head(DOMAIN_ROTATE_PAUSE, rand_chain_id, rotation_nonce);
+    m.extend_from_slice(new_pause_key);
+    Ok(m)
+}
+
+/// [`rotate_pause_message`] on a chain of `domain`.
+pub fn rotate_pause_message_in(
+    domain: &BindingDomain,
+    rand_chain_id: u64,
+    rotation_nonce: u64,
+    new_pause_key: &[u8],
+) -> Result<Vec<u8>> {
+    let v1 = rotate_pause_message(rand_chain_id, rotation_nonce, new_pause_key)?;
+    Ok(rebind(domain, DOMAIN_ROTATE_PAUSE, DOMAIN_ROTATE_PAUSE_V2, v1))
+}
+
+/// Which pending rotation a cancel drops: the fullnode's `RotationKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotationKind {
+    PqGuardians = 0,
+    PauseKey = 1,
+}
+
+/// `M_cancel`: `tag ‖ chain_id ‖ rotation_nonce ‖ kind u8`, signed by the
+/// current pause key.
+pub fn cancel_rotation_message(rand_chain_id: u64, rotation_nonce: u64, kind: RotationKind) -> Vec<u8> {
+    let mut m = head(DOMAIN_CANCEL_ROTATION, rand_chain_id, rotation_nonce);
+    m.push(kind as u8);
+    m
+}
+
+/// [`cancel_rotation_message`] on a chain of `domain`.
+pub fn cancel_rotation_message_in(
+    domain: &BindingDomain,
+    rand_chain_id: u64,
+    rotation_nonce: u64,
+    kind: RotationKind,
+) -> Vec<u8> {
+    rebind(
+        domain,
+        DOMAIN_CANCEL_ROTATION,
+        DOMAIN_CANCEL_ROTATION_V2,
+        cancel_rotation_message(rand_chain_id, rotation_nonce, kind),
+    )
+}
+
+/// `index:signature-hex` lines, what `rand-node bridge-gov … submit` reads
+/// (`#` comments and blank lines ignored). Refuses a repeated index and
+/// returns them in index order.
+pub fn parse_signature_lines(text: &str) -> Result<Vec<(u8, Vec<u8>)>> {
+    let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+    for raw in text
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .flat_map(|l| l.split_whitespace())
+    {
+        let (index, sig) = raw
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("expected index:signature-hex"))?;
+        let index: u8 = index
+            .parse()
+            .map_err(|_| anyhow::anyhow!("{index:?} is not a signer index"))?;
+        let sig = hex::decode(sig.trim_start_matches("0x"))
+            .map_err(|_| anyhow::anyhow!("signer {index}'s signature is not hex"))?;
+        if out.iter().any(|(i, _)| *i == index) {
+            bail!("signer index {index} appears twice");
+        }
+        out.push((index, sig));
+    }
+    out.sort_by_key(|(i, _)| *i);
+    Ok(out)
+}
+
+/// One `index:signature-hex` line.
+pub fn signature_line(index: u8, signature: &[u8]) -> String {
+    format!("{index}:{}", hex::encode(signature))
+}
+
+/// The quorum lines as the ledger will judge them: exactly the rules of
+/// [`pq::check_raw`] over `message` under the current set.
+pub fn check_quorum_lines(
+    lines: &[(u8, Vec<u8>)],
+    pq_guardians: &[Vec<u8>],
+    message: &[u8],
+) -> Result<()> {
+    let list: Vec<PqSignature> = lines
+        .iter()
+        .map(|(index, s)| PqSignature {
+            index: *index,
+            signature: hex::encode(s),
+        })
+        .collect();
+    pq::check_raw(&list, pq_guardians, message)
+        .map_err(|e| anyhow::anyhow!("the quorum would be refused: {e:?}"))
+}
+
+/// The possession lines: exactly one per new key, indices `0..n`, each new
+/// key's own signature over the rotation message.
+pub fn check_possession_lines(
+    lines: &[(u8, Vec<u8>)],
+    new_keys: &[Vec<u8>],
+    message: &[u8],
+) -> Result<()> {
+    if lines.len() != new_keys.len()
+        || lines.iter().enumerate().any(|(i, (index, _))| usize::from(*index) != i)
+    {
+        bail!(
+            "possession lines must be exactly one per new key, indices 0..{} (got {:?})",
+            new_keys.len(),
+            lines.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+        );
+    }
+    for (key, (index, sig)) in new_keys.iter().zip(lines) {
+        if !pq::verify_raw(key, message, sig) {
+            bail!("possession signature {index} does not verify under new key {index}");
+        }
+    }
+    Ok(())
 }
 
 /// A PQ guardian quorum over an arbitrary governance message: each seed is
