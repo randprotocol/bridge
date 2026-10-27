@@ -219,3 +219,33 @@ async fn a_window_deferred_transfer_is_peer_checked_before_it_signs() {
     assert_eq!(limits::held(&me).unwrap(), vec![(2, 1)], "held");
     assert!(limits::listed(&me, limits::DEFERRED).unwrap().is_empty());
 }
+
+/// A transfer deferred because no peer answered holds back later transfers of its token, so
+/// they still sign in sequence order.
+#[tokio::test]
+async fn a_peer_deferred_transfer_keeps_its_token_in_order() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let keys = guardian_keys(2);
+    // A peer that fails for sequence 0 until `up`, and has no record of anything.
+    let up = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = up.clone();
+    let peer = http(move |seen| {
+        if seen.path.ends_with("/2/0") && !flag.load(Ordering::SeqCst) {
+            (500, String::new())
+        } else {
+            (404, String::new())
+        }
+    });
+    let peers = [GuardianClient::new(&peer.url)];
+    let guards = Guards { peers: &peers, ..Default::default() };
+    let (_d, me) = tmp_store();
+    let n = guardian::step_guarded(&two(lock_seq(0, 5), lock_seq(1, 5)), &me, &keys[1], None, &emitters(), &guards)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "sequence 1 waits behind sequence 0");
+    assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap(), vec![(2, 0), (2, 1)]);
+    // Still failing: neither signs, and 1 does not overtake 0.
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 0);
+    up.store(true, Ordering::SeqCst);
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 2);
+}

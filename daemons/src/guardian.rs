@@ -258,7 +258,7 @@ pub async fn step_guarded<S: Source>(
     let mut signed = 0;
     let mut waiting = deferred_windows(store)?;
     for Located { message, .. } in located {
-        if guards.limits.is_some() && !has_record(store, &message) {
+        if !has_record(store, &message) {
             if let Some(w) = limits::window_of(&message).filter(|w| waiting.contains(w)) {
                 // Its token already has a transfer waiting: keep sequence order.
                 limits::defer(
@@ -272,6 +272,11 @@ pub async fn step_guarded<S: Source>(
             }
         }
         if !peers_allow(store, key, guards, &message).await? {
+            if is_deferred(store, &message)? {
+                if let Some(w) = limits::window_of(&message) {
+                    waiting.insert(w);
+                }
+            }
             continue;
         }
         match sign_one_guarded(store, key, pq, emitters, guards, &message, limits::now()) {
@@ -308,15 +313,20 @@ pub async fn step_guarded<S: Source>(
     Ok(signed)
 }
 
+fn is_deferred(store: &Store, message: &Observed) -> Result<bool> {
+    Ok(store
+        .read_message::<limits::Deferral>(limits::DEFERRED, message.emitter_chain, message.sequence)?
+        .is_some())
+}
+
 /// The windows that have a deferred transfer waiting.
 fn deferred_windows(store: &Store) -> Result<std::collections::BTreeSet<String>> {
     let mut out = std::collections::BTreeSet::new();
     for (chain, sequence) in limits::listed(store, limits::DEFERRED)? {
         if let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? {
-            if d.kind == limits::DeferKind::Window {
-                if let Some(w) = limits::window_of(&d.message) {
-                    out.insert(w);
-                }
+            // Whatever it waits for, later transfers of its token wait behind it.
+            if let Some(w) = limits::window_of(&d.message) {
+                out.insert(w);
             }
         }
     }
@@ -343,8 +353,8 @@ pub async fn retry_deferred(
             continue;
         };
         let window = limits::window_of(&d.message);
-        if d.kind == limits::DeferKind::Window && window.as_ref().is_some_and(|w| blocked.contains(w)) {
-            continue;
+        if window.as_ref().is_some_and(|w| blocked.contains(w)) {
+            continue; // behind an earlier one of its token that still waits
         }
         // Every deferred transfer passes the peer check before it is signed, whatever it
         // waited for: one queued behind a full window has not been checked yet.
@@ -352,6 +362,8 @@ pub async fn retry_deferred(
             // Still unchecked (rewritten in place), or now held.
             if limits::held(store)?.contains(&(chain, sequence)) {
                 limits::remove(store, limits::DEFERRED, chain, sequence)?;
+            } else if let Some(w) = window {
+                blocked.insert(w);
             }
             continue;
         }
