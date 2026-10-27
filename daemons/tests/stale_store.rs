@@ -280,3 +280,26 @@ async fn an_unreachable_peer_set_is_probed_once_per_round() {
     assert_eq!(accepted.load(Ordering::SeqCst), 1, "one probe for the round");
     assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap().len(), 3, "all still waiting");
 }
+
+/// Only a record of the same emitter is a second body: this guardian's own signature over a
+/// message of another endpoint with the same (chain, sequence) does not hold anything.
+#[tokio::test]
+async fn my_signature_over_another_emitters_message_is_not_a_conflict() {
+    let keys = guardian_keys(2);
+    let retired = Observed::new(transfer_body(
+        2,
+        word("0x2222222222222222222222222222222222222222"),
+        0,
+        transfer(100_000_000, 0, 2, 1, [9; 32]),
+    ))
+    .unwrap();
+    let (_pd, peer) = peer_with(&signed_by(&keys[1], &retired), &keys[0]).await;
+    let (_d, me) = tmp_store();
+    let peers = [peer];
+    let guards = Guards { peers: &peers, ..Default::default() };
+    let n = guardian::step_guarded(&once(lock_of(100_000_000)), &me, &keys[1], None, &emitters(), &guards)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert!(limits::held(&me).unwrap().is_empty());
+}

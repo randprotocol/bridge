@@ -137,6 +137,12 @@ pub async fn peer_conflict(peers: &[GuardianClient], own: [u8; 20], message: &Ob
             tracing::debug!("peer {origin}: a malformed record for {chain}/{sequence}");
             continue;
         }
+        // Another emitter's message under the same (chain, sequence) — a retired endpoint, say —
+        // is a different message, not a second body of this one.
+        if body.decoded().emitter_address != message.decoded().emitter_address {
+            tracing::debug!("peer {origin}: {chain}/{sequence} from another emitter; ignored");
+            continue;
+        }
         match crate::crypto::recover(&body.digest, &record.signature) {
             Ok(signer) if signer == own => {
                 if body.digest != message.digest {
