@@ -212,36 +212,83 @@ async fn an_oversize_transfer_is_held_while_the_rest_of_the_poll_signs() {
     assert_eq!(*source.polls.lock().unwrap(), 2);
 }
 
+/// A lock of `whole` tokens of the token whose address ends in `tok`.
+fn lock_tok(seq: u64, whole: u64, tok: u8) -> Observed {
+    let mut t = transfer(u128::from(whole * UNIT), 0, 2, 1, [9; 32]);
+    t.token_address = word(&format!("0x{tok:040x}"));
+    Observed::new(transfer_body(2, word(ETH), seq, t)).unwrap()
+}
+
+fn at_msg(message: Observed, block: u64) -> Located {
+    let seq = message.sequence;
+    Located { message, resume: Cursor { next_block: block, next_sequence: seq } }
+}
+
 #[tokio::test]
-async fn a_full_window_defers_and_signing_resumes_on_its_own() {
-    let (_dir, store) = store();
+async fn a_full_window_defers_only_its_token_and_signs_it_later_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let l = Limits::new(&LimitsConfig {
         per_transfer: 10 * UNIT,
         per_window: 10 * UNIT,
-        window_secs: 1,
+        window_secs: 3,
         token: vec![],
     })
     .unwrap();
+    // Token A (0xa1) fills its window at lock 0; lock 1 and lock 3 of A wait; B (0xb2) and a
+    // release on Rand flow.
     let source = Batch {
         polls: Default::default(),
-        located: vec![at(0, 10, 6), at(1, 11, 6), at(2, 12, 1)],
-        next: Cursor { next_block: 13, next_sequence: 3 },
+        located: vec![
+            at_msg(lock_tok(0, 6, 0xa1), 10),
+            at_msg(lock_tok(1, 6, 0xa1), 11),
+            at_msg(lock_tok(2, 6, 0xb2), 12),
+            at_msg(lock_tok(3, 1, 0xa1), 13),
+        ],
+        next: Cursor { next_block: 14, next_sequence: 4 },
     };
     let key = &guardian_keys(1)[0];
     let guards = Guards { limits: Some(&l), ..Default::default() };
     let n = guardian::step_guarded(&source, &store, key, None, &emitters(), &guards).await.unwrap();
-    assert_eq!(n, 1);
-    assert_eq!(
-        store.cursor("batch").unwrap(),
-        Some(Cursor { next_block: 11, next_sequence: 1 }),
-        "the source stops at the deferred lock"
-    );
-    assert!(limits::held(&store).unwrap().is_empty() && limits::paused(&store).unwrap().is_none());
-    // Once the window has rolled past lock 0 the same poll signs the rest, untouched by anyone.
-    std::thread::sleep(std::time::Duration::from_millis(2100));
+    assert_eq!(n, 2, "lock 0 (A) and lock 2 (B)");
+    assert!(is_signed(&store, 2, 2), "token B is not delayed");
+    assert_eq!(store.cursor("batch").unwrap(), Some(Cursor { next_block: 14, next_sequence: 4 }), "the cursor moves on");
+    assert_eq!(limits::listed(&store, limits::DEFERRED).unwrap(), vec![(2, 1), (2, 3)]);
+    // lock 3 would fit A's window (6 + 1), but waits behind lock 1: sequence order per token.
+    assert!(!is_signed(&store, 2, 3));
+    let release = burn(0, 2, u128::from(5 * UNIT), 0);
+    assert!(sign(&store, &l, &release, limits::now()), "a release on Rand is not delayed");
+
+    // Nothing frees yet.
+    assert_eq!(guardian::retry_deferred(&store, key, None, &emitters(), &guards).await.unwrap(), 0);
+    // A restart keeps the deferred set, and once A's window rolls they sign on their own, in order.
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(limits::listed(&store, limits::DEFERRED).unwrap(), vec![(2, 1), (2, 3)]);
+    std::thread::sleep(std::time::Duration::from_millis(4100));
+    assert_eq!(guardian::retry_deferred(&store, key, None, &emitters(), &guards).await.unwrap(), 2);
+    assert!(is_signed(&store, 2, 1) && is_signed(&store, 2, 3));
+    assert!(limits::listed(&store, limits::DEFERRED).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_window_defers_its_token_only() {
+    let (dir, store) = store();
+    let l = published();
+    let key = &guardian_keys(1)[0];
+    let guards = Guards { limits: Some(&l), ..Default::default() };
+    assert!(sign(&store, &l, &lock_tok(0, 1, 0xa1), 1));
+    // Break token A's window record.
+    let window = std::fs::read_dir(dir.path().join("data/limits/window")).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&window, b"").unwrap();
+    let source = Batch {
+        polls: Default::default(),
+        located: vec![at_msg(lock_tok(1, 1, 0xa1), 10), at_msg(lock_tok(2, 1, 0xb2), 11)],
+        next: Cursor { next_block: 12, next_sequence: 3 },
+    };
     let n = guardian::step_guarded(&source, &store, key, None, &emitters(), &guards).await.unwrap();
-    assert_eq!(n, 2, "locks 1 and 2");
-    assert_eq!(store.cursor("batch").unwrap(), Some(Cursor { next_block: 13, next_sequence: 3 }));
+    assert_eq!(n, 1, "token B signs");
+    assert_eq!(limits::listed(&store, limits::DEFERRED).unwrap(), vec![(2, 1)]);
 }
 
 #[tokio::test]

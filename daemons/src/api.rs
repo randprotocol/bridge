@@ -50,6 +50,9 @@ pub struct Health {
     /// Transfers withheld over the per-transfer cap (BRG-1), `chain/sequence`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<String>,
+    /// Transfers waiting for room in their window, or for the peer check, `chain/sequence`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<String>,
 }
 
 struct ApiState {
@@ -77,10 +80,15 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<Health> {
         Ok(h) => h.iter().map(|(c, s)| format!("{c}/{s}")).collect(),
         Err(e) => vec![format!("the held records are unreadable: {e:#}")],
     };
+    let deferred = match crate::limits::listed(&state.store, crate::limits::DEFERRED) {
+        Ok(d) => d.iter().map(|(c, s)| format!("{c}/{s}")).collect(),
+        Err(e) => vec![format!("the deferred records are unreadable: {e:#}")],
+    };
     Json(Health {
         guardian: state.guardian.clone(),
         paused,
         held,
+        deferred,
     })
 }
 

@@ -150,7 +150,7 @@ pub async fn step<S: Source>(
 }
 
 /// A transfer that would overrun its rolling window (BRG-1): it is not
-/// signed now, and the source resumes at it so it is read again.
+/// signed now; it waits in `deferred/` and is retried every round.
 #[derive(Debug)]
 pub struct Deferred {
     pub chain: u16,
@@ -171,8 +171,9 @@ impl std::fmt::Display for Deferred {
 impl std::error::Error for Deferred {}
 
 /// [`step`] under `guards`. While an operator has paused signing nothing is
-/// read, so nothing is passed over. A transfer over its window is deferred:
-/// the poll stops there and the cursor stays on it.
+/// read, so nothing is passed over. A transfer over its window — or behind
+/// one of its token's that is already deferred — goes to `deferred/` and the
+/// cursor moves on; [`retry_deferred`] signs it once there is room.
 pub async fn step_guarded<S: Source>(
     source: &S,
     store: &Store,
@@ -195,9 +196,23 @@ pub async fn step_guarded<S: Source>(
         Some(c) => c,
         None => source.start(),
     };
-    let (located, mut next) = source.poll_located(&cursor).await?;
+    let (located, next) = source.poll_located(&cursor).await?;
     let mut signed = 0;
-    for Located { message, resume } in located {
+    let mut waiting = deferred_windows(store)?;
+    for Located { message, .. } in located {
+        if guards.limits.is_some() && !has_record(store, &message) {
+            if let Some(w) = limits::window_of(&message).filter(|w| waiting.contains(w)) {
+                // Its token already has a transfer waiting: keep sequence order.
+                limits::defer(
+                    store,
+                    &message,
+                    limits::now(),
+                    limits::DeferKind::Window,
+                    &format!("behind an earlier deferred transfer on {w}"),
+                )?;
+                continue;
+            }
+        }
         if !guards.peers.is_empty() && !has_record(store, &message) {
             if let Some(reason) = peer_conflict(guards.peers, guards.known, &message).await {
                 tracing::error!("{reason}");
@@ -230,10 +245,11 @@ pub async fn step_guarded<S: Source>(
                 }
             }
             Err(e) if e.downcast_ref::<Deferred>().is_some() => {
-                // Read it again next poll, and nothing after it on this source yet.
                 tracing::warn!("{}: {e:#}", source.name());
-                next = resume;
-                break;
+                limits::defer(store, &message, limits::now(), limits::DeferKind::Window, &format!("{e:#}"))?;
+                if let Some(w) = limits::window_of(&message) {
+                    waiting.insert(w);
+                }
             }
             Err(e) => return Err(e),
         }
@@ -242,6 +258,62 @@ pub async fn step_guarded<S: Source>(
     // `sign_one` is idempotent for a body it has already signed.
     if next != cursor {
         store.set_cursor(source.name(), &next)?;
+    }
+    Ok(signed)
+}
+
+/// The windows that have a deferred transfer waiting.
+fn deferred_windows(store: &Store) -> Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    for (chain, sequence) in limits::listed(store, limits::DEFERRED)? {
+        if let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? {
+            if d.kind == limits::DeferKind::Window {
+                if let Some(w) = limits::window_of(&d.message) {
+                    out.insert(w);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Retries every deferred transfer, in `(chain, sequence)` order, so each
+/// token's go in sequence order: the first still deferred holds back the
+/// later ones of its window. Returns how many were signed.
+pub async fn retry_deferred(
+    store: &Store,
+    key: &GuardianKey,
+    pq: Option<&PqSigner>,
+    emitters: &Emitters,
+    guards: &Guards<'_>,
+) -> Result<usize> {
+    if limits::paused(store)?.is_some() {
+        return Ok(0);
+    }
+    let mut signed = 0;
+    let mut blocked = std::collections::BTreeSet::new();
+    for (chain, sequence) in limits::listed(store, limits::DEFERRED)? {
+        let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? else {
+            continue;
+        };
+        let window = limits::window_of(&d.message);
+        if d.kind == limits::DeferKind::Window && window.as_ref().is_some_and(|w| blocked.contains(w)) {
+            continue;
+        }
+        match sign_one_guarded(store, key, pq, emitters, guards, &d.message, limits::now()) {
+            Ok(s) => {
+                if s {
+                    signed += 1;
+                }
+                limits::remove(store, limits::DEFERRED, chain, sequence)?;
+            }
+            Err(e) if e.downcast_ref::<Deferred>().is_some() => {
+                if let Some(w) = window {
+                    blocked.insert(w);
+                }
+            }
+            Err(e) => tracing::error!("retrying deferred chain {chain} sequence {sequence}: {e:#}"),
+        }
     }
     Ok(signed)
 }
@@ -356,7 +428,12 @@ fn sign_checked(
         return Ok(false);
     }
     if let Some(limits) = guards.limits {
-        match limits.admit(store, message, now, released)? {
+        let verdict = match limits.admit(store, message, now, released) {
+            Ok(v) => v,
+            // A broken window record holds back its own token only.
+            Err(e) => limits::Verdict::Defer(format!("the cap window cannot be read: {e:#}")),
+        };
+        match verdict {
             limits::Verdict::Admit => {}
             limits::Verdict::Hold(reason) => {
                 tracing::error!(

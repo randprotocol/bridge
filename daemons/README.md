@@ -45,8 +45,9 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   `rand-guardian --config <file> --list-held`; it is signed only when an operator releases that one
   transfer (`--release-held <chain>:<sequence>`, which re-runs every check but the caps and counts it
   in its window). Every other transfer keeps flowing. A transfer that would overrun its window is
-  **deferred**: that source stops at it and reads it again each poll, and it is signed on its own
-  once the window has room. Nothing pauses signing automatically; `--pause-signing <reason>` and
+  **deferred**: recorded in `data_dir/deferred/` (listed in `/v1/health`), retried every round and
+  signed on its own once its window has room, in sequence order per token; later transfers of the
+  same token wait behind it, and the source's cursor moves on for everything else. Nothing pauses signing automatically; `--pause-signing <reason>` and
   `--resume-signing` are the operator's global brake. This bounds loss without any contract change;
   a guardian without the section warns at startup.
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a

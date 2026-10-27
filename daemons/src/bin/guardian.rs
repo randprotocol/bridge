@@ -257,6 +257,11 @@ async fn main() -> Result<()> {
             peers: &peers,
             known: &known,
         };
+        if let Err(e) =
+            guardian::retry_deferred(&store, &key, pq.as_ref(), &emitters, &guards).await
+        {
+            tracing::warn!("deferred transfers: {e:#}");
+        }
         // A source that fails is retried on the next round; one chain's RPC
         // being down must not stop the others from being signed. An
         // equivocation is the exception: it is fatal by design.

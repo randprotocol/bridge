@@ -81,8 +81,8 @@ pq_seed_env = "GUARDIAN_PQ_SEED"     # 32-byte Dilithium2 seed, generated ON thi
 # 8-decimal units; deposits and releases are counted in separate windows, per token, on this
 # guardian's own clock. A transfer over per_transfer is WITHHELD (data_dir/held/, /v1/health,
 # `rand-guardian --list-held`) until an operator runs `--release-held <chain>:<sequence>`; other
-# transfers keep flowing. A transfer over its window is DEFERRED and signed on its own once the
-# window has room. Only an operator pauses all signing (`--pause-signing`, `--resume-signing`).
+# transfers keep flowing. A transfer over its window is DEFERRED (data_dir/deferred/, retried
+# every round, signed on its own once its token's window has room); other tokens are not delayed. Only an operator pauses all signing (`--pause-signing`, `--resume-signing`).
 # Absent, the guardian signs without caps and warns at startup.
 # [guardian.limits]
 # per_transfer = 10000000000         # 100 tokens

@@ -15,8 +15,9 @@
 //! and signed only when an operator releases that one `(chain, sequence)`
 //! (`rand-guardian --release-held <chain>:<sequence>`); every other transfer
 //! keeps flowing. A transfer that would overrun its window is **deferred**:
-//! the source stops at it and reads it again each poll, and it is signed on
-//! its own once the window has room. The global pause (`limits/paused.json`)
+//! recorded in `deferred/<chain>/<sequence>.json`, retried every round, and
+//! signed on its own once its window has room — in sequence order per token,
+//! while the source's cursor moves on for every other transfer. The global pause (`limits/paused.json`)
 //! is never set automatically, only by `rand-guardian --pause-signing`.
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -113,11 +114,44 @@ pub struct Held {
 }
 
 pub const HELD: &str = "held";
+pub const DEFERRED: &str = "deferred";
 
-/// Every withheld `(chain, sequence)`.
-pub fn held(store: &Store) -> Result<Vec<(u16, u64)>> {
+/// Why a transfer waits in `deferred/`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferKind {
+    /// Its token's window is full (BRG-1).
+    Window,
+    /// The peer check could not be made (BR-502).
+    Peers,
+}
+
+/// A transfer waiting to be signed, as written to `deferred/<chain>/<seq>.json`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Deferral {
+    pub message: Observed,
+    pub at: u64,
+    pub kind: DeferKind,
+    pub reason: String,
+}
+
+/// The window a transfer counts in: its direction and token, as one name.
+pub fn window_of(message: &Observed) -> Option<String> {
+    let Ok(Payload::Transfer(t)) = Payload::decode(&message.decoded().payload) else {
+        return None;
+    };
+    Some(format!(
+        "{}-{}-{}",
+        Direction::of(message).label(),
+        t.token_chain,
+        hex::encode(t.token_address)
+    ))
+}
+
+/// Every `(chain, sequence)` recorded under `kind_dir` (`held/`, `deferred/`), ascending.
+pub fn listed(store: &Store, kind_dir: &str) -> Result<Vec<(u16, u64)>> {
     let mut out = Vec::new();
-    let dir = store.root().join(HELD);
+    let dir = store.root().join(kind_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
@@ -127,7 +161,7 @@ pub fn held(store: &Store) -> Result<Vec<(u16, u64)>> {
         let Some(chain) = entry?.file_name().to_str().and_then(|c| c.parse::<u16>().ok()) else {
             continue;
         };
-        for sequence in store.sequences(HELD, chain)? {
+        for sequence in store.sequences(kind_dir, chain)? {
             out.push((chain, sequence));
         }
     }
@@ -135,11 +169,36 @@ pub fn held(store: &Store) -> Result<Vec<(u16, u64)>> {
     Ok(out)
 }
 
-/// Removes the held record of `(chain, sequence)`.
-pub fn unhold(store: &Store, chain: u16, sequence: u64) -> Result<()> {
-    let parts = Store::message_parts(HELD, chain, sequence);
+/// Records `message` as deferred.
+pub fn defer(store: &Store, message: &Observed, now: u64, kind: DeferKind, reason: &str) -> Result<()> {
+    store.write_message(
+        DEFERRED,
+        message.emitter_chain,
+        message.sequence,
+        &Deferral {
+            message: message.clone(),
+            at: now,
+            kind,
+            reason: reason.to_string(),
+        },
+    )
+}
+
+/// Removes a record of `(chain, sequence)` under `kind_dir`.
+pub fn remove(store: &Store, kind_dir: &str, chain: u16, sequence: u64) -> Result<()> {
+    let parts = Store::message_parts(kind_dir, chain, sequence);
     let path = store.root().join(&parts[0]).join(&parts[1]).join(&parts[2]);
     std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))
+}
+
+/// Every withheld `(chain, sequence)`.
+pub fn held(store: &Store) -> Result<Vec<(u16, u64)>> {
+    listed(store, HELD)
+}
+
+/// Removes the held record of `(chain, sequence)`.
+pub fn unhold(store: &Store, chain: u16, sequence: u64) -> Result<()> {
+    remove(store, HELD, chain, sequence)
 }
 
 /// Why signing is paused, as written to `limits/paused.json` by an operator.
