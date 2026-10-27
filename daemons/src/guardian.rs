@@ -82,60 +82,118 @@ pub struct Guards<'a> {
     pub limits: Option<&'a Limits>,
     /// The other guardians, asked before a first signature (BR-502).
     pub peers: &'a [GuardianClient],
-    /// The guardian set a peer's record must be signed by to count; empty,
-    /// the address the record names.
-    pub known: &'a [[u8; 20]],
 }
 
-/// What the peers say about `message`'s `(chain, sequence)`: `Some(reason)`
-/// when one of them holds a valid signature, by a guardian, over a
-/// different body (BR-502). Peers that cannot be reached, have no record or
-/// serve something malformed prove nothing and are passed over.
-pub async fn peer_conflict(
-    peers: &[GuardianClient],
-    known: &[[u8; 20]],
-    message: &Observed,
-) -> Option<String> {
+/// What the peers say about a `(chain, sequence)` this guardian has no record of.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PeerVerdict {
+    /// No peer holds a signature by this guardian over another body.
+    Clear,
+    /// A peer holds this guardian's own signature over a different body: it
+    /// signed that sequence before and has forgotten (a restored store).
+    Conflict(String),
+    /// No peer answered: the check could not be made.
+    Unchecked(String),
+}
+
+/// Asks every peer, at once, for its record of `message`'s `(chain,
+/// sequence)` (BR-502). Only this guardian's own signature proves anything —
+/// the threat is a guardian that forgot what it signed — so a record signed
+/// by any other key is ignored (logged at debug), whatever its body. With no
+/// peer answering the check is [`PeerVerdict::Unchecked`].
+pub async fn peer_conflict(peers: &[GuardianClient], own: [u8; 20], message: &Observed) -> PeerVerdict {
     let (chain, sequence) = (message.emitter_chain, message.sequence);
+    let mut asks = tokio::task::JoinSet::new();
     for peer in peers {
-        let record = match peer.record(chain, sequence).await {
-            Ok(Some(r)) => r,
-            Ok(None) => continue,
+        let peer = peer.clone();
+        asks.spawn(async move {
+            let r = peer.record(chain, sequence).await;
+            (peer.origin().to_string(), r)
+        });
+    }
+    let mut answered = 0;
+    let mut errors = Vec::new();
+    while let Some(joined) = asks.join_next().await {
+        let Ok((origin, result)) = joined else { continue };
+        let record = match result {
+            Ok(Some(r)) => {
+                answered += 1;
+                r
+            }
+            Ok(None) => {
+                answered += 1;
+                continue;
+            }
             Err(e) => {
-                tracing::debug!("peer {}: {e:#}", peer.origin());
+                errors.push(format!("{origin}: {e:#}"));
                 continue;
             }
         };
-        // The record must be what it says: its body hashes to its digest,
-        // names this (chain, sequence), and is signed by a guardian.
         let Ok(body) = Observed::new(record.message.body.clone()) else {
+            tracing::debug!("peer {origin}: an undecodable record for {chain}/{sequence}");
             continue;
         };
-        if body.digest != record.message.digest
-            || (body.emitter_chain, body.sequence) != (chain, sequence)
-        {
+        if body.digest != record.message.digest || (body.emitter_chain, body.sequence) != (chain, sequence) {
+            tracing::debug!("peer {origin}: a malformed record for {chain}/{sequence}");
             continue;
         }
-        let Ok(signer) = crate::crypto::recover(&body.digest, &record.signature) else {
-            continue;
-        };
-        let counts = if known.is_empty() {
-            hex::decode(&record.guardian).ok().as_deref() == Some(&signer[..])
-        } else {
-            known.contains(&signer)
-        };
-        if counts && body.digest != message.digest {
-            return Some(format!(
-                "guardian 0x{} (at {}) signed digest {} for chain {chain} sequence {sequence}, \
-                 this guardian observed {}: not signing a second body (BR-502)",
-                hex::encode(signer),
-                peer.origin(),
-                hex::encode(body.digest),
-                hex::encode(message.digest)
-            ));
+        match crate::crypto::recover(&body.digest, &record.signature) {
+            Ok(signer) if signer == own => {
+                if body.digest != message.digest {
+                    return PeerVerdict::Conflict(format!(
+                        "peer {origin} holds this guardian's own signature over digest {} for \
+                         chain {chain} sequence {sequence}, and the providers now report {}: \
+                         not signing a second body (BR-502)",
+                        hex::encode(body.digest),
+                        hex::encode(message.digest)
+                    ));
+                }
+            }
+            Ok(signer) => tracing::debug!(
+                "peer {origin}: {chain}/{sequence} signed by 0x{}, not this guardian; ignored",
+                hex::encode(signer)
+            ),
+            Err(_) => tracing::debug!("peer {origin}: an unrecoverable signature for {chain}/{sequence}"),
         }
     }
-    None
+    if answered == 0 {
+        return PeerVerdict::Unchecked(format!("no peer answered ({})", errors.join("; ")));
+    }
+    PeerVerdict::Clear
+}
+
+/// The peer check before a first signature: `true` when signing may go on.
+/// A conflict holds the transfer for an operator; no answer defers it.
+async fn peers_allow(store: &Store, key: &GuardianKey, guards: &Guards<'_>, message: &Observed) -> Result<bool> {
+    if guards.peers.is_empty() || has_record(store, message) {
+        return Ok(true);
+    }
+    match peer_conflict(guards.peers, key.address(), message).await {
+        PeerVerdict::Clear => Ok(true),
+        PeerVerdict::Conflict(reason) => {
+            tracing::error!("WITHHELD: {reason}");
+            store.write_message(
+                limits::HELD,
+                message.emitter_chain,
+                message.sequence,
+                &limits::Held {
+                    message: message.clone(),
+                    at: limits::now(),
+                    reason,
+                },
+            )?;
+            Ok(false)
+        }
+        PeerVerdict::Unchecked(reason) => {
+            tracing::warn!(
+                "chain {} sequence {}: peer check not possible, retried next round: {reason}",
+                message.emitter_chain,
+                message.sequence
+            );
+            limits::defer(store, message, limits::now(), limits::DeferKind::Peers, &reason)?;
+            Ok(false)
+        }
+    }
 }
 
 /// One poll of one source. Returns how many messages were signed.
@@ -213,20 +271,8 @@ pub async fn step_guarded<S: Source>(
                 continue;
             }
         }
-        if !guards.peers.is_empty() && !has_record(store, &message) {
-            if let Some(reason) = peer_conflict(guards.peers, guards.known, &message).await {
-                tracing::error!("{reason}");
-                store.write_message(
-                    REFUSED,
-                    message.emitter_chain,
-                    message.sequence,
-                    &Refused {
-                        message: message.clone(),
-                        reason,
-                    },
-                )?;
-                continue;
-            }
+        if !peers_allow(store, key, guards, &message).await? {
+            continue;
         }
         match sign_one_guarded(store, key, pq, emitters, guards, &message, limits::now()) {
             Ok(true) => signed += 1,
@@ -299,6 +345,15 @@ pub async fn retry_deferred(
         let window = limits::window_of(&d.message);
         if d.kind == limits::DeferKind::Window && window.as_ref().is_some_and(|w| blocked.contains(w)) {
             continue;
+        }
+        if d.kind == limits::DeferKind::Peers {
+            if !peers_allow(store, key, guards, &d.message).await? {
+                // Still unchecked (rewritten in place), or now held.
+                if limits::held(store)?.contains(&(chain, sequence)) {
+                    limits::remove(store, limits::DEFERRED, chain, sequence)?;
+                }
+                continue;
+            }
         }
         match sign_one_guarded(store, key, pq, emitters, guards, &d.message, limits::now()) {
             Ok(s) => {

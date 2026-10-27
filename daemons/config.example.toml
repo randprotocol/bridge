@@ -70,11 +70,11 @@ start_sequence = 0
 listen = "127.0.0.1:7071"            # put TLS / a reverse proxy in front for remote relayers
 key_env = "GUARDIAN_KEY"             # 0x + 64 hex; one key per guardian, one guardian per host
 pq_seed_env = "GUARDIAN_PQ_SEED"     # 32-byte Dilithium2 seed, generated ON this host; unset = no co-signature
-# The other guardians' signature APIs (BR-502). Before its first signature for a
-# (chain, sequence) this guardian asks them, and refuses when a guardian of the current set
-# (rand_getBridgeState.guardians) has signed a different body for it — so a data_dir restored
-# from an old snapshot, which has lost its own record, still cannot sign a second body. Peers
-# that do not answer prove nothing; empty, only the local record guards (startup warning).
+# Signature APIs to ask before a first signature for a (chain, sequence) (BR-502). Only a
+# record carrying THIS guardian's own signature over a different body counts: the sequence is
+# then withheld for an operator (--release-held). Records signed by other keys are ignored. If
+# none answers, the transfer is deferred and retried. Include an API that keeps this guardian's
+# past signatures. Empty: only the local record guards (startup warning).
 # peers = ["http://127.0.0.1:7072", "http://127.0.0.1:7073"]
 
 # Caps this guardian holds every message to before it signs (BRG-1). Amounts are attested

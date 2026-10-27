@@ -193,8 +193,6 @@ async fn main() -> Result<()> {
             peers.len()
         );
     }
-    let rand_rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
-    let mut known: Vec<[u8; 20]> = Vec::new();
 
     let listener = tokio::net::TcpListener::bind(&section.listen)
         .await
@@ -245,17 +243,9 @@ async fn main() -> Result<()> {
     }
 
     loop {
-        if !peers.is_empty() {
-            match bridge_daemons::sources::rand::bridge_state(&rand_rpc).await {
-                Ok(Some(state)) => known = state.guardians,
-                Ok(None) => {}
-                Err(e) => tracing::warn!("reading the guardian set for the peer check: {e:#}"),
-            }
-        }
         let guards = guardian::Guards {
             limits: limits.as_ref(),
             peers: &peers,
-            known: &known,
         };
         if let Err(e) =
             guardian::retry_deferred(&store, &key, pq.as_ref(), &emitters, &guards).await

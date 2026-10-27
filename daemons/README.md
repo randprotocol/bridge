@@ -56,10 +56,13 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   the destinations is by body digest, so two bodies of one lock could each be redeemed. The
   guardian's own `signed/` record stops a second body only while it exists; a `data_dir` restored
   from a snapshot taken before the first signature has lost it. So for every `(chain, sequence)`
-  it holds no record of, the guardian fetches the peers' records and refuses (recorded under
-  `refused/`) when one is a valid signature by a member of the current guardian set over a
-  different body. At startup it reports how many peers answer, or warns that none are configured.
-  After restoring a `data_dir` from any backup, configure the peers before the first poll.
+  it holds no record of, the guardian asks the peers (concurrently) for their record. Only a record
+  carrying **this guardian's own signature** over a different body counts: that sequence is then
+  withheld (`held/`, released only by `--release-held`). Records signed by any other key are
+  ignored, so no other guardian can block a transfer. If no peer answers, the transfer is deferred
+  (`deferred/`) and retried every round — never skipped. List among the peers any API that keeps
+  this guardian's past signatures (another guardian that mirrors them, or a copy of this one's
+  `signed/`). At startup it reports how many peers answer, or warns that none are configured.
 - Every record under `data_dir` is written durably (BR-951): a temp file, fsynced, renamed over
   the record, then the directory fsynced. A record that is still unreadable (zero-length,
   truncated, not JSON) fails that `(emitter chain, sequence)` alone: the guardian signs nothing

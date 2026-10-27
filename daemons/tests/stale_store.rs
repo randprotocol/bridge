@@ -7,7 +7,8 @@ mod common;
 
 use bridge_daemons::api::{self, GuardianClient, SignedMessage};
 use bridge_daemons::crypto::GuardianKey;
-use bridge_daemons::guardian::{self, Guards, Refused};
+use bridge_daemons::guardian::{self, Guards};
+use bridge_daemons::limits;
 use bridge_daemons::message::{Emitters, Observed};
 use bridge_daemons::sources::{Cursor, Source};
 use bridge_daemons::store::Store;
@@ -59,84 +60,112 @@ fn tmp_store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
-/// A peer that signed `first`; and a guardian with an empty ("restored") store.
-async fn setup(first: &Observed) -> (Vec<GuardianKey>, Vec<tempfile::TempDir>, GuardianClient, Store) {
-    let keys = guardian_keys(3);
-    let (peer_dir, peer_store) = tmp_store();
-    assert!(guardian::sign_one(&peer_store, &keys[0], None, &emitters(), first).unwrap());
-    let peer = serve(&peer_store, &keys[0]).await;
-    let (me_dir, me) = tmp_store();
-    (keys, vec![peer_dir, me_dir], peer, me)
+/// A peer whose store holds `record` for (2, 0), serving it.
+async fn peer_with(record: &SignedMessage, key: &GuardianKey) -> (tempfile::TempDir, GuardianClient) {
+    let (dir, store) = tmp_store();
+    store.write_message(api::SIGNED, 2, 0, record).unwrap();
+    let client = serve(&store, key).await;
+    (dir, client)
+}
+
+fn signed_by(key: &GuardianKey, m: &Observed) -> SignedMessage {
+    SignedMessage {
+        message: m.clone(),
+        guardian: hex::encode(key.address()),
+        signature: key.sign(&m.digest).unwrap(),
+        pq_signature: None,
+    }
+}
+
+fn dead_peer() -> GuardianClient {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    GuardianClient::new(&format!("http://127.0.0.1:{port}"))
 }
 
 #[tokio::test]
-async fn a_restored_guardian_refuses_a_second_body_a_peer_already_signed() {
-    let first = lock_of(100_000_000);
-    let second = lock_of(100_000_001); // what a lying RPC reports after the restore
-    let (keys, _dirs, peer, me) = setup(&first).await;
-    let known = [keys[0].address(), keys[1].address()];
+async fn another_keys_record_never_blocks_whatever_its_body() {
+    let keys = guardian_keys(3);
+    // A guardian (keys[0]) pre-signs junk for the next sequence and serves it.
+    let (_pd, peer) = peer_with(&signed_by(&keys[0], &lock_of(5)), &keys[0]).await;
+    let (_d, me) = tmp_store();
     let peers = [peer];
-    let guards = Guards { peers: &peers, known: &known, ..Default::default() };
+    let guards = Guards { peers: &peers, ..Default::default() };
+    let n = guardian::step_guarded(&once(lock_of(100_000_000)), &me, &keys[1], None, &emitters(), &guards)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "signed: only this guardian's own signature proves anything");
+    assert!(limits::held(&me).unwrap().is_empty());
+}
 
+#[tokio::test]
+async fn my_own_conflicting_signature_at_a_peer_holds_the_sequence() {
+    let keys = guardian_keys(2);
+    let first = lock_of(100_000_000);
+    let second = lock_of(100_000_001); // what the providers report after the restore
+    // The peer keeps what this guardian (keys[1]) signed before its store was restored.
+    let (_pd, peer) = peer_with(&signed_by(&keys[1], &first), &keys[0]).await;
+    let (_d, me) = tmp_store();
+    let peers = [peer];
+    let guards = Guards { peers: &peers, ..Default::default() };
     let n = guardian::step_guarded(&once(second.clone()), &me, &keys[1], None, &emitters(), &guards)
         .await
         .unwrap();
     assert_eq!(n, 0);
     assert!(me.read_message::<SignedMessage>(api::SIGNED, 2, 0).unwrap().is_none());
-    let refused: Refused = me.read_message(guardian::REFUSED, 2, 0).unwrap().unwrap();
-    assert!(refused.reason.contains("BR-502") && refused.reason.contains(&hex::encode(first.digest)), "{}", refused.reason);
+    assert_eq!(limits::held(&me).unwrap(), vec![(2, 0)], "held, not skipped");
+    let held: limits::Held = me.read_message(limits::HELD, 2, 0).unwrap().unwrap();
+    assert!(held.reason.contains("BR-502") && held.reason.contains(&hex::encode(first.digest)), "{}", held.reason);
+    // The same body is signed as usual.
+    let (_d2, fresh) = tmp_store();
+    assert_eq!(
+        guardian::step_guarded(&once(first.clone()), &fresh, &keys[1], None, &emitters(), &guards).await.unwrap(),
+        1
+    );
+}
 
-    // The same body the peer signed is signed as usual.
-    let (_d, fresh) = tmp_store();
-    let n = guardian::step_guarded(&once(first.clone()), &fresh, &keys[1], None, &emitters(), &guards)
-        .await
-        .unwrap();
-    assert_eq!(n, 1);
+#[tokio::test]
+async fn with_no_peer_answering_the_transfer_waits_and_signs_once_one_does() {
+    let keys = guardian_keys(2);
+    let (_d, me) = tmp_store();
+    let peers = [dead_peer(), dead_peer()];
+    let guards = Guards { peers: &peers, ..Default::default() };
+    let m = lock_of(100_000_000);
+    let n = guardian::step_guarded(&once(m.clone()), &me, &keys[1], None, &emitters(), &guards).await.unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(me.cursor("eth").unwrap(), Some(Cursor { next_block: 60, next_sequence: 1 }));
+    assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap(), vec![(2, 0)], "deferred, not skipped");
+    // Still nobody: still waiting.
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 0);
+    assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap(), vec![(2, 0)]);
+    // A peer answers (it has no record): the retry signs it.
+    let (_pd, empty_store) = tmp_store();
+    let up = [serve(&empty_store, &keys[0]).await];
+    let guards = Guards { peers: &up, ..Default::default() };
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 1);
+    assert!(me.read_message::<SignedMessage>(api::SIGNED, 2, 0).unwrap().is_some());
+    assert!(limits::listed(&me, limits::DEFERRED).unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn without_peers_a_restored_store_is_guarded_by_nothing_else() {
     // The behaviour BR-502 records, kept when no peers are configured.
-    let first = lock_of(100_000_000);
-    let (keys, _dirs, _peer, me) = setup(&first).await;
-    let n = guardian::step(&once(lock_of(100_000_001)), &me, &keys[1], None, &emitters())
-        .await
-        .unwrap();
-    assert_eq!(n, 1);
-}
-
-#[tokio::test]
-async fn a_peer_record_not_signed_by_a_guardian_or_a_dead_peer_proves_nothing() {
-    let first = lock_of(100_000_000);
-    let (keys, _dirs, peer, me) = setup(&first).await;
-    // keys[0] signed the peer's record, but it is not in this set.
-    let known = [keys[1].address(), keys[2].address()];
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let peers = [peer, GuardianClient::new(&format!("http://127.0.0.1:{port}"))];
-    let guards = Guards { peers: &peers, known: &known, ..Default::default() };
-    let n = guardian::step_guarded(&once(lock_of(100_000_001)), &me, &keys[1], None, &emitters(), &guards)
-        .await
-        .unwrap();
-    assert_eq!(n, 1);
-}
-
-#[tokio::test]
-async fn a_peer_record_whose_body_does_not_match_its_digest_is_ignored() {
-    let first = lock_of(100_000_000);
     let keys = guardian_keys(2);
-    // A forged record: a real signature over `first`, served with another body.
-    let fake = SignedMessage {
-        message: Observed { body: lock_of(5).body, ..first.clone() },
-        guardian: hex::encode(keys[0].address()),
-        signature: keys[0].sign(&first.digest).unwrap(),
-        pq_signature: None,
-    };
+    let (_d, me) = tmp_store();
+    let n = guardian::step(&once(lock_of(100_000_001)), &me, &keys[1], None, &emitters()).await.unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn a_forged_record_of_my_key_whose_body_does_not_match_its_digest_is_ignored() {
+    let keys = guardian_keys(2);
+    let first = lock_of(100_000_000);
+    // A real signature by this guardian over `first`, served with another body.
+    let fake = SignedMessage { message: Observed { body: lock_of(5).body, ..first.clone() }, ..signed_by(&keys[1], &first) };
     let text = serde_json::to_string(&fake).unwrap();
     let liar = http(move |_| (200, text.clone()));
     let (_d, me) = tmp_store();
     let peers = [GuardianClient::new(&liar.url)];
-    let known = [keys[0].address()];
-    let guards = Guards { peers: &peers, known: &known, ..Default::default() };
+    let guards = Guards { peers: &peers, ..Default::default() };
     let n = guardian::step_guarded(&once(lock_of(100_000_001)), &me, &keys[1], None, &emitters(), &guards)
         .await
         .unwrap();
