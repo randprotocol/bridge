@@ -346,7 +346,9 @@ pub async fn retry_deferred(
         if d.kind == limits::DeferKind::Window && window.as_ref().is_some_and(|w| blocked.contains(w)) {
             continue;
         }
-        if d.kind == limits::DeferKind::Peers && !peers_allow(store, key, guards, &d.message).await? {
+        // Every deferred transfer passes the peer check before it is signed, whatever it
+        // waited for: one queued behind a full window has not been checked yet.
+        if !peers_allow(store, key, guards, &d.message).await? {
             // Still unchecked (rewritten in place), or now held.
             if limits::held(store)?.contains(&(chain, sequence)) {
                 limits::remove(store, limits::DEFERRED, chain, sequence)?;

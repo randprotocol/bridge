@@ -171,3 +171,51 @@ async fn a_forged_record_of_my_key_whose_body_does_not_match_its_digest_is_ignor
         .unwrap();
     assert_eq!(n, 1);
 }
+
+fn lock_seq(sequence: u64, amount: u128) -> Observed {
+    Observed::new(transfer_body(2, word(ETH), sequence, transfer(amount, 0, 2, 1, [9; 32]))).unwrap()
+}
+
+fn two(a: Observed, b: Observed) -> Once {
+    Once(std::sync::Mutex::new(vec![a, b]))
+}
+
+/// A transfer deferred behind a full window is peer-checked when it is retried: a peer that
+/// now holds this guardian's own signature over another body for it gets it held, not signed.
+#[tokio::test]
+async fn a_window_deferred_transfer_is_peer_checked_before_it_signs() {
+    const UNIT: u128 = 100_000_000;
+    let keys = guardian_keys(2);
+    let (_pd, peer_store) = tmp_store();
+    let peers = [serve(&peer_store, &keys[0]).await];
+    let l = limits::Limits::new(&limits::LimitsConfig {
+        per_transfer: 10 * UNIT as u64,
+        per_window: 10 * UNIT as u64,
+        window_secs: 3,
+        token: vec![],
+    })
+    .unwrap();
+    let guards = Guards { limits: Some(&l), peers: &peers };
+    let (_d, me) = tmp_store();
+    let (first, second) = (lock_seq(0, 6 * UNIT), lock_seq(1, 6 * UNIT));
+    let n = guardian::step_guarded(&two(first, second.clone()), &me, &keys[1], None, &emitters(), &guards)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap(), vec![(2, 1)]);
+    // Meanwhile a peer turns out to hold this guardian's signature over another body for (2, 1).
+    let other = lock_seq(1, 7 * UNIT);
+    peer_store
+        .write_message(api::SIGNED, 2, 1, &SignedMessage {
+            message: other.clone(),
+            guardian: hex::encode(keys[1].address()),
+            signature: keys[1].sign(&other.digest).unwrap(),
+            pq_signature: None,
+        })
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(4100));
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 0);
+    assert!(me.read_message::<SignedMessage>(api::SIGNED, 2, 1).unwrap().is_none(), "not signed");
+    assert_eq!(limits::held(&me).unwrap(), vec![(2, 1)], "held");
+    assert!(limits::listed(&me, limits::DEFERRED).unwrap().is_empty());
+}
