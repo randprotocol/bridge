@@ -36,7 +36,7 @@ blake3 = "1"
 crystals-dilithium = "2.0"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rlp = "0.5"
 serde = { version = "1", features = ["derive"] }

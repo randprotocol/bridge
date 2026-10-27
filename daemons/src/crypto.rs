@@ -19,7 +19,7 @@ pub fn digest(body: &[u8]) -> [u8; 32] {
 /// The 20-byte guardian address of a public key: the low 20 bytes of the
 /// keccak of its uncompressed form, like an Ethereum address.
 pub fn address_of(key: &VerifyingKey) -> [u8; 20] {
-    let point = key.to_encoded_point(false);
+    let point = key.to_sec1_point(false);
     let hash = keccak256(&point.as_bytes()[1..]);
     hash[12..].try_into().expect("20 bytes")
 }
@@ -64,15 +64,12 @@ impl GuardianKey {
 /// k256 normalises `s` itself; both properties are asserted rather than
 /// assumed, because every verifier (and EIP-2) refuses the alternative.
 pub fn sign_recoverable(key: &SigningKey, prehash: &[u8; 32]) -> Result<RawSignature> {
-    let (sig, recid) = key
-        .sign_prehash_recoverable(prehash)
-        .map_err(|e| anyhow!("signing failed: {e}"))?;
-    let (sig, recid) = match sig.normalize_s() {
-        Some(low) => (
-            low,
-            RecoveryId::from_byte(recid.to_byte() ^ 1).expect("0 or 1"),
-        ),
-        None => (sig, recid),
+    let (sig, recid) = key.sign_prehash_recoverable(prehash);
+    let low = sig.normalize_s();
+    let (sig, recid) = if low != sig {
+        (low, RecoveryId::from_byte(recid.to_byte() ^ 1).expect("0 or 1"))
+    } else {
+        (sig, recid)
     };
     let bytes = sig.to_bytes();
     let raw = RawSignature {

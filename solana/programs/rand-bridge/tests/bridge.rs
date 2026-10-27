@@ -68,7 +68,7 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
 
 /// The last 20 bytes of `keccak256(uncompressed_pubkey[1..])`.
 fn address_from_verifying_key(key: &VerifyingKey) -> [u8; 20] {
-    let encoded = key.to_encoded_point(false);
+    let encoded = key.to_sec1_point(false);
     let hash = keccak256(&encoded.as_bytes()[1..]);
     let mut out = [0u8; 20];
     out.copy_from_slice(&hash[12..]);
@@ -79,16 +79,14 @@ fn address_from_verifying_key(key: &VerifyingKey) -> [u8; 20] {
 /// low-s [`Signature`] tagged with guardian `index` and recovery id 0 or 1.
 fn sign_digest(secret: &[u8; 32], index: u8, digest: &[u8; 32]) -> Signature {
     let signing_key = SigningKey::from_bytes(secret.into()).expect("valid secp256k1 secret key");
-    let (sig, recid) = signing_key
-        .sign_prehash_recoverable(digest)
-        .expect("prehash signing cannot fail for a valid key and 32-byte digest");
-    let (sig, recid) = match sig.normalize_s() {
-        Some(normalized) => {
-            let flipped = RecoveryId::from_byte(recid.to_byte() ^ 1)
-                .expect("flipping bit 0 of a valid recovery id stays valid");
-            (normalized, flipped)
-        }
-        None => (sig, recid),
+    let (sig, recid) = signing_key.sign_prehash_recoverable(digest);
+    let normalized = sig.normalize_s();
+    let (sig, recid) = if normalized != sig {
+        let flipped = RecoveryId::from_byte(recid.to_byte() ^ 1)
+            .expect("flipping bit 0 of a valid recovery id stays valid");
+        (normalized, flipped)
+    } else {
+        (sig, recid)
     };
     let (r, s) = sig.split_bytes();
     Signature {
