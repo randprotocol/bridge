@@ -232,7 +232,7 @@ impl<S: Confirm> Source for Quorum<S> {
                     errors.push(format!("provider {i}: its scan is contradicted by the counters"));
                 }
                 Some(resume) => {
-                    if best.as_ref().map_or(true, |(b, _)| confirmed.len() > b.len()) {
+                    if best.as_ref().is_none_or(|(b, _)| confirmed.len() > b.len()) {
                         best = Some((confirmed, resume));
                     }
                 }

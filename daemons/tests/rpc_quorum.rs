@@ -200,7 +200,7 @@ async fn solana_messages_need_the_same_account_from_a_quorum_of_rpcs() {
         let mut config = vec![0u8; offset + 24];
         config[0] = 1;
         config[offset..offset + 8].copy_from_slice(&1u64.to_le_bytes());
-        let accounts = vec![(pda(&[b"config"]), config), (pda(&[b"msg", &0u64.to_le_bytes()]), msg)];
+        let accounts = [(pda(&[b"config"]), config), (pda(&[b"msg", &0u64.to_le_bytes()]), msg)];
         rpc(move |m, p| {
             (m == "getAccountInfo").then(|| {
                 let key = p[0].as_str().unwrap();

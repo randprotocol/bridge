@@ -1664,7 +1664,7 @@ mod tests {
         assert_eq!(proposers, vec![ADMIN_SAFE]);
         assert!(holders
             .get(&role_id("EXECUTOR_ROLE"))
-            .map_or(true, |s| s.is_empty()));
+            .is_none_or(|s| s.is_empty()));
     }
 
     #[test]
