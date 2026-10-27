@@ -6,6 +6,10 @@ memory: review state, load-bearing invariants, and traps. The sibling repo
 (`../fullnode`, package `randprotocol`) has its own AGENTS.md with the fullnode memory —
 read it before touching anything there, it is worked on by many sessions in parallel.
 
+- **Public repo hygiene (WEB-502):** no host addresses or SSH host-key fingerprints in tracked files
+  or script defaults; scripts read them from `~/.rand-bridge/mainnet-set1/hosts.txt` and
+  `~/.rand-bridge/relayer-host/host.txt` (`public <ip>`, `hostkey SHA256:…`) or the environment.
+
 ## State as of 2026-10-12 — bridge LIVE on Rand chain 21 (fullnode v0.8.0), cut with `daemons/mainnet/cut-chain21.sh`
 
 - **Rand chain 21** (fullnode **v0.8.0**, tag at `c0878c3f`; genesis

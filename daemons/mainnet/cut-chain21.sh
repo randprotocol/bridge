@@ -31,8 +31,12 @@ SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}
 cd "$(dirname "$SELF")/.."
 
 FROM=20; TO=21
-RELAYER_IP=167.172.65.45
-RELAYER_HOSTKEY='SHA256:emiVrQXryU8L12wv4PWsmkap04SAh8bfqss2bpR0pyI'
+# The relayer host's address and SSH host-key fingerprint are not in this public repository: from
+# the environment, or from ~/.rand-bridge/relayer-host/host.txt (lines `public <ip>` and
+# `hostkey SHA256:<fingerprint>`).
+RELAYER_HOST_FILE="$HOME/.rand-bridge/relayer-host/host.txt"
+RELAYER_IP="${RELAYER_IP:-$(awk '$1=="public"{print $2}' "$RELAYER_HOST_FILE" 2>/dev/null || true)}"
+RELAYER_HOSTKEY="${RELAYER_HOSTKEY:-$(awk '$1=="hostkey"{print $2}' "$RELAYER_HOST_FILE" 2>/dev/null || true)}"
 RAND_OLD_SHA=155dfe6667a85ea8071977512dc40c750127b9baa9b4fa4796d101c8fc1eee2d   # rand 0.6.8
 RAND_NEW_SHA=e3a38e74ee28743a960fc1c3eb1ac6c538e18dc259411e10afff7f54e268bbf4   # rand 0.8.0
 RAND_RPC="${RAND_RPC:-http://127.0.0.1:8545}"
@@ -73,6 +77,7 @@ check_burn_seq() {
 
 # The relayer host key must be the recorded one before any command reaches it.
 check_hostkey() {
+  [[ -n "$RELAYER_IP" && -n "$RELAYER_HOSTKEY" ]] || die "the relayer host is not configured: set RELAYER_IP and RELAYER_HOSTKEY, or put 'public <ip>' and 'hostkey SHA256:…' in $RELAYER_HOST_FILE; nothing was run"
   echo "+ ssh-keyscan -t ed25519 $RELAYER_IP | ssh-keygen -lf -   # expect $RELAYER_HOSTKEY"
   (( yes )) || return 0
   local got
@@ -183,6 +188,9 @@ install -m 755 /usr/local/bin/rand.pre-c21 /usr/local/bin/rand
     SRC=$SELF
     mkdir -p "$T/bin" "$T/home/.rand-bridge/mainnet-set1" "$T/home/.ssh" "$T/tree/mainnet"
     for i in 1 2 3 4 5 6; do echo "$i 10.0.0.$i"; done > "$T/home/.rand-bridge/mainnet-set1/hosts.txt"
+    mkdir -p "$T/home/.rand-bridge/relayer-host"
+    printf 'public 10.0.0.9\nhostkey SHA256:selftest-relayer-host-key\n' > "$T/home/.rand-bridge/relayer-host/host.txt"
+    unset RELAYER_IP RELAYER_HOSTKEY
     cp "$SRC" "$T/tree/mainnet/cut-chain21.sh"
     for g in 7 8; do
       echo 'chain_id = 20 ' > "$T/tree/mainnet/guardian-$g.toml"
@@ -205,7 +213,7 @@ esac
 CURL
     cat > "$T/bin/ssh-keygen" <<'KG'
 #!/bin/sh
-cat >/dev/null; echo "256 ${FAKE_FPR:-SHA256:emiVrQXryU8L12wv4PWsmkap04SAh8bfqss2bpR0pyI} fake (ED25519)"
+cat >/dev/null; echo "256 ${FAKE_FPR:-SHA256:selftest-relayer-host-key} fake (ED25519)"
 KG
     chmod +x "$T"/bin/* "$T/tree/mainnet/run-guardians-set1.sh"
     export FAKELOG="$T/log" HOME="$T/home" PATH="$T/bin:$PATH" BURN_SEQ=14
@@ -250,6 +258,10 @@ KG
     [[ ! -s "$FAKELOG" ]] && ok "mismatch sent nothing to the host" || bad "mismatch contacted the host"
     if FAKE_FPR=SHA256:wrong "$S" relayer-rand "$good" --yes >/dev/null 2>&1; then bad "wrong host key accepted"; else ok "wrong host key refused"; fi
     [[ ! -s "$FAKELOG" ]] && ok "wrong host key sent nothing" || bad "host-key mismatch contacted the host"
+    mv "$T/home/.rand-bridge/relayer-host/host.txt" "$T/host.txt.away"; : > "$FAKELOG"
+    if "$S" relayer-rand "$good" --yes >/dev/null 2>&1; then bad "relayer step ran with no relayer host configured"; else ok "no relayer host configured: refused"; fi
+    [[ ! -s "$FAKELOG" ]] && ok "an unconfigured relayer host is never contacted" || bad "unconfigured relayer host contacted"
+    mv "$T/host.txt.away" "$T/home/.rand-bridge/relayer-host/host.txt"
     if "$S" start --yes >/dev/null 2>&1 && echo 'chain_id = 20 ' > "$T/tree/mainnet/guardian-7.toml" && "$S" start --yes >/dev/null 2>&1; then bad "start with guardian-7 on 20"; else ok "start refused while a guardian is on chain 20"; fi
     : > "$FAKELOG"; DRY_RUN=1 "$S" droplet 1 --yes >/dev/null; DRY_RUN=1 "$S" start --yes >/dev/null 2>&1 || true
     [[ ! -s "$FAKELOG" ]] && ok "DRY_RUN contacts nothing" || bad "DRY_RUN contacted something"
