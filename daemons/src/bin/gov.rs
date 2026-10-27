@@ -880,7 +880,17 @@ async fn main() -> Result<()> {
             let lines = pq_gov::parse_signature_lines(&std::fs::read_to_string(&quorum).with_context(|| format!("reading {}", quorum.display()))?)?;
             // Exactly a quorum, lowest indices first, as the ledger counts it.
             let need = bridge_daemons::pq::quorum(v.pq_guardians.len());
-            let lines: Vec<_> = lines.into_iter().take(need).collect();
+            // Lines that verify under the key at their index, then the lowest `need` of them:
+            // a bad line does not push a good one out.
+            let lines: Vec<_> = lines
+                .into_iter()
+                .filter(|(i, sig)| {
+                    v.pq_guardians
+                        .get(usize::from(*i))
+                        .is_some_and(|k| bridge_daemons::pq::verify_raw(k, &message, sig))
+                })
+                .take(need)
+                .collect();
             pq_gov::check_quorum_lines(&lines, &v.pq_guardians, &message)
                 .context("the quorum lines do not hold for this chain's current set, rotation_nonce and binding")?;
             match (&possession, v.needs_possession) {

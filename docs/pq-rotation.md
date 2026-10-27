@@ -40,7 +40,9 @@ rand-bridge-gov pq-rotate-pq … --possession-seed-envs NEW1_PQ_SEED --possessio
 ```
 
 `--rand-rpc` checks that the node serves chain 21, reads its genesis hash, and checks `--nonce`
-and `current.json` against the node; `--genesis <hex>` can be given instead to sign offline.
+and `current.json` against the node. Pin the genesis too (`--genesis ca76c276…ca9a` for chain 21):
+with both, the node's hash must equal the pinned one, so a node on another chain cannot pick the
+message's binding. `--genesis` alone signs offline.
 Each run appends `index:signature` lines; concatenate the files from every machine. For the pause
 key use `pq-rotate-pause … --new-pause-key <hex or @file>` the same way.
 

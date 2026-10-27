@@ -171,8 +171,15 @@ fn a_pq_set_rotation_is_signed_on_separate_machines_checked_and_submitted() {
         &[pk(11), pk(12), pk(13), pk(14)],
     )
     .unwrap();
+    // A bad line at a low index (a wrong signature) must not push a good one out.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(dir.path().join("quorum.txt")).unwrap();
+        writeln!(f, "2:{}", "00".repeat(2420)).unwrap();
+    }
     let lines = pq_gov::parse_signature_lines(&std::fs::read_to_string(dir.path().join("quorum.txt")).unwrap()).unwrap();
-    assert_eq!(lines.iter().map(|l| l.0).collect::<Vec<_>>(), vec![0, 1, 3]);
+    assert_eq!(lines.iter().map(|l| l.0).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+    let lines: Vec<_> = lines.into_iter().filter(|l| l.0 != 2).collect();
     pq_gov::check_quorum_lines(&lines, &[pk(1), pk(2), pk(3), pk(4)], &message).unwrap();
 
     let rand_node = fake_rand_node(dir.path());
@@ -279,4 +286,31 @@ fn the_pause_key_is_rotated_and_a_pending_rotation_can_be_cancelled() {
     let cancel = pq_gov::cancel_rotation_message_in(&BindingDomain::Genesis(genesis()), 21, 5, RotationKind::PauseKey);
     assert_eq!(line[0].0, 0);
     assert!(pq::verify_raw(&pk(50), &cancel, &line[0].1));
+}
+
+/// The full messages, against vectors built from the documented layout outside this crate
+/// (`vectors/pq-rotation.json`).
+#[test]
+fn the_rotation_messages_match_the_vectors() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vectors/pq-rotation.json");
+    let f: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let (chain, nonce) = (f["chain_id"].as_u64().unwrap(), f["nonce"].as_u64().unwrap());
+    let g: [u8; 32] = hex::decode(f["genesis"].as_str().unwrap()).unwrap().try_into().unwrap();
+    let key = |i: u64| vec![i as u8; 1312];
+    let vectors = f["vectors"].as_array().unwrap();
+    assert_eq!(vectors.len(), 8);
+    for v in vectors {
+        let domain = if v["form"] == "v2" { BindingDomain::Genesis(g) } else { BindingDomain::ChainId };
+        let keys: Vec<Vec<u8>> = v["new_keys"].as_array().map(|k| k.iter().map(|i| key(i.as_u64().unwrap())).collect()).unwrap_or_default();
+        let built = match v["kind"].as_str().unwrap() {
+            "rotate_pq" => pq_gov::rotate_pq_message_in(&domain, chain, nonce, &keys).unwrap(),
+            "rotate_pause" => pq_gov::rotate_pause_message_in(&domain, chain, nonce, &keys[0]).unwrap(),
+            "cancel_rotation" => {
+                let kind = if v["cancel_kind"] == 1 { RotationKind::PauseKey } else { RotationKind::PqGuardians };
+                pq_gov::cancel_rotation_message_in(&domain, chain, nonce, kind)
+            }
+            k => panic!("unknown kind {k}"),
+        };
+        assert_eq!(hex::encode(built), v["message"].as_str().unwrap(), "{} {}", v["kind"], v["form"]);
+    }
 }
