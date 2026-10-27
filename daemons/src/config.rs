@@ -423,8 +423,8 @@ impl Config {
 pub fn providers(rpc: &str, rpcs: &[String], quorum: Option<usize>) -> (Vec<String>, usize) {
     let mut list: Vec<String> = Vec::new();
     for url in std::iter::once(rpc).chain(rpcs.iter().map(String::as_str)) {
-        let url = url.trim().to_string();
-        if !url.is_empty() && !list.contains(&url) {
+        let url = url.trim().trim_end_matches('/').to_string();
+        if !url.is_empty() && !list.iter().any(|u| u.eq_ignore_ascii_case(&url)) {
             list.push(url);
         }
     }

@@ -304,6 +304,8 @@ finality = "finalized"
     assert_eq!(one.evm[0].providers().1, 1);
     let three = load(base(r#"rpcs = ["https://two.example", "https://three.example", "https://one.example"]"#)).unwrap();
     assert_eq!(three.evm[0].providers().0.len(), 3, "a repeated URL counts once");
+    let slash = load(base(r#"rpcs = ["https://ONE.example/", "https://two.example"]"#)).unwrap();
+    assert_eq!(slash.evm[0].providers().0.len(), 2, "a trailing slash or a case change is the same provider");
     assert_eq!(three.evm[0].providers().1, 2);
     let all = load(base("rpcs = [\"https://two.example\"]\nrpc_quorum = 2")).unwrap();
     assert_eq!(all.evm[0].providers().1, 2);
