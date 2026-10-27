@@ -164,9 +164,28 @@ pub async fn peer_conflict(peers: &[GuardianClient], own: [u8; 20], message: &Ob
 
 /// The peer check before a first signature: `true` when signing may go on.
 /// A conflict holds the transfer for an operator; no answer defers it.
-async fn peers_allow(store: &Store, key: &GuardianKey, guards: &Guards<'_>, message: &Observed) -> Result<bool> {
+/// `down`: set once no peer answered in this round; then the rest of the
+/// round is deferred without asking again (one timeout per round, not per
+/// transfer).
+async fn peers_allow(
+    store: &Store,
+    key: &GuardianKey,
+    guards: &Guards<'_>,
+    message: &Observed,
+    down: &mut bool,
+) -> Result<bool> {
     if guards.peers.is_empty() || has_record(store, message) {
         return Ok(true);
+    }
+    if *down {
+        limits::defer(
+            store,
+            message,
+            limits::now(),
+            limits::DeferKind::Peers,
+            "no peer answered earlier this round",
+        )?;
+        return Ok(false);
     }
     match peer_conflict(guards.peers, key.address(), message).await {
         PeerVerdict::Clear => Ok(true),
@@ -185,6 +204,7 @@ async fn peers_allow(store: &Store, key: &GuardianKey, guards: &Guards<'_>, mess
             Ok(false)
         }
         PeerVerdict::Unchecked(reason) => {
+            *down = true;
             tracing::warn!(
                 "chain {} sequence {}: peer check not possible, retried next round: {reason}",
                 message.emitter_chain,
@@ -257,6 +277,7 @@ pub async fn step_guarded<S: Source>(
     let (located, next) = source.poll_located(&cursor).await?;
     let mut signed = 0;
     let mut waiting = deferred_windows(store)?;
+    let mut peers_down = false;
     for Located { message, .. } in located {
         if !has_record(store, &message) {
             if let Some(w) = limits::window_of(&message).filter(|w| waiting.contains(w)) {
@@ -271,7 +292,7 @@ pub async fn step_guarded<S: Source>(
                 continue;
             }
         }
-        if !peers_allow(store, key, guards, &message).await? {
+        if !peers_allow(store, key, guards, &message, &mut peers_down).await? {
             if is_deferred(store, &message)? {
                 if let Some(w) = limits::window_of(&message) {
                     waiting.insert(w);
@@ -348,6 +369,7 @@ pub async fn retry_deferred(
     }
     let mut signed = 0;
     let mut blocked = std::collections::BTreeSet::new();
+    let mut peers_down = false;
     for (chain, sequence) in limits::listed(store, limits::DEFERRED)? {
         let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? else {
             continue;
@@ -358,7 +380,7 @@ pub async fn retry_deferred(
         }
         // Every deferred transfer passes the peer check before it is signed, whatever it
         // waited for: one queued behind a full window has not been checked yet.
-        if !peers_allow(store, key, guards, &d.message).await? {
+        if !peers_allow(store, key, guards, &d.message, &mut peers_down).await? {
             // Still unchecked (rewritten in place), or now held.
             if limits::held(store)?.contains(&(chain, sequence)) {
                 limits::remove(store, limits::DEFERRED, chain, sequence)?;

@@ -249,3 +249,34 @@ async fn a_peer_deferred_transfer_keeps_its_token_in_order() {
     up.store(true, Ordering::SeqCst);
     assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 2);
 }
+
+/// With every peer unreachable, a retry round pays for one probe, not one per deferred transfer.
+#[tokio::test]
+async fn an_unreachable_peer_set_is_probed_once_per_round() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // A peer that accepts connections and never answers (the client times out).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming() {
+            count.fetch_add(1, Ordering::SeqCst);
+            held.push(s);
+        }
+    });
+    let keys = guardian_keys(2);
+    let (_d, me) = tmp_store();
+    for (seq, tok) in [(0u64, 0xa1u8), (1, 0xa2), (2, 0xa3)] {
+        let mut t = transfer(5, 0, 2, 1, [9; 32]);
+        t.token_address = word(&format!("0x{tok:040x}"));
+        let m = Observed::new(transfer_body(2, word(ETH), seq, t)).unwrap();
+        limits::defer(&me, &m, 1, limits::DeferKind::Peers, "test").unwrap();
+    }
+    let peers = [GuardianClient::new(&url)];
+    let guards = Guards { peers: &peers, ..Default::default() };
+    assert_eq!(guardian::retry_deferred(&me, &keys[1], None, &emitters(), &guards).await.unwrap(), 0);
+    assert_eq!(accepted.load(Ordering::SeqCst), 1, "one probe for the round");
+    assert_eq!(limits::listed(&me, limits::DEFERRED).unwrap().len(), 3, "all still waiting");
+}
