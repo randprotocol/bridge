@@ -61,17 +61,17 @@ pub trait Source {
     }
 }
 
-/// One provider's independent check of what another provider scanned.
+/// What a provider offers for a quorum read (BR-4).
 #[allow(async_fn_in_trait)]
 pub trait Confirm: Source {
-    /// Whether this provider reports `located.message`, byte for byte, as
-    /// final (at its own safe head) where the scanner saw it. `Ok(false)` is
-    /// a contradiction; an error is no answer.
-    async fn confirm(&self, located: &Located) -> Result<bool>;
-    /// Whether this provider's own counter says nothing was published before
-    /// `next` beyond what was scanned (`None`: no such counter, or no answer).
-    async fn confirm_through(&self, _next: &Cursor) -> Result<Option<bool>> {
+    /// This provider's safe head, for a block-scanned source; `None` for a
+    /// source walked by sequence.
+    async fn head(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+    /// [`Source::poll_located`], scanning no block past `cap`.
+    async fn poll_capped(&self, cursor: &Cursor, _cap: Option<u64>) -> Result<(Vec<Located>, Cursor)> {
+        self.poll_located(cursor).await
     }
 }
 
@@ -88,7 +88,7 @@ pub fn default_quorum(n: usize) -> usize {
 }
 
 impl<S: Confirm> Quorum<S> {
-    /// `members[0]` names the source; `quorum` is clamped to `1..=n`.
+    /// `members[0]` names the source; `quorum` is in `1..=n`.
     pub fn new(members: Vec<S>, quorum: usize) -> Result<Quorum<S>> {
         if members.is_empty() {
             return Err(anyhow!("a source needs at least one RPC"));
@@ -110,59 +110,53 @@ impl<S: Confirm> Quorum<S> {
         self.quorum
     }
 
-    /// How many providers, beside the scanner `scanner`, confirm `located`.
-    async fn agreement(&self, scanner: usize, located: &Located) -> (usize, Vec<String>) {
-        let mut agree = 1; // the scanner's own report
-        let mut notes = Vec::new();
-        for (i, other) in self.members.iter().enumerate() {
-            if i == scanner || agree >= self.quorum {
-                continue;
-            }
-            match other.confirm(located).await {
-                Ok(true) => agree += 1,
-                Ok(false) => notes.push(format!("provider {i} reports otherwise")),
-                Err(e) => notes.push(format!("provider {i}: {e:#}")),
+    /// The highest block a quorum of providers each call safe: the
+    /// `quorum`-th highest of their heads. A provider that does not answer
+    /// does not count; short of a quorum of answers, nothing may advance.
+    async fn quorum_head(&self) -> Result<Option<u64>> {
+        let mut heads = Vec::new();
+        let mut walked = false;
+        let mut errors = Vec::new();
+        for (i, m) in self.members.iter().enumerate() {
+            match m.head().await {
+                Ok(Some(h)) => heads.push(h),
+                Ok(None) => walked = true,
+                Err(e) => errors.push(format!("provider {i}: {e:#}")),
             }
         }
-        (agree, notes)
+        if walked && heads.is_empty() {
+            return Ok(None);
+        }
+        if heads.len() < self.quorum {
+            return Err(anyhow!(
+                "{}: {} of {} providers report a safe head, {} needed ({})",
+                self.name(),
+                heads.len(),
+                self.members.len(),
+                self.quorum,
+                errors.join("; ")
+            ));
+        }
+        heads.sort_unstable_by(|a, b| b.cmp(a));
+        Ok(Some(heads[self.quorum - 1]))
     }
+}
 
-    /// Whether the providers' counters accept `next`: a quorum says yes, or
-    /// none contradicts it and none could answer (an RPC without the state
-    /// that far back). A contradiction short of a quorum rejects the scan.
-    async fn counters_accept(&self, cursor: &Cursor, next: &Cursor) -> Result<bool> {
-        if next == cursor {
-            return Ok(true);
-        }
-        let (mut yes, mut no, mut notes) = (0, 0, Vec::new());
-        for (i, member) in self.members.iter().enumerate() {
-            match member.confirm_through(next).await {
-                Ok(Some(true)) => yes += 1,
-                Ok(Some(false)) => {
-                    no += 1;
-                    notes.push(format!("provider {i}: the counter disagrees"))
-                }
-                Ok(None) => {}
-                Err(e) => notes.push(format!("provider {i}: {e:#}")),
-            }
-        }
-        if yes >= self.quorum || no == 0 {
-            if yes < self.quorum && !notes.is_empty() {
-                tracing::debug!("{}: counters unconfirmed: {}", self.name(), notes.join("; "));
-            }
-            return Ok(true);
-        }
-        tracing::warn!(
-            "{}: through block {} sequence {}: {} of {} counters agree ({})",
-            self.name(),
-            next.next_block,
-            next.next_sequence,
-            yes,
-            self.quorum,
-            notes.join("; ")
-        );
-        Ok(false)
-    }
+/// The cursor that resumes after `messages[..len]` as `supporters` saw them:
+/// the lowest block any of them put the last message in, past its sequence.
+fn agreed(
+    supporters: &[&(Vec<Located>, Cursor)],
+    len: usize,
+) -> Vec<Located> {
+    (0..len)
+        .map(|k| Located {
+            message: supporters[0].0[k].message.clone(),
+            resume: Cursor {
+                next_block: supporters.iter().map(|s| s.0[k].resume.next_block).min().unwrap_or(0),
+                next_sequence: supporters[0].0[k].resume.next_sequence,
+            },
+        })
+        .collect()
 }
 
 impl<S: Confirm> Source for Quorum<S> {
@@ -179,10 +173,12 @@ impl<S: Confirm> Source for Quorum<S> {
         Ok((located.into_iter().map(|l| l.message).collect(), next))
     }
 
-    /// Scans with each provider in turn until one's scan is confirmed in
-    /// full. A scan whose message `k` lacks a quorum yields messages
-    /// `0..k` and resumes at `k`, if no provider does better; a scan whose
-    /// counters are contradicted is not used at all.
+    /// Every provider scans the same range — capped at the quorum's safe
+    /// head — and only what a quorum of them report identically is read. A
+    /// provider that errors agrees with nothing. If a quorum agrees on the
+    /// whole scan, the cursor moves to its end; otherwise to just past the
+    /// longest prefix a quorum agrees on (the lowest block among them), or
+    /// not at all.
     async fn poll_located(&self, cursor: &Cursor) -> Result<(Vec<Located>, Cursor)> {
         if self.quorum == 1 {
             // Any one provider will do: the first that answers.
@@ -195,58 +191,70 @@ impl<S: Confirm> Source for Quorum<S> {
             }
             return Err(last.expect("at least one member"));
         }
-        let mut best: Option<(Vec<Located>, Cursor)> = None;
+        let cap = self.quorum_head().await?;
+        let mut scans = Vec::new();
         let mut errors = Vec::new();
-        for (i, scanner) in self.members.iter().enumerate() {
-            let (located, next) = match scanner.poll_located(cursor).await {
-                Ok(scan) => scan,
-                Err(e) => {
-                    errors.push(format!("provider {i}: {e:#}"));
-                    continue;
-                }
-            };
-            let mut confirmed = Vec::new();
-            let mut stopped = None;
-            for l in located {
-                let (agree, notes) = self.agreement(i, &l).await;
-                if agree < self.quorum {
-                    tracing::warn!(
-                        "{}: chain {} sequence {} (digest {}) has {agree} of {} providers ({}); not signed yet",
-                        self.name(),
-                        l.message.emitter_chain,
-                        l.message.sequence,
-                        hex::encode(l.message.digest),
-                        self.quorum,
-                        notes.join("; ")
-                    );
-                    stopped = Some(l.resume.clone());
-                    break;
-                }
-                confirmed.push(l);
+        for (i, m) in self.members.iter().enumerate() {
+            match m.poll_capped(cursor, cap).await {
+                Ok(scan) => scans.push(scan),
+                Err(e) => errors.push(format!("provider {i}: {e:#}")),
             }
-            match stopped {
-                None => {
-                    if self.counters_accept(cursor, &next).await? {
-                        return Ok((confirmed, next));
-                    }
-                    errors.push(format!("provider {i}: its scan is contradicted by the counters"));
-                }
-                Some(resume) => {
-                    if best.as_ref().is_none_or(|(b, _)| confirmed.len() > b.len()) {
-                        best = Some((confirmed, resume));
-                    }
+        }
+        let same = |a: &[Located], b: &[Located]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.message == y.message)
+        };
+        // A quorum on the whole scan, its end included.
+        for scan in &scans {
+            let group: Vec<_> = scans
+                .iter()
+                .filter(|s| s.1 == scan.1 && same(&s.0, &scan.0))
+                .collect();
+            if group.len() >= self.quorum {
+                return Ok((agreed(&group, scan.0.len()), scan.1.clone()));
+            }
+        }
+        // Else the longest prefix a quorum agrees on.
+        let longest = scans.iter().map(|s| s.0.len()).max().unwrap_or(0);
+        for len in (1..=longest).rev() {
+            for scan in scans.iter().filter(|s| s.0.len() >= len) {
+                let group: Vec<_> = scans
+                    .iter()
+                    .filter(|s| s.0.len() >= len && same(&s.0[..len], &scan.0[..len]))
+                    .collect();
+                if group.len() >= self.quorum {
+                    let located = agreed(&group, len);
+                    let last = &located[len - 1];
+                    let resume = Cursor {
+                        next_block: last.resume.next_block,
+                        next_sequence: last.message.sequence + 1,
+                    };
+                    tracing::warn!(
+                        "{}: providers agree on {len} message(s) only; the rest waits ({})",
+                        self.name(),
+                        errors.join("; ")
+                    );
+                    return Ok((located, resume));
                 }
             }
         }
-        match best {
-            Some(b) => Ok(b),
-            None => Err(anyhow!(
-                "{}: no provider's scan reached a quorum of {}: {}",
+        if scans.len() < self.quorum {
+            return Err(anyhow!(
+                "{}: {} of {} providers answered, {} needed: {}",
                 self.name(),
+                scans.len(),
+                self.members.len(),
                 self.quorum,
                 errors.join("; ")
-            )),
+            ));
         }
+        tracing::warn!(
+            "{}: no {} providers agree on the range from block {} sequence {}; not advancing",
+            self.name(),
+            self.quorum,
+            cursor.next_block,
+            cursor.next_sequence
+        );
+        Ok((Vec::new(), cursor.clone()))
     }
 }
 

@@ -51,14 +51,19 @@ fn log(sequence: u64, payload: &[u8], block: u64) -> Value {
     })
 }
 
-/// An EVM provider at `head`: `logs` for any range (the source filters what
-/// it is given), one block timestamp, and `counter` as `sequence()` (`None`:
-/// the call fails, like a node without that state).
+/// An EVM provider at `head`: `logs` within the range asked for, one block
+/// timestamp, and `counter` as `sequence()` (`None`: the call fails).
 fn evm_node(head: u64, logs: Vec<Value>, counter: Option<u64>) -> Fake {
-    rpc(move |m, _p| match m {
+    rpc(move |m, p| match m {
         "eth_blockNumber" => Some(Ok(json!(format!("0x{head:x}")))),
         "eth_getBlockByNumber" => Some(Ok(json!({ "number": "0x1", "timestamp": "0x6553f100" }))),
-        "eth_getLogs" => Some(Ok(Value::Array(logs.clone()))),
+        "eth_getLogs" => {
+            let n = |v: &Value| u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+            let (from, to) = (n(&p[0]["fromBlock"]), n(&p[0]["toBlock"]));
+            Some(Ok(Value::Array(
+                logs.iter().filter(|l| (from..=to).contains(&n(&l["blockNumber"]))).cloned().collect(),
+            )))
+        }
         "eth_call" => counter.map(|n| Ok(json!(format!("0x{}", hex::encode(word(&format!("{n:x}"))))))),
         _ => None,
     })
@@ -76,7 +81,7 @@ async fn two_providers_that_agree_get_both_locks_read() {
     let (messages, next) = source.poll(&source.start()).await.unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(next, Cursor { next_block: 91, next_sequence: 2 });
-    assert!(b.count("eth_getLogs") >= 2, "the second provider was asked about each lock");
+    assert!(b.count("eth_getLogs") >= 1, "the second provider scanned the range too");
 }
 
 #[tokio::test]
@@ -87,7 +92,7 @@ async fn a_lock_one_provider_alone_reports_is_not_read() {
     let source = sources::evm_quorum(&evm_cfg(&[&a.url, &b.url], None)).unwrap();
     let (messages, next) = source.poll(&source.start()).await.unwrap();
     assert!(messages.is_empty(), "neither body has a quorum of two");
-    assert_eq!(next, Cursor { next_block: 50, next_sequence: 0 }, "the lock is read again next poll");
+    assert_eq!(next, Cursor { next_block: 7, next_sequence: 0 }, "the cursor does not move");
 
     // And through the guardian: nothing signed.
     let dir = tempfile::tempdir().unwrap();
@@ -119,25 +124,64 @@ async fn two_of_three_agree_and_the_odd_one_out_is_outvoted() {
 
 #[tokio::test]
 async fn a_lock_not_yet_final_at_the_other_provider_waits() {
-    // B's head is 55: block 50 is not 10 confirmations deep there yet.
+    // B's head is 55: its safe head (45) caps the range, which ends before block 50.
     let (a, b) = (evm_node(100, honest(), Some(2)), evm_node(55, honest(), Some(2)));
     let source = sources::evm_quorum(&evm_cfg(&[&a.url, &b.url], None)).unwrap();
-    let (messages, _) = source.poll(&source.start()).await.unwrap();
+    let (messages, next) = source.poll(&source.start()).await.unwrap();
     assert!(messages.is_empty());
+    assert_eq!(next, Cursor { next_block: 46, next_sequence: 0 }, "only as far as both call safe");
 }
 
 #[tokio::test]
-async fn a_scan_that_leaves_a_lock_out_is_caught_by_the_counters() {
-    // A omits lock 1 and says the counter is 1; B has both and says 2.
+async fn a_scan_that_leaves_a_lock_out_does_not_move_the_cursor_past_it() {
+    // A omits lock 1; B has both. Only lock 0 has a quorum, and the cursor stops after it.
     let a = evm_node(100, vec![log(0, &payload(100_000_000), 50)], Some(1));
     let b = evm_node(100, honest(), Some(2));
     let source = sources::evm_quorum(&evm_cfg(&[&a.url, &b.url], None)).unwrap();
     let (messages, next) = source.poll(&source.start()).await.unwrap();
-    // A's scan is rejected; B's is confirmed up to lock 0 (A cannot confirm lock 1), and the
-    // cursor stops before lock 1 instead of passing block 51.
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].sequence, 0);
-    assert_eq!(next, Cursor { next_block: 51, next_sequence: 1 });
+    assert_eq!(next, Cursor { next_block: 50, next_sequence: 1 }, "lock 1 is read again");
+}
+
+#[tokio::test]
+async fn an_inflated_head_over_an_empty_range_cannot_advance_the_cursor() {
+    // The liar calls block 10 000 safe and serves no logs; the honest provider's head is 100
+    // and it holds the locks. Two providers, quorum two, either order: nothing advances.
+    let liar = evm_node(10_010, vec![], Some(0));
+    let honest_node = evm_node(100, honest(), Some(2));
+    for order in [[&liar, &honest_node], [&honest_node, &liar]] {
+        let source = sources::evm_quorum(&evm_cfg(&[&order[0].url, &order[1].url], None)).unwrap();
+        let (messages, next) = source.poll(&source.start()).await.unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(next, Cursor { next_block: 7, next_sequence: 0 });
+    }
+    // With no locks at all an empty range still stops at the quorum's head, not the liar's.
+    let quiet = evm_node(100, vec![], Some(0));
+    let source = sources::evm_quorum(&evm_cfg(&[&liar.url, &quiet.url], None)).unwrap();
+    let (_, next) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(next.next_block, 91);
+}
+
+#[tokio::test]
+async fn three_providers_with_one_down_need_both_others() {
+    let port = |_: ()| std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let down = format!("http://127.0.0.1:{}", port(()));
+    let down2 = format!("http://127.0.0.1:{}", port(()));
+    let (a, b) = (evm_node(100, honest(), Some(2)), evm_node(100, honest(), Some(2)));
+    let source = sources::evm_quorum(&evm_cfg(&[&down, &a.url, &b.url], None)).unwrap();
+    let (messages, next) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(next, Cursor { next_block: 91, next_sequence: 2 });
+    // One down and one lying: no quorum, no movement.
+    let liar = evm_node(100, vec![log(0, &payload(5), 50)], Some(1));
+    let source = sources::evm_quorum(&evm_cfg(&[&down, &liar.url, &b.url], None)).unwrap();
+    let (messages, next) = source.poll(&source.start()).await.unwrap();
+    assert!(messages.is_empty());
+    assert_eq!(next, Cursor { next_block: 7, next_sequence: 0 });
+    // Two down: fewer than a quorum report a head, so the poll is an error.
+    let source = sources::evm_quorum(&evm_cfg(&[&down, &down2, &b.url], None)).unwrap();
+    assert!(source.poll(&source.start()).await.is_err());
 }
 
 #[tokio::test]

@@ -184,7 +184,17 @@ impl Source for EvmSource {
     }
 
     async fn poll_located(&self, cursor: &Cursor) -> Result<(Vec<Located>, Cursor)> {
-        let safe = self.safe_head().await?;
+        self.poll_upto(cursor, None).await
+    }
+}
+
+impl EvmSource {
+    /// A scan from `cursor` to this provider's safe head, or `cap` if lower.
+    async fn poll_upto(&self, cursor: &Cursor, cap: Option<u64>) -> Result<(Vec<Located>, Cursor)> {
+        let mut safe = self.safe_head().await?;
+        if let Some(cap) = cap {
+            safe = safe.min(cap);
+        }
         if cursor.next_block > safe {
             return Ok((Vec::new(), cursor.clone()));
         }
@@ -307,71 +317,12 @@ impl Source for EvmSource {
     }
 }
 
-impl EvmSource {
-    /// The one `MessagePublished` with `sequence` in `block`, from this
-    /// provider, rebuilt into a body with this provider's block timestamp.
-    async fn body_at(&self, block: u64, sequence: u64) -> Result<Option<Vec<u8>>> {
-        let mut seq_word = [0u8; 32];
-        seq_word[24..].copy_from_slice(&sequence.to_be_bytes());
-        let logs = self
-            .rpc
-            .call(
-                "eth_getLogs",
-                json!([{
-                    "address": format!("0x{}", hex::encode(self.contract)),
-                    "topics": [self.topic0, format!("0x{}", hex::encode(seq_word))],
-                    "fromBlock": format!("0x{block:x}"),
-                    "toBlock": format!("0x{block:x}"),
-                }]),
-            )
-            .await?;
-        let logs = logs
-            .as_array()
-            .ok_or_else(|| anyhow!("eth_getLogs: not an array"))?;
-        let mut found = None;
-        for log in logs {
-            // The filter is the node's word: every field is checked here.
-            if log["removed"].as_bool() == Some(true)
-                || address20(log["address"].as_str().unwrap_or_default()).ok()
-                    != Some(self.contract)
-                || quantity(&log["blockNumber"]).ok() != Some(block)
-            {
-                continue;
-            }
-            let topics = log["topics"].as_array();
-            let seq_topic = topics.and_then(|t| t.get(1)).and_then(|t| hex_data(t).ok());
-            if seq_topic.as_deref() != Some(&seq_word[..]) {
-                continue;
-            }
-            if found.is_some() {
-                bail!("{}: two logs for sequence {sequence} in block {block}", self.cfg.name);
-            }
-            found = Some(self.body_from_log(log, self.block_timestamp(block).await?)?);
-        }
-        Ok(found)
-    }
-}
-
 impl Confirm for EvmSource {
-    async fn confirm(&self, located: &Located) -> Result<bool> {
-        let block = located.resume.next_block;
-        if block > self.safe_head().await? {
-            return Ok(false); // not final here (yet)
-        }
-        Ok(self
-            .body_at(block, located.message.sequence)
-            .await?
-            .is_some_and(|body| body == located.message.body))
+    async fn head(&self) -> Result<Option<u64>> {
+        Ok(Some(self.safe_head().await?))
     }
 
-    /// `sequence()` at the last block scanned equals the next sequence the
-    /// scan expects: no lock in the range was left out.
-    async fn confirm_through(&self, next: &Cursor) -> Result<Option<bool>> {
-        if next.next_block == 0 {
-            return Ok(None);
-        }
-        Ok(Some(
-            self.published_through(next.next_block - 1).await? == next.next_sequence,
-        ))
+    async fn poll_capped(&self, cursor: &Cursor, cap: Option<u64>) -> Result<(Vec<Located>, Cursor)> {
+        self.poll_upto(cursor, cap).await
     }
 }

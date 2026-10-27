@@ -203,17 +203,4 @@ impl Source for RandSource {
     }
 }
 
-impl Confirm for RandSource {
-    /// This node serves the same burn body under that sequence.
-    async fn confirm(&self, located: &Located) -> Result<bool> {
-        let sequence = located.message.sequence;
-        let row = self
-            .rpc
-            .call("rand_getBridgeBurn", json!([sequence]))
-            .await?;
-        if row.is_null() {
-            return Ok(false);
-        }
-        Ok(hex_data(&row["body_hex"])? == located.message.body)
-    }
-}
+impl Confirm for RandSource {}

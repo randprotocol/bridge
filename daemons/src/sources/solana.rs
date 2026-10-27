@@ -172,18 +172,7 @@ impl Source for SolanaSource {
     }
 }
 
-impl Confirm for SolanaSource {
-    /// The message account for that sequence, at `finalized` on this
-    /// provider, holds the same body.
-    async fn confirm(&self, located: &Located) -> Result<bool> {
-        let sequence = located.message.sequence;
-        let (key, _) = find_program_address(&[b"msg", &sequence.to_le_bytes()], &self.program)?;
-        let Some(data) = self.account(&key).await? else {
-            return Ok(false);
-        };
-        Ok(parse_posted_message(&data, sequence)? == located.message.body)
-    }
-}
+impl Confirm for SolanaSource {}
 
 /// Solana's `Pubkey::find_program_address`, without the SDK: the first bump
 /// from 255 down whose hash is *not* a point on the ed25519 curve.

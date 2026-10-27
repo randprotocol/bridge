@@ -24,11 +24,10 @@ start_sequence = 0
 #
 # Several providers per chain (BR-4): every source section ([rand], [[evm]],
 # [solana]) takes `rpcs = [...]` beside `rpc`, and `rpc_quorum` (default a
-# majority of the distinct URLs). A message one provider scans is signed only
-# when `rpc_quorum` providers each report the same body, in the same block,
-# final at their own safe head; an EVM scan is also held to the endpoint's
-# `sequence()` counter, so a provider that leaves a lock out is caught. Use
-# independent operators. With one `rpc` the guardian still runs, and warns at
+# majority of the distinct URLs). Every provider scans the same range, capped
+# at the safe head a quorum reaches, and only what `rpc_quorum` of them report
+# identically is signed or passed over; a provider that errors agrees with
+# nothing. Use independent operators. With one `rpc` the guardian still runs, and warns at
 # startup that a single provider can get a message signed.
 #   rpcs = ["https://<second provider>", "https://<third provider>"]
 #   rpc_quorum = 2
