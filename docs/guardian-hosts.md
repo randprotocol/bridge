@@ -63,4 +63,7 @@ The relayer proves each mint's fee bundle itself (about 6 GB of memory a proof).
   to `127.0.0.1:7077` and `:7078`, `permitlisten` only).
 - randbridge.org keeps its own forward-only SSH tunnel to those loopback ports (user `tunnel`,
   `permitopen` 7080, 7171–7176, 7077, 7078).
+- Recipient registrations live only in `/var/lib/rand-relayer/data/recipients/`; export them to an
+  off-host, private copy after registrations and on a schedule, and restore through
+  `recipients_file` (BR-503; recipe in `daemons/README.md`, "Relayer").
 - Run one relayer at a time: two on one EVM key race each other's nonces.

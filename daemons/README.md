@@ -81,6 +81,21 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   its own authorization, no other credential exists), and the API never replaces an entry that
   maps to a different address (409) — before this, anyone who reached the port could re-point a
   depositor's hash and stall that deposit.
+- **Back up the registrations** (BR-503). They exist only in the relayer's
+  `data_dir/recipients/<recipient_hash>.json` (each a JSON string, the `rand1…` address) — the
+  chain and the site keep only hashes — so a relayer rebuilt without them waits on every deposit
+  whose registration is lost (`AwaitingRecipient`) until the depositor registers again. Export them
+  as a `recipients_file` table after registrations and on a schedule, and keep the copy off the
+  host and private (it links deposits to addresses):
+
+  ```sh
+  cd /var/lib/rand-relayer/data/recipients && python3 -c 'import glob, json, sys
+  json.dump({f[:-5]: json.load(open(f)) for f in sorted(glob.glob("*.json"))}, sys.stdout)' > recipients-backup.json
+  ```
+
+  To restore, point `recipients_file` at the copy and restart: every entry is checked against its
+  hash on import, and copies from several dates merge safely (an entry only ever maps a hash to the
+  one address it commits to).
 - For a deposit on a chain that lists `pq_guardians`, also collects the co-signatures, verifies
   each under the key at its guardian's index, keeps exactly a quorum and hands it to the wallet
   (`rand bridge-mint @att --pq @pq.json --to …`); short of either quorum nothing is submitted.
