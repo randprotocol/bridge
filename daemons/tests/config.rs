@@ -69,12 +69,31 @@ fn the_governance_section_is_read_and_checked() {
 
 #[test]
 fn the_mainnet_configs_still_parse() {
-    for name in ["relayer", "guardian-1"] {
+    for name in ["relayer", "guardian-1", "guardian-6", "guardian-7"] {
         let path = std::path::PathBuf::from(format!(
             "{}/mainnet/{name}.toml",
             env!("CARGO_MANIFEST_DIR")
         ));
         Config::load(&path).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    }
+}
+
+#[test]
+fn every_mainnet_guardian_watches_the_same_endpoints() {
+    // A guardian that names a retired endpoint never sees a lock, and withholds its signature from
+    // every transfer: the eight configs must agree with the relayer's on what each chain watches.
+    let load_named = |name: &str| {
+        let path = format!("{}/mainnet/{name}.toml", env!("CARGO_MANIFEST_DIR"));
+        Config::load(std::path::Path::new(&path)).unwrap_or_else(|e| panic!("{name}: {e:#}"))
+    };
+    let watched = |c: &Config| {
+        let evm: Vec<_> = c.evm.iter().map(|e| (e.chain, e.contract.to_lowercase(), e.start_block)).collect();
+        (c.rand.emitter.clone(), c.rand.chain_id, evm, c.solana.as_ref().map(|s| s.program.clone()))
+    };
+    let relayer = watched(&load_named("relayer"));
+    for i in 1..=8 {
+        let name = format!("guardian-{i}");
+        assert_eq!(watched(&load_named(&name)), relayer, "{name}");
     }
 }
 
