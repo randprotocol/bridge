@@ -82,7 +82,9 @@ check_common_args() {
   local n
   n="$(tr ',' '\n' <<<"$GUARDIANS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   (( n >= 1 )) || die "GUARDIANS must list at least one guardian address"
-  (( n <= 255 )) || die "GUARDIANS lists $n keys; a rotation's key count is one byte"
+  # Solana's MAX_GUARDIANS, on every chain: the endpoints must hold one set, and
+  # the Solana program refuses more at Initialize and at rotation.
+  (( n <= 10 )) || die "GUARDIANS lists $n keys; the Solana program accepts at most 10"
   local g seen=""
   while IFS= read -r g; do
     g="$(tr -d '[:space:]' <<<"$g" | tr 'A-F' 'a-f')"

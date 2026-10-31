@@ -105,7 +105,8 @@ writes the address into a message page, `["msg-page", sequence / 64]`, which is
 how guardians find a message they cannot derive from its sequence; the first
 lock of a page pays 0.0152 SOL of rent for it. A client names the page of the
 sequence it read, so it fails, harmlessly and retryably with `InvalidPda`, only
-if the sequence leaves that page while it is in flight.
+if the sequence leaves that page while it is in flight: at most once per
+page boundary.
 
 Use `LockKeyed` once the guardians and the program have been upgraded, in the
 order in `docs/solana-upgrade.md`.
@@ -113,9 +114,9 @@ order in `docs/solana-upgrade.md`.
 ## Compute budget
 
 A release recovers one secp256k1 signature per guardian (25k compute
-units each), and a seven-signature release at `n = 10` costs about 230k
-units in all, measured on the SBF binary; the bump searches move that by
-a few thousand from one set of accounts to the next. Clients must prepend a
+units each), and a seven-signature release at `n = 10` costs 231,428
+units in all, measured on the SBF binary; test keys are random, so the
+bump searches move that by a few thousand from run to run. Clients must prepend a
 `ComputeBudgetInstruction::set_compute_unit_limit`; that transaction is
 1,231 of 1,232 bytes. Native `solana-program-test` meters nothing, so the
 measurement is its own test against the built binary:

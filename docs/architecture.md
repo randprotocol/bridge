@@ -527,7 +527,7 @@ made immutable before initialisation can never be initialised.
   leaves its page in flight. Guardians read the page first, then `["msg", sequence]`; design and
   upgrade order in `docs/solana-upgrade.md`.
 - **Compute budget.** One recovery costs 25k compute units, so a seven-signature release at
-  `n = 10` costs about 227k in all; clients prepend a compute-unit-limit instruction.
+  `n = 10` costs 231,428 as measured; clients prepend a compute-unit-limit instruction.
   `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot
   grow, so they are still searched. `Release` reads the clock through the syscall, which keeps
   the seven-signature transaction at 1,231 of 1,232 bytes (§12, guardian-set size).
@@ -933,12 +933,16 @@ fork on every bridged chain (the rename already was one: chain 10).
   (`TooManyGuardians`, also at `Initialize`) rather than install one it could never release under,
   which would freeze custody until a program upgrade. The EVM and Tron endpoints bound the set at
   255, the most a one-byte count holds, with gas the only other limit, and Rand's 16 KiB
-  attestation cap admits about 253. **So the parity rule, every verifier or none, is not met.** The
-  EVM contracts are not redeployed for this, and the rule is kept by governance: no rotation above
-  10. A rotation past it would apply on EVM and Rand and be refused on Solana, whose set in force
-  stays in force, so the sets would diverge until the program is upgraded; the same attestation
-  then still applies. An address lookup table would take a Solana release to roughly `n = 20`;
-  the relayer does not use one, and raising the bound needs that first.
+  attestation cap admits about 253. **The parity rule, every verifier or none, is therefore not
+  met: this is a knowing exception, pending the owner's decision,** taken because the EVM contracts
+  cannot be upgraded. The 10 is also held off chain: `rand-bridge-gov` refuses to build or verify a
+  larger rotation, and `deploy/lib.sh` a larger deployment. A larger rotation built any other way
+  would apply on EVM and Rand and be refused on Solana. **Solana's releases would then stop**: the
+  relayer stamps each burn with the set it runs, Solana does not have that set, and every release
+  fails until a program upgrade raises the bound and the same attestation is applied. Solana's
+  custody is unreachable meanwhile, which is the freeze this bound avoids only so far as the tool
+  is used. An address lookup table would take a Solana release to roughly `n = 20`; the relayer
+  does not use one, and raising the bound needs that first.
 - **A deposit note's commitment can be front-run.** Every commitment input is public in a pending
   `BridgeAttest`, so anyone can land a conflicting commitment and fail the attest with
   `CommitmentExists`. The attestation's digest stays unspent and `deposit_note` recomputes the

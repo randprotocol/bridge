@@ -309,3 +309,35 @@ async fn rotates_the_real_ethereum_endpoint_on_anvil() {
         Outcome::AlreadyDone
     );
 }
+
+fn distinct_keys(n: u8) -> Vec<[u8; 20]> {
+    (1..=n).map(|i| [i; 20]).collect()
+}
+
+/// EVM applies a rotation first and accepts up to 255 keys, so a set Solana
+/// refuses would stop its releases until a program upgrade. The tool that
+/// builds the attestation is where that has to be caught.
+#[test]
+fn a_rotation_cannot_exceed_the_solana_bound() {
+    rotation_body(0, &distinct_keys(10), 0, 0, 1).expect("the bound itself");
+    let err = rotation_body(0, &distinct_keys(11), 0, 0, 1).unwrap_err();
+    assert!(err.to_string().contains("got 11"), "{err}");
+}
+
+/// A body built by hand gets no further: verification, which also runs before
+/// a submit, refuses the same set.
+#[test]
+fn verifying_refuses_a_set_above_the_solana_bound() {
+    let v = vectors();
+    let guardians = keys(&v);
+    let current: Vec<[u8; 20]> = guardians.iter().map(|k| k.address()).collect();
+    let mut body = rotation_body(0, &distinct_keys(10), 0, 0, 1).unwrap();
+    body.payload = Payload::GuardianSetUpgrade(bridge_codec::GuardianSetUpgrade {
+        new_index: 1,
+        keys: distinct_keys(11),
+    })
+    .encode();
+    // `sign_rotation` ends in `verify_rotation`, which is what refuses this.
+    let err = sign_rotation(&body, 0, &current, &guardians).unwrap_err();
+    assert!(err.to_string().contains("got 11"), "{err}");
+}

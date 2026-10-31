@@ -325,8 +325,10 @@ Parity across all verifiers is the security property; change these everywhere or
   mainnet.
 - Guardian-set size: Solana's `MAX_GUARDIANS` = 10 (1,231 of 1,232 bytes at a seven-signature
   release, measured by `tests/sbf_compute.rs`); EVM and Tron stop at 255 and the fullnode's 16 KiB
-  attestation cap admits ~253. That breaks the every-verifier-or-none parity rule on purpose,
-  because the EVM contracts are not redeployed for it: **never rotate above 10** (launch: 6).
+  attestation cap admits ~253. That breaks the every-verifier-or-none parity rule, a knowing
+  exception pending the owner's decision, because the EVM contracts cannot be upgraded.
+  `rand-bridge-gov` and `deploy/lib.sh` hold 10. **Never rotate above 10** (launch: 6): EVM would
+  apply it, Solana would refuse it, and Solana's releases stop until a program upgrade.
 
 ## Verified fullnode facts (main, post-S3, post-RAND-rename)
 

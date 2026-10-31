@@ -9,14 +9,16 @@ here has been deployed.
 `BridgeAccount::load` uses Borsh's `try_from_slice`, which refuses trailing bytes, so a struct that
 gains a field stops loading every account already on chain. No existing struct changes in this
 upgrade. `mainnet_accounts_keep_deserialising` in `state.rs` holds the bytes of the live config and
-of a live message.
+of a live message. It pins only those two: no live `TokenRegistry` or `GuardianSetAccount` bytes
+have been loaded by this build, which is a check before the upgrade (below). Those structs are
+unchanged in the source.
 
 ## O-1: release fits a packet at n = 10
 
 The release account list loses the clock sysvar (the program uses the clock syscall), which takes a
 seven-signature release from 1,264 to 1,231 bytes including its compute-unit limit. `Config.bump`
-and one repeated search save about 10k of its 237k compute units; the program must still be given
-the limit, because seven recoveries alone are 175k.
+and one repeated search take it from 237,558 compute units to 231,428; the program must still be
+given the limit, because seven recoveries alone are 175k.
 
 | | old program | new program |
 |---|---|---|
@@ -29,7 +31,11 @@ order fails before any effect and can be resubmitted.
 ## O-2 and O-3
 
 Neither touches an account or an old instruction. `SetPauser` is new, and `MAX_GUARDIANS` only
-refuses a future set; the live set 1 has eight keys. `rand-bridge-cli set-pauser` works from the
+refuses a future set; the live set 1 has eight keys. `rand-bridge-gov` and `deploy/lib.sh` hold the
+same 10, so use the rebuilt tool for any rotation: the EVM endpoints accept 255 and take the
+attestation first, and a set Solana refuses stops Solana's releases until a program upgrade. The
+difference from EVM is a knowing exception to the parity rule, pending the owner's decision
+(`docs/architecture.md` §12). `rand-bridge-cli set-pauser` works from the
 moment the program is upgraded.
 
 ## O-4: locks keyed by (owner, nonce)
@@ -74,13 +80,21 @@ they are: there is nothing to migrate, and `PostedMessage` is unchanged.
 | one head account plus a `prev` link in each message | no page boundary, but the walk runs backwards from the head and costs one read per message of lag, on every restart |
 | ring buffer | a burst of dust locks would overwrite slots guardians have not read |
 
-Sixty-four slots: griefing a lock now takes 64 dust locks (about 0.145 SOL, against 0.0023 SOL
-before) and yields one retry, while a page stays small enough that the unlucky first locker pays
+Sixty-four slots: a griefer can now fail a lock only at a page boundary, one failure per boundary,
+so each costs 64 dust locks (about 0.145 SOL, against 0.0023 SOL per failure before) and yields one
+retry, while a page stays small enough that the unlucky first locker pays
 about 0.015 SOL. `MESSAGE_PAGE_SLOTS` is on-chain format and cannot change for existing pages.
 
 ### Upgrade order
 
 No flag day: each step leaves the bridge working if the next never happens.
+
+Before step 1, none of which has been done:
+
+- Load the live `TokenRegistry` and `GuardianSetAccount` bytes with this build, as
+  `mainnet_accounts_keep_deserialising` does for the config and a message.
+- Run a release once on the sBPF v3 binary on `solana-test-validator`. `deploy/sol.sh` ships v3,
+  `solana-program-test` 2 cannot execute it, and the compute figures here are from sBPF v0.
 
 1. **Daemons: all eight guardians and the relayer's `rand-relayer`.** A rebuilt daemon reads the
    same messages from today's program, plus one `getAccountInfo` per page; pages do not exist yet.
@@ -88,7 +102,7 @@ No flag day: each step leaves the bridge working if the next never happens.
 2. **The program upgrade**, through the upgrade authority. The live ProgramData account holds an
    ELF of at most 216,456 bytes (read 2026-10-31) and this build is 224,608 at sBPF v3, so run
    `solana program extend` first, with room to spare. `Lock` and the 13-account `Release` behave as
-   before, and every live account loads. From here `LockKeyed` is open to anyone, which
+   before, and no account layout changes. From here `LockKeyed` is open to anyone, which
    is why step 1 comes first: a guardian still on the old daemon stops at a keyed message's
    sequence until it is rolled. It does not skip it, and nothing is lost, but with fewer than a
    quorum rolled that lock and everything after it wait.

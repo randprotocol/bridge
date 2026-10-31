@@ -5,7 +5,9 @@
 //! seeing an event, so it lives in its own tool (`rand-bridge-gov`). The
 //! rules it builds to, and re-checks before printing anything, are the ones
 //! every verifier enforces: signed by the CURRENT set, from the governance
-//! emitter on chain 1, `new_index == current + 1`, unique non-zero keys.
+//! emitter on chain 1, `new_index == current + 1`, unique non-zero keys. It
+//! also holds a set to [`MAX_GUARDIANS`], which only Solana enforces: the EVM
+//! endpoints accept 255 keys and take the same attestation first.
 //! The body's timestamp, nonce and sequence are advisory — no verifier reads
 //! them — but they are part of the digest, so one rotation is one byte string
 //! and the same attestation is submitted to every chain.
@@ -16,6 +18,13 @@ use bridge_codec::{
 };
 
 use crate::crypto::{self, GuardianKey};
+
+/// The largest set a rotation may name: the Solana program's `MAX_GUARDIANS`.
+/// An endpoint on EVM or Tron would accept more, and Solana would refuse the
+/// same attestation. The relayer then stamps burns with a set Solana does not
+/// have, so Solana's releases stop until a program upgrade. Held here because
+/// this tool is the one step every chain's rotation passes through.
+pub const MAX_GUARDIANS: usize = 10;
 
 /// The body of a rotation to `new_keys` as set `current_index + 1`.
 pub fn rotation_body(
@@ -46,9 +55,9 @@ pub fn rotation_body(
 }
 
 fn check_new_keys(keys: &[[u8; 20]]) -> Result<()> {
-    if keys.is_empty() || keys.len() > 255 {
+    if keys.is_empty() || keys.len() > MAX_GUARDIANS {
         bail!(
-            "a guardian set has between 1 and 255 keys, got {}",
+            "a guardian set has between 1 and {MAX_GUARDIANS} keys (Solana's bound), got {}",
             keys.len()
         );
     }

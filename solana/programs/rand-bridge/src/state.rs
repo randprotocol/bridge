@@ -28,14 +28,15 @@ pub const MAX_PROTOCOL_FEE_BPS: u16 = 100;
 /// At `n = 10` the quorum is 7, whose release is 1,231 of the 1,232 bytes a
 /// legacy transaction may hold (`tests/sbf_compute.rs`). At `n = 11` it is 8,
 /// and the release no longer fits: a set that size would freeze custody until
-/// a program upgrade, so it is refused and the set in force stays in force.
+/// a program upgrade, so it is refused here.
 ///
 /// This differs from the EVM endpoints, whose bound is 255, and `MAX_GUARDIANS`
-/// is meant to be a rule of every verifier or none. They are not redeployed for
-/// this, so governance holds every rotation to this bound
-/// (`docs/architecture.md` §12). A rotation past it would apply on EVM and be
-/// refused here, leaving the chains on different sets until this program is
-/// upgraded; the same attestation then still applies.
+/// is meant to be a rule of every verifier or none: a knowing exception, pending
+/// the owner's decision, because those contracts cannot be upgraded
+/// (`docs/architecture.md` §12). `rand-bridge-gov` refuses to build a larger
+/// rotation. One built any other way would apply on EVM and be refused here, and
+/// releases on this endpoint stop, because burns are attested by a set it does
+/// not have, until this program is upgraded and the rotation is applied.
 pub const MAX_GUARDIANS: usize = 10;
 
 /// Leading discriminator byte of a [`Config`] account.

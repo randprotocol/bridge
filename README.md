@@ -123,8 +123,10 @@ against the issuer and the chain's explorer before whitelisting it.
   which a leaked old key set matters.
 - Keep the guardian set small. Solana refuses a set above `MAX_GUARDIANS` = 10, the largest whose
   release fits one transaction; the EVM and Tron endpoints stop at 255, and Rand's 16 KiB
-  attestation cap admits about 253. A rotation above 10 would apply on those and be refused on
-  Solana, so the sets would diverge. Governance holds n well under the bound (launch: 6).
+  attestation cap admits about 253. That difference is a knowing exception to the parity rule,
+  pending the owner's decision. A rotation above 10 would apply on those and be refused on Solana,
+  whose releases would stop until a program upgrade, so `rand-bridge-gov` refuses to build one.
+  Governance holds n well under the bound (launch: 6).
 - The whitelisted tokens are issuer-controlled. Tether or Circle can pause a token (releases
   halt, fail closed), blacklist a recipient (that burn's payout stays in custody), blacklist an
   endpoint (its backing is frozen), or change transfer semantics in an upgrade. Locks measure the
