@@ -322,9 +322,10 @@ Parity across all verifiers is the security property; change these everywhere or
   arithmetic on EVM and Solana — change both or neither.
 - Guardian keys and the Rand emitter are per network: nothing in an attestation names testnet or
   mainnet.
-- Guardian-set size is bounded by transport, not on-chain: Solana's 1,232-byte transaction caps
-  releases at `n <= 10` (rotations at `n <= 11`); the fullnode's 16 KiB attestation cap admits
-  ~253. Governance keeps `n` small (launch: 6) by policy.
+- Guardian-set size: Solana's `MAX_GUARDIANS` = 10 (1,231 of 1,232 bytes at a seven-signature
+  release, measured by `tests/sbf_compute.rs`); EVM and Tron stop at 255 and the fullnode's 16 KiB
+  attestation cap admits ~253. That breaks the every-verifier-or-none parity rule on purpose,
+  because the EVM contracts are not redeployed for it: **never rotate above 10** (launch: 6).
 
 ## Verified fullnode facts (main, post-S3, post-RAND-rename)
 

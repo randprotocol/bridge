@@ -522,7 +522,7 @@ made immutable before initialisation can never be initialised.
   `n = 10` costs about 227k in all; clients prepend a compute-unit-limit instruction.
   `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot
   grow, so they are still searched. `Release` reads the clock through the syscall, which keeps
-  the seven-signature transaction at 1,231 of 1,232 bytes (§9, guardian-set size).
+  the seven-signature transaction at 1,231 of 1,232 bytes (§12, guardian-set size).
 - **`u64` native amounts.** Denormalising an 18-decimal mint's amount can overflow `u64` and is
   rejected as `AmountOverflow`. The same error refuses a lock whose *attested* amount exceeds
   `u64::MAX` (§3.4), mirroring the EVM `AmountTooLarge`.
@@ -918,18 +918,19 @@ fork on every bridged chain (the rename already was one: chain 10).
   comparison assumes the TVM's `ecrecover` returns the `0x41`-prefixed address form the migration
   stores, and a failure there fails closed (every release reverts `WrongGuardian`). The Nile
   round trip in the deployment plan is where that assumption is tested before mainnet.
-- **Guardian-set size is bounded by transport, not by any verifier.** `n_sigs` is one byte (255
-  max) and EVM gas is the only on-chain limit there, but a Solana release must fit a 1,232-byte
-  transaction: about seven signatures with the current account list, so `n <= 10` (the rotation
-  itself fits to `n = 11`), relaxable to roughly 20 with address lookup tables. At seven
-  signatures the legacy transaction has no room left for the compute-budget instruction the
-  recoveries need (1,224 of 1,232 bytes before its 40), so `n >= 9` already requires a v0
-  transaction with a lookup table; the launch set (`n = 6`, five signatures) fits with room.
-  Nothing on-chain refuses a rotation to a set too large to ever release under: that would
-  freeze Solana custody until a program upgrade. Rand's 16 KiB
-  attestation cap admits about 253. A rotation past the tightest chain's bound would be applied
-  there and be unsubmittable elsewhere, so the guardian sets would diverge per chain; governance
-  keeps `n` small (launch: 6) as a matter of policy.
+- **Guardian-set size has a different bound on each verifier.** Solana's `MAX_GUARDIANS` is 10:
+  at `n = 10` a seven-signature release with its compute-unit limit is 1,231 of 1,232 bytes and a
+  rotation to another ten keys 1,139 (`solana/programs/rand-bridge/tests/sbf_compute.rs`), and at
+  `n = 11` the eight-signature release no longer fits. Solana refuses a larger set
+  (`TooManyGuardians`, also at `Initialize`) rather than install one it could never release under,
+  which would freeze custody until a program upgrade. The EVM and Tron endpoints bound the set at
+  255, the most a one-byte count holds, with gas the only other limit, and Rand's 16 KiB
+  attestation cap admits about 253. **So the parity rule, every verifier or none, is not met.** The
+  EVM contracts are not redeployed for this, and the rule is kept by governance: no rotation above
+  10. A rotation past it would apply on EVM and Rand and be refused on Solana, whose set in force
+  stays in force, so the sets would diverge until the program is upgraded; the same attestation
+  then still applies. An address lookup table would take a Solana release to roughly `n = 20`;
+  the relayer does not use one, and raising the bound needs that first.
 - **A deposit note's commitment can be front-run.** Every commitment input is public in a pending
   `BridgeAttest`, so anyone can land a conflicting commitment and fail the attest with
   `CommitmentExists`. The attestation's digest stays unspent and `deposit_note` recomputes the

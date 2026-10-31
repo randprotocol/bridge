@@ -39,7 +39,7 @@ use crate::instruction::{associated_token_address, program_data_address, BridgeI
 use crate::state::{
     authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, seeds, spent_pda, token_pda,
     BridgeAccount, Config, Consumed, GuardianSetAccount, PostedMessage, TokenRegistry, CHAIN_ID,
-    CONSISTENCY_LEVEL, DEFAULT_PROTOCOL_FEE_BPS, MAX_PROTOCOL_FEE_BPS,
+    CONSISTENCY_LEVEL, DEFAULT_PROTOCOL_FEE_BPS, MAX_GUARDIANS, MAX_PROTOCOL_FEE_BPS,
 };
 
 /// The largest mint `decimals` this program will whitelist.
@@ -314,12 +314,16 @@ fn denormalize(attested: u128, decimals: u8) -> Result<u64, BridgeError> {
     u64::try_from(native).map_err(|_| BridgeError::AmountOverflow)
 }
 
-/// A guardian set must be non-empty, hold no zero key (the address a
-/// malformed signature recovers to) and no duplicate (which would let one
-/// key count twice towards quorum). Mirrors `RandBridgeBase._checkKeys`.
+/// A guardian set must be non-empty, fit [`MAX_GUARDIANS`], hold no zero key
+/// (the address a malformed signature recovers to) and no duplicate (which
+/// would let one key count twice towards quorum). Mirrors
+/// `RandBridgeBase._checkKeys`, whose size bound is 255.
 fn check_guardian_keys(keys: &[[u8; 20]]) -> Result<(), BridgeError> {
     if keys.is_empty() {
         return Err(BridgeError::ZeroAddress);
+    }
+    if keys.len() > MAX_GUARDIANS {
+        return Err(BridgeError::TooManyGuardians);
     }
     for (i, key) in keys.iter().enumerate() {
         if *key == [0u8; 20] {
@@ -1370,6 +1374,13 @@ mod tests {
             Err(BridgeError::DuplicateGuardian)
         );
         assert_eq!(check_guardian_keys(&[[1u8; 20], [2u8; 20]]), Ok(()));
+
+        let keys = |n: u8| -> Vec<[u8; 20]> { (1..=n).map(|i| [i; 20]).collect() };
+        assert_eq!(check_guardian_keys(&keys(MAX_GUARDIANS as u8)), Ok(()));
+        assert_eq!(
+            check_guardian_keys(&keys(MAX_GUARDIANS as u8 + 1)),
+            Err(BridgeError::TooManyGuardians)
+        );
     }
 
     #[test]

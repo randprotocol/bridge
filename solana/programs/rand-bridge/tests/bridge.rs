@@ -19,7 +19,7 @@ use rand_bridge::instruction as bridge_ix;
 use rand_bridge::processor::process_instruction;
 use rand_bridge::state::{
     authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, spent_pda, token_pda,
-    BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry,
+    BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry, MAX_GUARDIANS,
 };
 use serde_json::Value;
 use sha3::{Digest as _, Keccak256};
@@ -1622,6 +1622,34 @@ async fn prefunded_pdas_do_not_brick_release_lock_or_upgrade() {
     let set: GuardianSetAccount = b.state(guardian_pda(&program, 1).0).await;
     assert_eq!(set.keys, new_keys);
     assert_eq!(set.expiration_time, 0);
+}
+
+async fn rotate_to(b: &mut Bridge, n: u8) -> Result<(), BanksClientError> {
+    let keys = (6..6 + n).map(guardian_address).collect();
+    let upgrade = Payload::GuardianSetUpgrade(GuardianSetUpgrade { new_index: 1, keys }).encode();
+    let (bytes, digest) = signed(0, body(CHAIN_RAND, GOVERNANCE_EMITTER, 2, upgrade), QUORUM);
+    let payer = Keypair::new();
+    b.fund(&payer.pubkey());
+    let ix = bridge_ix::guardian_set_upgrade(&b.program, &payer.pubkey(), 0, 1, &digest, bytes);
+    b.send(ix, &[&payer]).await
+}
+
+/// A set too large to release under would freeze custody, so it is refused
+/// and the set in force stays in force. The largest one the transaction limit
+/// allows is accepted.
+#[tokio::test]
+async fn rotation_stops_at_max_guardians() {
+    let mut b = Bridge::simple(6).await;
+    assert_bridge_error(
+        rotate_to(&mut b, MAX_GUARDIANS as u8 + 1).await,
+        BridgeError::TooManyGuardians,
+    );
+    assert_eq!(b.config().await.current_guardian_set, 0);
+
+    rotate_to(&mut b, MAX_GUARDIANS as u8)
+        .await
+        .expect("a set of MAX_GUARDIANS rotates");
+    assert_eq!(b.config().await.current_guardian_set, 1);
 }
 
 /// A relayer on the client from before the upgrade still ends its list with

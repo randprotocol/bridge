@@ -33,7 +33,8 @@ pub enum BridgeInstruction {
         pauser: Pubkey,
         /// The Rand-side emitter whose burn attestations are honored.
         rand_emitter: [u8; 32],
-        /// Guardian set 0: non-empty, no zero key, no duplicates.
+        /// Guardian set 0: non-empty, at most `MAX_GUARDIANS`, no zero key, no
+        /// duplicates.
         guardians: Vec<[u8; 20]>,
     },
     /// Whitelist a mint and set its release caps (native units, 0 =
