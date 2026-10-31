@@ -9,11 +9,12 @@
 #             (cursors, done, observed, recipients) and its Rand wallet (key + note store) to the
 #             droplet; write the droplet's env file from ~/.zshrc through ssh's stdin (never argv);
 #             start rand-relayer.service; show its log
-#   back      the rollback: stop the droplet relayer, copy its data directory back, start the laptop
-#             relayer (mainnet/run-relayer.sh)
+#   back      the rollback: stop the droplet relayer and confirm its unit is down, copy its data
+#             directory and note store back, remove the env file and the wallet from the droplet
+#             (fails if it cannot), start the laptop relayer (mainnet/run-relayer.sh)
 #
 # One relayer at a time: two relayers on one EVM key race each other's nonces. `move` refuses while
-# the droplet relayer is active; `back` refuses while the laptop one runs.
+# the droplet relayer is active, and stops if ssh cannot say (state unknown); `back` refuses while the laptop one runs.
 #
 # Host: ~/.rand-bridge/relayer-host/host.txt ("public <ip>"), root key ~/.ssh/rand_guardian_ed25519,
 # known hosts ~/.ssh/rand_relayer_known_hosts. Nothing here prints a key.
@@ -50,8 +51,16 @@ case "$step" in
     ;;
   move)
     [[ -s "$WALLET" && -s "$WALLET.notes.json" ]] || { echo "error: $WALLET or its note store is missing" >&2; exit 1; }
-    if (( yes )) && "${SSH[@]}" 'systemctl is-active -q rand-relayer'; then
-      echo "error: the droplet relayer is already running" >&2; exit 1
+    if (( yes )); then
+      # The trailing `true` keeps the remote exit status 0 for any answer of is-active, so a nonzero
+      # status here is ssh itself failing: the droplet's state is unknown, and nothing has changed yet.
+      state=$("${SSH[@]}" 'systemctl is-active rand-relayer; true') \
+        || { echo "error: cannot reach the droplet; whether its relayer runs is unknown, stopping before anything is changed" >&2; exit 1; }
+      case "$state" in
+        inactive|failed) ;;
+        active|activating|reloading) echo "error: the droplet relayer is already running" >&2; exit 1 ;;
+        *) echo "error: the droplet relayer's state is unknown (\"$state\"), stopping before anything is changed" >&2; exit 1 ;;
+      esac
     fi
     run pkill -f 'rand-relayer --config mainnet/relayer.toml' || true
     if (( yes )); then
@@ -78,12 +87,15 @@ case "$step" in
     if (( yes )) && pgrep -f 'rand-relayer --config mainnet/relayer.toml' >/dev/null; then
       echo "error: the laptop relayer is running" >&2; exit 1
     fi
-    run "${SSH[@]}" 'systemctl disable -q --now rand-relayer; systemctl is-active rand-relayer || true'
+    run "${SSH[@]}" 'systemctl disable -q --now rand-relayer; if systemctl is-active -q rand-relayer; then echo "error: rand-relayer is still active" >&2; exit 1; fi'
     run rsync -a -e "$RSYNC_SSH" "root@$ip:/var/lib/rand-relayer/data/" data/mainnet/relayer/
     run rsync -a -e "$RSYNC_SSH" "root@$ip:/var/lib/rand-relayer/wallet/relayer.key.json.notes.json" "$WALLET.notes.json"
+    # The rollback leaves no key at rest on the droplet: the env file (the three deployer keys) and
+    # the Rand wallet go once the notes are home. Any failure stops here, before the laptop relayer starts.
+    run "${SSH[@]}" 'rm -f /etc/rand-relayer/env /var/lib/rand-relayer/wallet/* && [ ! -e /etc/rand-relayer/env ] && ! ls /var/lib/rand-relayer/wallet/* >/dev/null 2>&1 || { echo "error: the env file or the wallet is still on the droplet" >&2; exit 1; }'
     run mainnet/run-relayer.sh
     ;;
   *)
-    sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 1 ;;
+    sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac
 (( yes )) || echo "DRY RUN: nothing was executed; re-run with --yes."
