@@ -282,7 +282,8 @@ read it before touching anything there, it is worked on by many sessions in para
     #2 testnet round trips (closed 2026-09-28 as not planned: mainnet launched directly, the round
     trips and the rotation ran there) · #3 guardian + relayer daemons (closed 2026-09-28: live since
     09-20, every submit path exercised) · #6 sub-unit dust O-5 (closed 2026-09-28: fullnode `fec2947`
-    refuses a burn that is not a whole release unit) · **open:** #5 Solana lows O-1..O-4 (none fixed) ·
+    refuses a burn that is not a whole release unit) · **open:** #5 Solana lows O-1..O-4 (fixed in
+    code, not deployed: `docs/solana-upgrade.md`, daemons before the program) ·
     #4 external-audit gate
   - `randprotocol/fullnode` #1 genesis `check_bridge` guardian-count bound (closed, `544926c`) ·
     #2 no forward bound on block timestamps · #3 deposit-note commitment front-running (closed) ·
@@ -322,9 +323,12 @@ Parity across all verifiers is the security property; change these everywhere or
   arithmetic on EVM and Solana — change both or neither.
 - Guardian keys and the Rand emitter are per network: nothing in an attestation names testnet or
   mainnet.
-- Guardian-set size is bounded by transport, not on-chain: Solana's 1,232-byte transaction caps
-  releases at `n <= 10` (rotations at `n <= 11`); the fullnode's 16 KiB attestation cap admits
-  ~253. Governance keeps `n` small (launch: 6) by policy.
+- Guardian-set size: Solana's `MAX_GUARDIANS` = 10 (1,231 of 1,232 bytes at a seven-signature
+  release, measured by `tests/sbf_compute.rs`); EVM and Tron stop at 255 and the fullnode's 16 KiB
+  attestation cap admits ~253. That breaks the every-verifier-or-none parity rule, a knowing
+  exception pending the owner's decision, because the EVM contracts cannot be upgraded.
+  `rand-bridge-gov` and `deploy/lib.sh` hold 10. **Never rotate above 10** (launch: 6): EVM would
+  apply it, Solana would refuse it, and Solana's releases stop until a program upgrade.
 
 ## Verified fullnode facts (main, post-S3, post-RAND-rename)
 
@@ -342,6 +346,13 @@ Parity across all verifiers is the security property; change these everywhere or
 - `BridgeBurn` = `{ asset_bundle, asset: u32, amount: u64, relayer_fee: u64, to_chain, to }`;
   burn checks: asset match, `burn == amount`, zero asset-bundle fee, disjoint
   nullifiers/commitments, zk proof last; `check_burn` screens the recipient (zero / EVM padding).
+
+- **Solana messages live at two addresses.** `["msg", sequence]` from `Lock`, and
+  `["keyed-msg", owner, nonce]` from `LockKeyed`, found through `["msg-page", sequence / 64]`. Do
+  not add an account derived from the sequence to a lock (a transaction must name it, which is the
+  griefing). `MESSAGE_PAGE_SLOTS` is repeated in `daemons/src/sources/solana.rs`, and no struct in
+  `state.rs` may grow, because `load` refuses trailing bytes. Upgrade order:
+  `docs/solana-upgrade.md`.
 
 ## Repo workflow traps
 

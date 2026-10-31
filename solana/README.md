@@ -94,19 +94,39 @@ never be initialized at all, so freeze it only after the bridge is live.
 `Lock` publishes its message into a PDA derived from the config's current
 `sequence`, and the client has to pass that account in. Two locks built
 against the same config therefore name the same message PDA: the first to
-land consumes that sequence, and the second fails with `InvalidPda`
-because the account it passed no longer matches `msg_pda(program_id,
-config.sequence)`.
+land consumes that sequence, and the second fails with `InvalidPda`. Nothing
+was locked and nothing was lost, so the client re-reads the config and
+retries, but anyone can keep it failing with dust locks.
 
-This is a race, not a rejection of the transfer — nothing was locked and
-nothing was lost. Clients should treat `InvalidPda` on a `Lock` as
-retryable: re-read the config account, re-derive the message PDA from the
-new `sequence`, and resubmit.
+`LockKeyed` takes the same arguments and keys the message by `(owner, nonce)`,
+so no one else can take its address, and assigns the sequence inside the
+instruction. The nonce is unique per owner (`NonceUsed` otherwise). It also
+writes the address into a message page, `["msg-page", sequence / 64]`, which is
+how guardians find a message they cannot derive from its sequence; the first
+lock of a page pays 0.0152 SOL of rent for it. A client names the page of the
+sequence it read, so it fails, harmlessly and retryably with `InvalidPda`, only
+if the sequence leaves that page while it is in flight: at most once per
+page boundary.
+
+Use `LockKeyed` once the guardians and the program have been upgraded, in the
+order in `docs/solana-upgrade.md`.
 
 ## Compute budget
 
-A release recovers one secp256k1 signature per guardian (about 25k
-compute units each), so a five-of-six quorum costs roughly 125k units on
-top of the CPIs. Clients should prepend a
-`ComputeBudgetInstruction::set_compute_unit_limit` rather than rely on
-the 200k default.
+A release recovers one secp256k1 signature per guardian (25k compute
+units each), and a seven-signature release at `n = 10` costs 220,928
+to 232,928 units in all, measured on the sBPF v0 binary. Test keys are
+random, and each extra step of a bump search adds 1,500. The ceiling that
+matters is the CLI's 400,000 limit. Clients must prepend a
+`ComputeBudgetInstruction::set_compute_unit_limit`; that transaction is
+1,231 of 1,232 bytes. Native `solana-program-test` meters nothing, so the
+measurement is its own test against the built binary:
+
+```sh
+cargo build-sbf --manifest-path programs/rand-bridge/Cargo.toml --sbf-out-dir "$OUT"
+SBF_OUT_DIR="$OUT" cargo test -p rand-bridge --test sbf_compute -- --ignored --nocapture
+```
+
+`solana-program-test` 2 cannot execute sBPF v3, which is what `deploy/sol.sh`
+ships: on a v3 binary every test here fails with `UnsupportedProgramId`. So
+this runs the default architecture, and v3 compute is unmeasured.

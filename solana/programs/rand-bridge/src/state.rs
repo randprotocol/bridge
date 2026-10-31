@@ -23,6 +23,22 @@ pub const DEFAULT_PROTOCOL_FEE_BPS: u16 = 10;
 /// The most the admin can ever set it to (1%).
 pub const MAX_PROTOCOL_FEE_BPS: u16 = 100;
 
+/// The largest guardian set this endpoint accepts.
+///
+/// At `n = 10` the quorum is 7, whose release is 1,231 of the 1,232 bytes a
+/// legacy transaction may hold (`tests/sbf_compute.rs`). At `n = 11` it is 8,
+/// and the release no longer fits: a set that size would freeze custody until
+/// a program upgrade, so it is refused here.
+///
+/// This differs from the EVM endpoints, whose bound is 255, and `MAX_GUARDIANS`
+/// is meant to be a rule of every verifier or none: a knowing exception, pending
+/// the owner's decision, because those contracts cannot be upgraded
+/// (`docs/architecture.md` §12). `rand-bridge-gov` refuses to build a larger
+/// rotation. One built any other way would apply on EVM and be refused here, and
+/// releases on this endpoint stop, because burns are attested by a set it does
+/// not have, until this program is upgraded and the rotation is applied.
+pub const MAX_GUARDIANS: usize = 10;
+
 /// Leading discriminator byte of a [`Config`] account.
 pub const DISCRIMINATOR_CONFIG: u8 = 1;
 /// Leading discriminator byte of a [`GuardianSetAccount`].
@@ -33,6 +49,63 @@ pub const DISCRIMINATOR_TOKEN_REGISTRY: u8 = 3;
 pub const DISCRIMINATOR_CONSUMED: u8 = 4;
 /// Leading discriminator byte of a [`PostedMessage`] account.
 pub const DISCRIMINATOR_POSTED_MESSAGE: u8 = 5;
+
+/// Leading discriminator byte of a message page; see [`MESSAGE_PAGE_LEN`].
+pub const DISCRIMINATOR_MESSAGE_PAGE: u8 = 6;
+
+/// How many sequences one message page indexes. A lock names the page of the
+/// sequence it read, so it fails only if that sequence moves past the end of
+/// the page while it is in flight. Part of the on-chain format, repeated in
+/// the daemons' Solana source: change both or neither, and never for pages
+/// that exist.
+pub const MESSAGE_PAGE_SLOTS: u64 = 64;
+
+/// A message page: the discriminator, the page number as a little-endian
+/// `u64`, then [`MESSAGE_PAGE_SLOTS`] addresses of 32 bytes each. Slot
+/// `sequence % MESSAGE_PAGE_SLOTS` holds the address of the message a
+/// `LockKeyed` posted at that sequence; all zeroes means none did.
+///
+/// It is read and written in place rather than through Borsh: 2 KiB would not
+/// survive a trip through the 4 KiB SBF stack frame.
+pub const MESSAGE_PAGE_LEN: usize = MESSAGE_PAGE_HEADER + MESSAGE_PAGE_SLOTS as usize * 32;
+const MESSAGE_PAGE_HEADER: usize = 1 + 8;
+
+/// The page that indexes `sequence`.
+pub const fn message_page(sequence: u64) -> u64 {
+    sequence / MESSAGE_PAGE_SLOTS
+}
+
+/// Starts page `page` in a newly allocated, zeroed account.
+pub fn init_message_page(data: &mut [u8], page: u64) -> Result<(), BridgeError> {
+    if data.len() != MESSAGE_PAGE_LEN {
+        return Err(BridgeError::Truncated);
+    }
+    data[0] = DISCRIMINATOR_MESSAGE_PAGE;
+    data[1..MESSAGE_PAGE_HEADER].copy_from_slice(&page.to_le_bytes());
+    Ok(())
+}
+
+/// Records `message` as the account of `sequence`, in the page that indexes it.
+/// A sequence is assigned once, so a slot already written is refused.
+pub fn set_message_page_slot(
+    data: &mut [u8],
+    sequence: u64,
+    message: &Pubkey,
+) -> Result<(), BridgeError> {
+    if data.len() != MESSAGE_PAGE_LEN
+        || data[0] != DISCRIMINATOR_MESSAGE_PAGE
+        || data[1..MESSAGE_PAGE_HEADER] != message_page(sequence).to_le_bytes()
+    {
+        return Err(BridgeError::InvalidPda);
+    }
+    let start = MESSAGE_PAGE_HEADER + (sequence % MESSAGE_PAGE_SLOTS) as usize * 32;
+    let slot = &mut data[start..start + 32];
+    if slot.iter().any(|byte| *byte != 0) {
+        return Err(BridgeError::InvalidPda);
+    }
+    slot.copy_from_slice(message.as_ref());
+    Ok(())
+}
 
 /// PDA seed prefixes. Kept in one place so the program and its clients
 /// derive the same addresses.
@@ -55,6 +128,12 @@ pub mod seeds {
     /// Seed prefix of a [`super::PostedMessage`], followed by the sequence
     /// number as a little-endian `u64`.
     pub const MSG: &[u8] = b"msg";
+    /// Seed prefix of a [`super::PostedMessage`] posted by `LockKeyed`,
+    /// followed by the owner and the nonce as a little-endian `u32`.
+    pub const KEYED_MSG: &[u8] = b"keyed-msg";
+    /// Seed prefix of a message page, followed by the page number as a
+    /// little-endian `u64`.
+    pub const MESSAGE_PAGE: &[u8] = b"msg-page";
 }
 
 /// The bridge's singleton configuration account.
@@ -229,6 +308,20 @@ pub fn msg_pda(program: &Pubkey, sequence: u64) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[seeds::MSG, &sequence.to_le_bytes()], program)
 }
 
+/// A message posted by `LockKeyed`: seeds `["keyed-msg", owner, nonce as LE
+/// u32]`. Only `owner` can create it, so nobody can take the address from them.
+pub fn keyed_msg_pda(program: &Pubkey, owner: &Pubkey, nonce: u32) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[seeds::KEYED_MSG, owner.as_ref(), &nonce.to_le_bytes()],
+        program,
+    )
+}
+
+/// A message page: seeds `["msg-page", page as LE u64]`.
+pub fn message_page_pda(program: &Pubkey, page: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[seeds::MESSAGE_PAGE, &page.to_le_bytes()], program)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +331,14 @@ mod tests {
     fn program() -> Pubkey {
         Pubkey::new_from_array([7u8; 32])
     }
+
+    const LIVE_CONFIG: &str = "AfLAn6N4o937fdUEAAemqQa0qnVwqj5yuP4ixCKe2sFJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABw226UZJIkuPDBH9T4KkKvqnDAIqVVfr9Nu7iqhO+YwwDALfa6cMJFenQGeA2pdJKmrLV9xAdR5iefADpXBVnRXwEAAAAHAAAAAAAAAPwAAA==";
+    const LIVE_MESSAGE_6: &str = "BQYAAAAAAAAAuAAAAGq979YAAAAAAAXT5Y8ekxe7w8abY/rf9VjqgrpdAHZfHx5IPXBdIJtBOgAAAAAAAAAGAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWWgvAM4BDmCv7bInF71jGS9UFFo/llozu4LSxwKess4eIIJkAAUCBtFELeFAp59ZsTfvbrPrpzF7nT8wLOttjN78vAMT4QABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    const LIVE_REGISTRY_USDT: &str = "A84BDmCv7bInF71jGS9UFFo/llozu4LSxwKess4eIIJkAQYA4fUFAAAAAADKmjsAAAAA91AAAAAAAAAAJPQAAAAAAEB4fQEAAAAAqGEAAAAAAAA=";
+    const LIVE_REGISTRY_USDC: &str = "A8b6evO+2606PWXzaqvJdDGxu+TC0vbg5HymAgNFL11hAQYA4fUFAAAAAADKmjsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const LIVE_GUARDIAN_SET_0: &str = "AgAAAAAGAAAAW1wAe1Y4tkOh9rPBivsqd4Spoqo/rNr26lm8dc0YtMoYRDRABeZkU4zXR47KcjXopSZdS39jgIbyXMn1doRTR2ebh4wAFkkbGd78Wcg+IPti+j459WY2lV3yKJF+3S6eaPOpV7PxQJrg1bJGcin6dKksUbFfmARFEj23agAAAAA=";
+    const LIVE_GUARDIAN_SET_1: &str = "AgEAAAAIAAAAKYUdd7S1sJXNEPha127pF9zw8Ky6VtHOx2tGG3rrBKVZNQliBwtff8Cp/CUM/iro6/tnBHd+a+T74+N0b3GW6ESEFfZnsyzxYuhon5jmqYdNyTJYJmjb/rJMA7InAffpOtUzIG1jlHYnysB7uGPTbgFacUCZpXNZhJ9OniQg4RX6bmcV9TJ5rwpnnDmY//3sdShNd0M0BMHA/J+Qq7WKnAAAAAAAAAAA";
 
     fn sample_config() -> Config {
         Config {
@@ -270,6 +371,53 @@ mod tests {
         assert_eq!(custody_pda(&p, &mint), expect(&[b"custody", mint.as_ref()]));
         assert_eq!(spent_pda(&p, &digest), expect(&[b"spent", &digest]));
         assert_eq!(msg_pda(&p, 42), expect(&[b"msg", &42u64.to_le_bytes()]));
+        assert_eq!(
+            keyed_msg_pda(&p, &mint, 9),
+            expect(&[b"keyed-msg", mint.as_ref(), &9u32.to_le_bytes()])
+        );
+        assert_eq!(
+            message_page_pda(&p, 2),
+            expect(&[b"msg-page", &2u64.to_le_bytes()])
+        );
+    }
+
+    /// The addresses on the live program id, which
+    /// `the_message_addresses_are_the_programs` in the daemons' tests repeats.
+    #[test]
+    fn message_addresses_on_the_live_program() {
+        let live = Pubkey::from_str_const("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu");
+        let owner = Pubkey::new_from_array([7u8; 32]);
+        assert_eq!(
+            keyed_msg_pda(&live, &owner, 9).0.to_string(),
+            "66sKh7F4rtXeHdV1gxeEDG817YVsuVkVSbTajk9yCSFE"
+        );
+        assert_eq!(
+            message_page_pda(&live, 2).0.to_string(),
+            "7G8ABWRBDkeEgxTWVoroGLMhKAY4nrXRK9dmq5c6LKxH"
+        );
+    }
+
+    #[test]
+    fn message_pages_index_by_sequence() {
+        let message = Pubkey::new_from_array([3u8; 32]);
+        let mut data = vec![0u8; MESSAGE_PAGE_LEN];
+        assert_eq!(MESSAGE_PAGE_LEN, 2057);
+        init_message_page(&mut data, 2).expect("init");
+        set_message_page_slot(&mut data, 129, &message).expect("in the page");
+        assert_eq!(&data[..9], &[6, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&data[9 + 32..9 + 64], message.as_ref());
+        assert!(data[9..9 + 32].iter().all(|b| *b == 0));
+
+        // Once only, and only in its own page.
+        let refused = Err(BridgeError::InvalidPda);
+        assert_eq!(set_message_page_slot(&mut data, 129, &message), refused);
+        assert_eq!(set_message_page_slot(&mut data, 127, &message), refused);
+        assert_eq!(set_message_page_slot(&mut data, 192, &message), refused);
+        assert_eq!(set_message_page_slot(&mut [0u8; 9], 0, &message), refused);
+        assert_eq!(
+            init_message_page(&mut [0u8; 9], 0),
+            Err(BridgeError::Truncated)
+        );
     }
 
     #[test]
@@ -277,6 +425,12 @@ mod tests {
         let p = program();
         assert_ne!(guardian_pda(&p, 0).0, guardian_pda(&p, 1).0);
         assert_ne!(msg_pda(&p, 0).0, msg_pda(&p, 1).0);
+        let owner = Pubkey::new_from_array([4u8; 32]);
+        assert_ne!(
+            keyed_msg_pda(&p, &owner, 0).0,
+            keyed_msg_pda(&p, &owner, 1).0
+        );
+        assert_ne!(keyed_msg_pda(&p, &owner, 0).0, keyed_msg_pda(&p, &p, 0).0);
         assert_ne!(config_pda(&p).0, authority_pda(&p).0);
         let mint = Pubkey::new_from_array([3u8; 32]);
         assert_ne!(token_pda(&p, &mint).0, custody_pda(&p, &mint).0);
@@ -328,6 +482,72 @@ mod tests {
         );
     }
 
+    /// Bytes read from mainnet at `finalized` on 2026-10-31: one of every
+    /// layout that can be loaded and written back. An upgrade must keep
+    /// reading exactly these, and `load` refuses trailing bytes, so no struct
+    /// here may grow. `Consumed` is 32 bytes behind its discriminator and
+    /// nothing reads one back.
+    #[test]
+    fn mainnet_accounts_keep_deserialising() {
+        use base64::Engine;
+        let decode = |text: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .expect("base64")
+        };
+        let data = decode(LIVE_CONFIG);
+        assert_eq!(data.len(), 145);
+        let config = Config::load(&data).expect("the live config");
+        assert_eq!((config.current_guardian_set, config.sequence), (1, 7));
+        assert_eq!((config.bump, config.protocol_fee_bps), (252, 0));
+        let live = Pubkey::from_str_const("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu");
+        assert_eq!(config_pda(&live).1, config.bump);
+        let mut stored = vec![0u8; data.len()];
+        config.store(&mut stored).expect("stores");
+        assert_eq!(stored, data);
+
+        let data = decode(LIVE_MESSAGE_6);
+        assert_eq!(data.len(), 197);
+        let message = PostedMessage::load(&data).expect("the live message");
+        assert_eq!(message.sequence, 6);
+        assert_eq!(message.body.len(), 184);
+
+        let usdt = Pubkey::from_str_const("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+        let data = decode(LIVE_REGISTRY_USDT);
+        assert_eq!(data.len(), 83);
+        let registry = TokenRegistry::load(&data).expect("the live USDT registry");
+        assert_eq!(registry.mint, usdt);
+        assert!(registry.enabled);
+        assert_eq!((registry.decimals, registry.custody), (6, 25_000_000));
+        assert_eq!(registry.accrued_fees, 25_000);
+        let mut stored = vec![0u8; data.len()];
+        registry.store(&mut stored).expect("stores");
+        assert_eq!(stored, data);
+
+        let usdc = Pubkey::from_str_const("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let registry =
+            TokenRegistry::load(&decode(LIVE_REGISTRY_USDC)).expect("the live USDC registry");
+        assert_eq!((registry.mint, registry.custody), (usdc, 0));
+
+        // Set 0 was superseded and has an expiry; set 1 is in force and has
+        // none. An expiry is written back in place, so both shapes matter.
+        for (text, len, index, keys, expiration_time) in [
+            (LIVE_GUARDIAN_SET_0, 137, 0, 6, 1_790_393_618),
+            (LIVE_GUARDIAN_SET_1, 177, 1, 8, 0),
+        ] {
+            let data = decode(text);
+            assert_eq!(data.len(), len);
+            let set = GuardianSetAccount::load(&data).expect("a live guardian set");
+            assert_eq!(set.index, index);
+            assert_eq!(set.keys.len(), keys);
+            assert_eq!(set.expiration_time, expiration_time);
+            assert!(set.keys.len() <= MAX_GUARDIANS);
+            let mut stored = vec![0u8; data.len()];
+            set.store(&mut stored).expect("stores");
+            assert_eq!(stored, data);
+        }
+    }
+
     #[test]
     fn store_refuses_an_undersized_account() {
         let config = sample_config();
@@ -347,8 +567,9 @@ mod tests {
             DISCRIMINATOR_TOKEN_REGISTRY,
             DISCRIMINATOR_CONSUMED,
             DISCRIMINATOR_POSTED_MESSAGE,
+            DISCRIMINATOR_MESSAGE_PAGE,
         ];
-        assert_eq!(all, [1, 2, 3, 4, 5]);
+        assert_eq!(all, [1, 2, 3, 4, 5, 6]);
         assert_eq!(CHAIN_ID, bridge_codec::CHAIN_SOLANA);
         assert_eq!(CONSISTENCY_LEVEL, 1);
     }

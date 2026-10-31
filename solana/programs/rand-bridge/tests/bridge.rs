@@ -18,8 +18,9 @@ use rand_bridge::error::BridgeError;
 use rand_bridge::instruction as bridge_ix;
 use rand_bridge::processor::process_instruction;
 use rand_bridge::state::{
-    authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, spent_pda, token_pda,
-    BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry,
+    authority_pda, config_pda, custody_pda, guardian_pda, keyed_msg_pda, message_page_pda, msg_pda,
+    spent_pda, token_pda, BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry,
+    MAX_GUARDIANS, MESSAGE_PAGE_LEN, MESSAGE_PAGE_SLOTS,
 };
 use serde_json::Value;
 use sha3::{Digest as _, Keccak256};
@@ -27,7 +28,7 @@ use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_program_test::{processor, BanksClientError, ProgramTest, ProgramTestContext};
 use solana_sdk::account::{Account, AccountSharedData};
 use solana_sdk::clock::Clock;
-use solana_sdk::instruction::{Instruction, InstructionError};
+use solana_sdk::instruction::{AccountMeta, Instruction, InstructionError};
 use solana_sdk::program_option::COption;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -1622,6 +1623,273 @@ async fn prefunded_pdas_do_not_brick_release_lock_or_upgrade() {
     let set: GuardianSetAccount = b.state(guardian_pda(&program, 1).0).await;
     assert_eq!(set.keys, new_keys);
     assert_eq!(set.expiration_time, 0);
+}
+
+/// A compromised pauser can stop the bridge again after every unpause, so
+/// the admin has to be able to take the role away. Mirrors `setPauser`.
+#[tokio::test]
+async fn admin_moves_the_pauser() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    let admin = b.admin.pubkey();
+    let old = b.pauser.pubkey();
+    let new = Keypair::new();
+    b.fund(&new.pubkey());
+
+    let ix = bridge_ix::set_pauser(&program, &old, &new.pubkey());
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::NotAdmin);
+    let ix = bridge_ix::set_pauser(&program, &admin, &Pubkey::default());
+    assert_bridge_error(b.admin_send(ix).await, BridgeError::ZeroAddress);
+    assert_eq!(b.config().await.pauser, old);
+
+    let ix = bridge_ix::set_pauser(&program, &admin, &new.pubkey());
+    b.admin_send(ix).await.expect("the admin moves the role");
+    assert_eq!(b.config().await.pauser, new.pubkey());
+
+    let ix = bridge_ix::pause(&program, &old);
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::NotPauser);
+    b.send(bridge_ix::pause(&program, &new.pubkey()), &[&new])
+        .await
+        .expect("the new pauser pauses");
+    assert!(b.config().await.paused);
+}
+
+impl Bridge {
+    /// A `LockKeyed` as a client builds it from the sequence it read.
+    fn lock_keyed_ix(&self, owner: &Keypair, read_sequence: u64, nonce: u32) -> Instruction {
+        bridge_ix::lock_keyed(
+            &self.program,
+            &owner.pubkey(),
+            &bridge_ix::associated_token_address(&owner.pubkey(), &self.mint),
+            &self.mint,
+            read_sequence,
+            1_000_000,
+            [0x44; 32],
+            0,
+            nonce,
+        )
+    }
+
+    async fn funded_owner(&mut self) -> Keypair {
+        let owner = Keypair::new();
+        self.fund(&owner.pubkey());
+        self.put_ata(&owner.pubkey(), 100_000_000);
+        owner
+    }
+
+    async fn page(&mut self, page: u64) -> Vec<u8> {
+        let account = self.account(message_page_pda(&self.program, page).0);
+        account.await.expect("the page exists").data
+    }
+}
+
+/// The griefing O-4 is about: everything built on one read of the sequence.
+/// `Lock` loses to whichever lands first, `LockKeyed` does not, and each is
+/// given the next sequence inside the instruction.
+#[tokio::test]
+async fn keyed_locks_built_on_one_sequence_all_land() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let (griefer, honest, other) = (
+        b.funded_owner().await,
+        b.funded_owner().await,
+        b.funded_owner().await,
+    );
+
+    let read = b.config().await.sequence;
+    let griefer_ata = bridge_ix::associated_token_address(&griefer.pubkey(), &b.mint);
+    let mint = b.mint;
+    let lock = |owner: &Keypair, ata: &Pubkey, nonce| {
+        bridge_ix::lock(
+            &program,
+            &owner.pubkey(),
+            ata,
+            &mint,
+            read,
+            1_000_000,
+            [0x44; 32],
+            0,
+            nonce,
+        )
+    };
+    b.send(lock(&griefer, &griefer_ata, 1), &[&griefer])
+        .await
+        .expect("the griefer's dust lock lands first");
+    let honest_ata = bridge_ix::associated_token_address(&honest.pubkey(), &mint);
+    assert_bridge_error(
+        b.send(lock(&honest, &honest_ata, 2), &[&honest]).await,
+        BridgeError::InvalidPda,
+    );
+
+    let ix = b.lock_keyed_ix(&honest, read, 2);
+    b.send(ix, &[&honest]).await.expect("keyed lock lands");
+    let ix = b.lock_keyed_ix(&other, read, 2);
+    b.send(ix, &[&other]).await.expect("so does another's");
+    assert_eq!(b.config().await.sequence, read + 3);
+    assert_eq!(b.custody_balance().await, 3_000_000);
+
+    // A guardian's view: the sequence inside the message is the one assigned,
+    // the page names the address, and the sequence `Lock` used has no slot.
+    let page = b.page(0).await;
+    assert_eq!(page.len(), MESSAGE_PAGE_LEN);
+    let slot = |s: u64| &page[9 + s as usize * 32..9 + (s as usize + 1) * 32];
+    assert_eq!(slot(read), &[0u8; 32]);
+    let first = keyed_msg_pda(&program, &honest.pubkey(), 2).0;
+    let second = keyed_msg_pda(&program, &other.pubkey(), 2).0;
+    assert_eq!(slot(read + 1), first.as_ref());
+    assert_eq!(slot(read + 2), second.as_ref());
+    for (key, sequence) in [(first, read + 1), (second, read + 2)] {
+        let posted: PostedMessage = b.state(key).await;
+        assert_eq!(posted.sequence, sequence);
+        let parsed = Body::decode(&posted.body).expect("a body");
+        assert_eq!((parsed.sequence, parsed.nonce), (sequence, 2));
+    }
+    let legacy: PostedMessage = b.state(msg_pda(&program, read).0).await;
+    assert_eq!(legacy.sequence, read);
+}
+
+#[tokio::test]
+async fn keyed_lock_refuses_a_used_nonce_and_a_stale_page() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let owner = b.funded_owner().await;
+
+    let ix = b.lock_keyed_ix(&owner, 0, 5);
+    b.send(ix, &[&owner]).await.expect("first");
+    let ix = b.lock_keyed_ix(&owner, 1, 5);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::NonceUsed);
+
+    // Someone else's address, and a page that does not index this sequence.
+    let other = b.funded_owner().await;
+    let mut ix = b.lock_keyed_ix(&owner, 1, 6);
+    ix.accounts[6].pubkey = keyed_msg_pda(&program, &other.pubkey(), 6).0;
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::InvalidPda);
+    let ix = b.lock_keyed_ix(&owner, MESSAGE_PAGE_SLOTS, 7);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::InvalidPda);
+
+    // The checks before the message are `Lock`'s.
+    assert_eq!(b.custody_balance().await, 1_000_000);
+    let ix = bridge_ix::pause(&program, &b.pauser.pubkey());
+    b.pauser_send(ix).await.expect("pause");
+    let ix = b.lock_keyed_ix(&owner, 1, 8);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::IsPaused);
+}
+
+/// Sequences walk across a page boundary, and a lamport sent ahead of time to
+/// a page or a message address stops neither.
+#[tokio::test]
+async fn keyed_locks_cross_a_page_through_prefunded_addresses() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let owner = b.funded_owner().await;
+
+    let mut config = b.config().await;
+    let start = MESSAGE_PAGE_SLOTS - 1;
+    config.sequence = start;
+    let mut account = b.account(config_pda(&program).0).await.expect("config");
+    config.store(&mut account.data).expect("stores");
+    b.ctx
+        .set_account(&config_pda(&program).0, &AccountSharedData::from(account));
+
+    for (sequence, nonce, page) in [(start, 1, 0), (start + 1, 2, 1)] {
+        b.grief(&message_page_pda(&program, page).0);
+        b.grief(&keyed_msg_pda(&program, &owner.pubkey(), nonce).0);
+        let ix = b.lock_keyed_ix(&owner, sequence, nonce);
+        b.send(ix, &[&owner]).await.expect("a griefed lock lands");
+        let key = keyed_msg_pda(&program, &owner.pubkey(), nonce).0;
+        let at = 9 + (sequence % MESSAGE_PAGE_SLOTS) as usize * 32;
+        assert_eq!(&b.page(page).await[at..at + 32], key.as_ref());
+        let posted: PostedMessage = b.state(key).await;
+        assert_eq!(posted.sequence, sequence);
+    }
+}
+
+async fn rotate_to(b: &mut Bridge, n: u8) -> Result<(), BanksClientError> {
+    let keys = (6..6 + n).map(guardian_address).collect();
+    let upgrade = Payload::GuardianSetUpgrade(GuardianSetUpgrade { new_index: 1, keys }).encode();
+    let (bytes, digest) = signed(0, body(CHAIN_RAND, GOVERNANCE_EMITTER, 2, upgrade), QUORUM);
+    let payer = Keypair::new();
+    b.fund(&payer.pubkey());
+    let ix = bridge_ix::guardian_set_upgrade(&b.program, &payer.pubkey(), 0, 1, &digest, bytes);
+    b.send(ix, &[&payer]).await
+}
+
+/// A set too large to release under would freeze custody, so it is refused
+/// and the set in force stays in force. The largest one the transaction limit
+/// allows is accepted.
+#[tokio::test]
+async fn rotation_stops_at_max_guardians() {
+    let mut b = Bridge::simple(6).await;
+    assert_bridge_error(
+        rotate_to(&mut b, MAX_GUARDIANS as u8 + 1).await,
+        BridgeError::TooManyGuardians,
+    );
+    assert_eq!(b.config().await.current_guardian_set, 0);
+
+    rotate_to(&mut b, MAX_GUARDIANS as u8)
+        .await
+        .expect("a set of MAX_GUARDIANS rotates");
+    assert_eq!(b.config().await.current_guardian_set, 1);
+}
+
+/// A relayer on the client from before the upgrade still ends its list with
+/// the clock sysvar; the upgraded program must take that release.
+#[tokio::test]
+async fn release_accepts_the_old_account_list_with_the_clock_sysvar() {
+    let mut b = Bridge::simple(6).await;
+    let mint = b.mint;
+    b.set_token(true, 0, 0).await.expect("set token");
+    b.fill_custody(5_000_000).await;
+
+    let relayer = Keypair::new();
+    b.fund(&relayer.pubkey());
+    b.put_ata(&relayer.pubkey(), 0);
+    let recipient = Pubkey::new_unique();
+    let recipient_ata = b.put_ata(&recipient, 0);
+    let (bytes, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            1,
+            transfer_payload(100_000_000, &mint, 5, &recipient, 5, 0),
+        ),
+        QUORUM,
+    );
+    let mut ix = bridge_ix::release(
+        &b.program,
+        &relayer.pubkey(),
+        &mint,
+        0,
+        &recipient,
+        &digest,
+        bytes,
+    );
+    ix.accounts.push(AccountMeta::new_readonly(
+        solana_sdk::sysvar::clock::id(),
+        false,
+    ));
+    b.send(ix, &[&relayer])
+        .await
+        .expect("the old list releases");
+    assert_eq!(b.token(recipient_ata).await.amount, 1_000_000);
+}
+
+/// A program-owned config at any address but the canonical one is refused,
+/// now that the check is made from the bump stored inside it.
+#[tokio::test]
+async fn a_copy_of_the_config_elsewhere_is_refused() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    let copy = b.account(config_pda(&program).0).await.expect("config");
+    let fake = Pubkey::new_unique();
+    b.ctx.set_account(&fake, &AccountSharedData::from(copy));
+    let mut ix = bridge_ix::pause(&program, &b.pauser.pubkey());
+    ix.accounts[1].pubkey = fake;
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::InvalidPda);
 }
 
 /// Every shared vector whose verifier is Solana, replayed against a bank

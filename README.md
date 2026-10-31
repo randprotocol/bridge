@@ -121,12 +121,12 @@ against the issuer and the chain's explorer before whitelisting it.
   attestation says.
 - Guardian upgrades cannot skip indices and old sets expire after a day, limiting the window in
   which a leaked old key set matters.
-- Keep the guardian set small. No verifier bounds the set size on chain, but transport does: a
-  Solana release must fit one transaction (about seven signatures with the current account list,
-  so n <= 10; the rotation itself fits to n = 11), and Rand's 16 KiB attestation cap admits about
-  253. A rotation past the tightest chain's bound would be accepted on one chain and be
-  unsubmittable on another, so the sets would diverge. Governance holds n well under the bound
-  (launch: 6) as a matter of policy.
+- Keep the guardian set small. Solana refuses a set above `MAX_GUARDIANS` = 10, the largest whose
+  release fits one transaction; the EVM and Tron endpoints stop at 255, and Rand's 16 KiB
+  attestation cap admits about 253. That difference is a knowing exception to the parity rule,
+  pending the owner's decision. A rotation above 10 would apply on those and be refused on Solana,
+  whose releases would stop until a program upgrade, so `rand-bridge-gov` refuses to build one.
+  Governance holds n well under the bound (launch: 6).
 - The whitelisted tokens are issuer-controlled. Tether or Circle can pause a token (releases
   halt, fail closed), blacklist a recipient (that burn's payout stays in custody), blacklist an
   endpoint (its backing is frozen), or change transfer semantics in an upgrade. Locks measure the

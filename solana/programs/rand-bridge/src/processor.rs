@@ -37,9 +37,11 @@ use crate::attestation;
 use crate::error::BridgeError;
 use crate::instruction::{associated_token_address, program_data_address, BridgeInstruction};
 use crate::state::{
-    authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, seeds, spent_pda, token_pda,
+    authority_pda, config_pda, custody_pda, guardian_pda, init_message_page, keyed_msg_pda,
+    message_page, message_page_pda, msg_pda, seeds, set_message_page_slot, spent_pda, token_pda,
     BridgeAccount, Config, Consumed, GuardianSetAccount, PostedMessage, TokenRegistry, CHAIN_ID,
-    CONSISTENCY_LEVEL, DEFAULT_PROTOCOL_FEE_BPS, MAX_PROTOCOL_FEE_BPS,
+    CONSISTENCY_LEVEL, DEFAULT_PROTOCOL_FEE_BPS, MAX_GUARDIANS, MAX_PROTOCOL_FEE_BPS,
+    MESSAGE_PAGE_LEN,
 };
 
 /// The largest mint `decimals` this program will whitelist.
@@ -92,6 +94,7 @@ pub fn process_instruction(
             rand_recipient,
             relayer_fee,
             nonce,
+            false,
         ),
         BridgeInstruction::Release { attestation } => {
             process_release(program_id, accounts, &attestation)
@@ -109,6 +112,21 @@ pub fn process_instruction(
         BridgeInstruction::WithdrawFees { amount } => {
             process_withdraw_fees(program_id, accounts, amount)
         }
+        BridgeInstruction::SetPauser { pauser } => process_set_pauser(program_id, accounts, pauser),
+        BridgeInstruction::LockKeyed {
+            amount,
+            rand_recipient,
+            relayer_fee,
+            nonce,
+        } => process_lock(
+            program_id,
+            accounts,
+            amount,
+            rand_recipient,
+            relayer_fee,
+            nonce,
+            true,
+        ),
     }
 }
 
@@ -178,9 +196,9 @@ fn store<T: BridgeAccount>(value: &T, account: &AccountInfo) -> Result<(), Bridg
 /// there and send it a lamport. `CreateAccount` refuses to act on an
 /// account that already holds lamports, so a single lamport sent to
 /// `["spent", digest]` would make a fully signed release permanently
-/// unredeemable, one sent to `["msg", sequence]` would brick every
-/// subsequent lock, and one sent to `["guardian", current + 1]` would
-/// block guardian rotation.
+/// unredeemable, one sent to `["msg", sequence]` or to a `["msg-page", n]`
+/// would brick every subsequent lock, and one sent to
+/// `["guardian", current + 1]` would block guardian rotation.
 ///
 /// So the pre-funded case is handled rather than refused: top the
 /// account up to rent exemption if it is short, then `Allocate` and
@@ -314,12 +332,16 @@ fn denormalize(attested: u128, decimals: u8) -> Result<u64, BridgeError> {
     u64::try_from(native).map_err(|_| BridgeError::AmountOverflow)
 }
 
-/// A guardian set must be non-empty, hold no zero key (the address a
-/// malformed signature recovers to) and no duplicate (which would let one
-/// key count twice towards quorum). Mirrors `RandBridgeBase._checkKeys`.
+/// A guardian set must be non-empty, fit [`MAX_GUARDIANS`], hold no zero key
+/// (the address a malformed signature recovers to) and no duplicate (which
+/// would let one key count twice towards quorum). Mirrors
+/// `RandBridgeBase._checkKeys`, whose size bound is 255.
 fn check_guardian_keys(keys: &[[u8; 20]]) -> Result<(), BridgeError> {
     if keys.is_empty() {
         return Err(BridgeError::ZeroAddress);
+    }
+    if keys.len() > MAX_GUARDIANS {
+        return Err(BridgeError::TooManyGuardians);
     }
     for (i, key) in keys.iter().enumerate() {
         if *key == [0u8; 20] {
@@ -372,7 +394,7 @@ fn now_from(clock: &AccountInfo) -> Result<u64, ProgramError> {
 /// that reads or moves it.
 fn custody_state(
     account: &AccountInfo,
-    program_id: &Pubkey,
+    authority: &Pubkey,
     mint: &Pubkey,
 ) -> Result<spl_token::state::Account, ProgramError> {
     if account.owner != &spl_token::id() {
@@ -380,7 +402,7 @@ fn custody_state(
     }
     let data = account.data.borrow();
     let token = spl_token::state::Account::unpack(&data)?;
-    if token.owner != authority_pda(program_id).0 || token.mint != *mint {
+    if token.owner != *authority || token.mint != *mint {
         return Err(BridgeError::InvalidPda.into());
     }
     Ok(token)
@@ -447,11 +469,19 @@ fn transfer_from_custody<'a>(
     )
 }
 
-/// Loads the config, having first checked that the account really is the
-/// config PDA.
+/// Loads the config and checks that the account really is the config PDA,
+/// from the bump stored in it: one hash rather than the bump search, on
+/// every instruction but `Initialize`.
+///
+/// Only a canonical address can pass. The bump comes out of an account this
+/// program owns and holds a [`Config`], and the program writes one only at
+/// the canonical PDA, with that PDA's bump.
 fn load_config(account: &AccountInfo, program_id: &Pubkey) -> Result<Config, BridgeError> {
-    check_key(account.key, &config_pda(program_id).0)?;
-    load(account, program_id)
+    let config: Config = load(account, program_id)?;
+    let derived = Pubkey::create_program_address(&[seeds::CONFIG, &[config.bump]], program_id)
+        .map_err(|_| BridgeError::InvalidPda)?;
+    check_key(account.key, &derived)?;
+    Ok(config)
 }
 
 /// Loads a token registry, having checked both the PDA and that the entry
@@ -675,6 +705,13 @@ fn process_set_token(
 // Lock
 // ----------------------------------------------------------------------
 
+/// `Lock`, and with `keyed` set `LockKeyed`. They differ only in where the
+/// message goes. `Lock` puts it at `["msg", sequence]`, which is how a guardian
+/// finds it. `LockKeyed` puts it at `["keyed-msg", owner, nonce]` and records
+/// that address in the page indexing the sequence, which is how a guardian
+/// finds that. Both assign the sequence and advance it in this one
+/// instruction, so every sequence below `Config::sequence` has its message
+/// behind one of the two.
 fn process_lock(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -682,6 +719,7 @@ fn process_lock(
     rand_recipient: [u8; 32],
     relayer_fee: u64,
     nonce: u32,
+    keyed: bool,
 ) -> ProgramResult {
     let iter = &mut accounts.iter();
     let owner = next_account_info(iter)?;
@@ -694,6 +732,11 @@ fn process_lock(
     let token_program = next_account_info(iter)?;
     let system_account = next_account_info(iter)?;
     let clock_account = next_account_info(iter)?;
+    let page_account = if keyed {
+        Some(next_account_info(iter)?)
+    } else {
+        None
+    };
 
     check_signer(owner)?;
     check_key(token_program.key, &spl_token::id())?;
@@ -737,13 +780,28 @@ fn process_lock(
     let (custody_key, _) = custody_pda(program_id, mint_account.key);
     check_key(custody_account.key, &custody_key)?;
     let sequence = config.sequence;
-    let (message_key, message_bump) = msg_pda(program_id, sequence);
+    let (message_key, message_bump) = if keyed {
+        keyed_msg_pda(program_id, owner.key, nonce)
+    } else {
+        msg_pda(program_id, sequence)
+    };
     check_key(message_account.key, &message_key)?;
+    if keyed && !message_account.data_is_empty() {
+        return Err(BridgeError::NonceUsed.into());
+    }
+    let page = page_account
+        .map(|account| -> Result<_, BridgeError> {
+            let (page_key, page_bump) = message_page_pda(program_id, message_page(sequence));
+            check_key(account.key, &page_key)?;
+            Ok((account, page_bump))
+        })
+        .transpose()?;
 
     // The balance delta is measured rather than trusted: a mint that
     // credits custody less than the attestation is about to promise is
     // rejected outright rather than mis-accounted.
-    let before = custody_state(custody_account, program_id, mint_account.key)?.amount;
+    let authority = authority_pda(program_id).0;
+    let before = custody_state(custody_account, &authority, mint_account.key)?.amount;
     invoke(
         &spl_token::instruction::transfer(
             &spl_token::id(),
@@ -760,7 +818,7 @@ fn process_lock(
             token_program.clone(),
         ],
     )?;
-    let after = custody_state(custody_account, program_id, mint_account.key)?.amount;
+    let after = custody_state(custody_account, &authority, mint_account.key)?.amount;
     if after.checked_sub(before) != Some(locked) {
         return Err(BridgeError::TransferAmountMismatch.into());
     }
@@ -794,20 +852,73 @@ fn process_lock(
         body: body.encode(),
     };
     let sequence_seed = sequence.to_le_bytes();
+    let nonce_seed = nonce.to_le_bytes();
+    let bump_seed = [message_bump];
+    let message_seeds: &[&[u8]] = if keyed {
+        &[
+            seeds::KEYED_MSG,
+            owner.key.as_ref(),
+            &nonce_seed,
+            &bump_seed,
+        ]
+    } else {
+        &[seeds::MSG, &sequence_seed, &bump_seed]
+    };
     create_state(
         &posted,
         message_account,
         owner,
         system_account,
         program_id,
-        &[seeds::MSG, &sequence_seed, &[message_bump]],
+        message_seeds,
     )?;
+    if let Some((account, page_bump)) = page {
+        index_message(
+            account,
+            owner,
+            system_account,
+            program_id,
+            page_bump,
+            sequence,
+            &message_key,
+        )?;
+    }
 
     config.sequence = sequence.checked_add(1).ok_or(BridgeError::AmountOverflow)?;
     store(&config, config_account)?;
     store(&registry, registry_account)?;
 
     msg!("rand-bridge: locked {} at sequence {}", locked, sequence);
+    Ok(())
+}
+
+/// Records `message` as the account of `sequence`, creating the page if this
+/// is its first keyed lock.
+fn index_message<'a>(
+    page_account: &AccountInfo<'a>,
+    payer: &AccountInfo<'a>,
+    system_account: &AccountInfo<'a>,
+    program_id: &Pubkey,
+    page_bump: u8,
+    sequence: u64,
+    message: &Pubkey,
+) -> ProgramResult {
+    if page_account.data_is_empty() {
+        let page = message_page(sequence);
+        create_pda_account(
+            payer,
+            page_account,
+            system_account,
+            program_id,
+            MESSAGE_PAGE_LEN,
+            &[seeds::MESSAGE_PAGE, &page.to_le_bytes(), &[page_bump]],
+        )?;
+        init_message_page(&mut page_account.data.borrow_mut(), page)?;
+    }
+    if page_account.owner != program_id {
+        return Err(BridgeError::InvalidPda.into());
+    }
+    set_message_page_slot(&mut page_account.data.borrow_mut(), sequence, message)?;
     Ok(())
 }
 
@@ -833,7 +944,10 @@ fn process_release(
     let consumed_account = next_account_info(iter)?;
     let token_program = next_account_info(iter)?;
     let system_account = next_account_info(iter)?;
-    let clock_account = next_account_info(iter)?;
+    // The account list ended with the clock sysvar until a seven-signature
+    // release no longer fitted a transaction beside its compute-unit limit.
+    // It is read through the syscall now; a client that still passes the
+    // account has it ignored as a trailing extra.
 
     check_signer(relayer)?;
     check_key(token_program.key, &spl_token::id())?;
@@ -845,10 +959,11 @@ fn process_release(
     // token account for this mint under this program's custody
     // authority. Checked here, before any effect is written and long
     // before the payout CPIs.
-    custody_state(custody_account, program_id, mint_account.key)?;
     let (authority_key, authority_bump) = authority_pda(program_id);
+    custody_state(custody_account, &authority_key, mint_account.key)?;
     check_key(authority_account.key, &authority_key)?;
-    let now = now_from(clock_account)?;
+    let now =
+        u64::try_from(Clock::get()?.unix_timestamp).map_err(|_| BridgeError::AmountOverflow)?;
 
     let config = load_config(config_account, program_id)?;
     if config.paused {
@@ -1243,6 +1358,26 @@ fn process_set_protocol_fee(
     Ok(())
 }
 
+/// Never to the zero key, which would quietly leave pausing to the admin
+/// alone. Mirrors `RandBridgeBase.setPauser`.
+fn process_set_pauser(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    pauser: Pubkey,
+) -> ProgramResult {
+    let (signer, config_account, mut config) = role_accounts(accounts, program_id)?;
+    if *signer.key != config.admin {
+        return Err(BridgeError::NotAdmin.into());
+    }
+    if pauser == Pubkey::default() {
+        return Err(BridgeError::ZeroAddress.into());
+    }
+    config.pauser = pauser;
+    store(&config, config_account)?;
+    msg!("rand-bridge: pauser moved");
+    Ok(())
+}
+
 // ----------------------------------------------------------------------
 // WithdrawFees
 // ----------------------------------------------------------------------
@@ -1357,6 +1492,13 @@ mod tests {
             Err(BridgeError::DuplicateGuardian)
         );
         assert_eq!(check_guardian_keys(&[[1u8; 20], [2u8; 20]]), Ok(()));
+
+        let keys = |n: u8| -> Vec<[u8; 20]> { (1..=n).map(|i| [i; 20]).collect() };
+        assert_eq!(check_guardian_keys(&keys(MAX_GUARDIANS as u8)), Ok(()));
+        assert_eq!(
+            check_guardian_keys(&keys(MAX_GUARDIANS as u8 + 1)),
+            Err(BridgeError::TooManyGuardians)
+        );
     }
 
     #[test]

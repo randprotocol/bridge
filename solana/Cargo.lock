@@ -3474,6 +3474,7 @@ dependencies = [
 name = "rand-bridge"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bincode",
  "borsh 1.8.1",
  "bridge-codec",

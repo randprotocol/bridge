@@ -1219,6 +1219,193 @@ async fn solana_accounts_that_are_not_what_they_claim_are_refused() {
     .contains("from chain 2"));
 }
 
+// A lock since O-4 posts at ["keyed-msg", owner, nonce] and writes that address
+// into the page for its sequence; a lock before it, or through the old
+// instruction, posts at ["msg", sequence]. Every sequence is one or the other.
+
+const SOMEONE_ELSE: &str = "Stake11111111111111111111111111111111111111";
+
+fn page_key(page: u64) -> [u8; 32] {
+    find_program_address(&[b"msg-page", &page.to_le_bytes()], &program_key())
+        .unwrap()
+        .0
+}
+
+fn keyed_key(nonce: u32) -> [u8; 32] {
+    let owner = [7u8; 32];
+    find_program_address(
+        &[b"keyed-msg", &owner, &nonce.to_le_bytes()],
+        &program_key(),
+    )
+    .unwrap()
+    .0
+}
+
+/// A page account with `slots` filled: (sequence, message address).
+fn page_data(page: u64, slots: &[(u64, [u8; 32])]) -> Vec<u8> {
+    let mut d = vec![0u8; 9 + 64 * 32];
+    d[0] = 6;
+    d[1..9].copy_from_slice(&page.to_le_bytes());
+    for (sequence, key) in slots {
+        assert_eq!(sequence / 64, page);
+        let at = 9 + (sequence % 64) as usize * 32;
+        d[at..at + 32].copy_from_slice(key);
+    }
+    d
+}
+
+fn sequences(messages: &[bridge_daemons::message::Observed]) -> Vec<u64> {
+    messages.iter().map(|m| m.sequence).collect()
+}
+
+/// The addresses `message_addresses_on_the_live_program` pins in the program.
+#[test]
+fn the_message_addresses_are_the_programs() {
+    let live =
+        bridge_daemons::config::pubkey32("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu").unwrap();
+    let (keyed, _) =
+        find_program_address(&[b"keyed-msg", &[7u8; 32], &9u32.to_le_bytes()], &live).unwrap();
+    assert_eq!(
+        bs58::encode(keyed).into_string(),
+        "66sKh7F4rtXeHdV1gxeEDG817YVsuVkVSbTajk9yCSFE"
+    );
+    let (page, _) = find_program_address(&[b"msg-page", &2u64.to_le_bytes()], &live).unwrap();
+    assert_eq!(
+        bs58::encode(page).into_string(),
+        "7G8ABWRBDkeEgxTWVoroGLMhKAY4nrXRK9dmq5c6LKxH"
+    );
+}
+
+/// The upgrade itself, from a guardian's seat: old messages at their old
+/// addresses, then keyed ones, with an old-style lock between them.
+#[tokio::test]
+async fn solana_walks_old_and_keyed_messages_in_sequence_order() {
+    let node = solana_node(vec![
+        (config_key(), PROGRAM_B58, config_data(5)),
+        (msg_key(0), PROGRAM_B58, posted(0, &solana_body(0))),
+        (msg_key(1), PROGRAM_B58, posted(1, &solana_body(1))),
+        (keyed_key(1), PROGRAM_B58, posted(2, &solana_body(2))),
+        (msg_key(3), PROGRAM_B58, posted(3, &solana_body(3))),
+        (keyed_key(2), PROGRAM_B58, posted(4, &solana_body(4))),
+        (
+            page_key(0),
+            PROGRAM_B58,
+            page_data(0, &[(2, keyed_key(1)), (4, keyed_key(2))]),
+        ),
+    ]);
+    let source = SolanaSource::new(&sol_cfg(&node.url, 0)).unwrap();
+    let (messages, next) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(sequences(&messages), vec![0, 1, 2, 3, 4]);
+    assert_eq!(next.next_sequence, 5);
+    assert!(node
+        .requests()
+        .iter()
+        .all(|s| s.body["params"][1]["commitment"] == "finalized"));
+}
+
+#[tokio::test]
+async fn solana_keyed_messages_are_found_across_pages() {
+    let node = solana_node(vec![
+        (config_key(), PROGRAM_B58, config_data(65)),
+        (keyed_key(1), PROGRAM_B58, posted(63, &solana_body(63))),
+        (keyed_key(2), PROGRAM_B58, posted(64, &solana_body(64))),
+        (
+            page_key(0),
+            PROGRAM_B58,
+            page_data(0, &[(63, keyed_key(1))]),
+        ),
+        (
+            page_key(1),
+            PROGRAM_B58,
+            page_data(1, &[(64, keyed_key(2))]),
+        ),
+    ]);
+    let source = SolanaSource::new(&sol_cfg(&node.url, 63)).unwrap();
+    let (messages, next) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(sequences(&messages), vec![63, 64]);
+    assert_eq!(next.next_sequence, 65);
+}
+
+/// Anyone can send lamports to an address before the program uses it, and a
+/// page or an old message address that was never used stays that way. Neither
+/// may stop a guardian.
+#[tokio::test]
+async fn solana_lamports_at_unused_addresses_do_not_stop_the_walk() {
+    let node = solana_node(vec![
+        (config_key(), PROGRAM_B58, config_data(2)),
+        (page_key(0), SOMEONE_ELSE, vec![]),
+        (msg_key(0), PROGRAM_B58, posted(0, &solana_body(0))),
+        (msg_key(1), PROGRAM_B58, posted(1, &solana_body(1))),
+    ]);
+    let source = SolanaSource::new(&sol_cfg(&node.url, 0)).unwrap();
+    let (messages, _) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(sequences(&messages), vec![0, 1]);
+
+    let node = solana_node(vec![
+        (config_key(), PROGRAM_B58, config_data(1)),
+        (page_key(0), PROGRAM_B58, page_data(0, &[(0, keyed_key(1))])),
+        (keyed_key(1), PROGRAM_B58, posted(0, &solana_body(0))),
+        (msg_key(0), SOMEONE_ELSE, vec![]),
+    ]);
+    let source = SolanaSource::new(&sol_cfg(&node.url, 0)).unwrap();
+    let (messages, _) = source.poll(&source.start()).await.unwrap();
+    assert_eq!(sequences(&messages), vec![0]);
+}
+
+/// A sequence with nothing behind it yet stops the walk where it is: the
+/// cursor never passes a message it has not read.
+#[tokio::test]
+async fn solana_never_steps_over_a_message_it_cannot_read() {
+    for accounts in [
+        // A slot naming an account the node does not show yet.
+        vec![(page_key(0), PROGRAM_B58, page_data(0, &[(1, keyed_key(1))]))],
+        // No slot, no old account.
+        vec![(page_key(0), PROGRAM_B58, page_data(0, &[(2, keyed_key(1))]))],
+    ] {
+        let mut all = vec![
+            (config_key(), PROGRAM_B58, config_data(3)),
+            (msg_key(0), PROGRAM_B58, posted(0, &solana_body(0))),
+            (keyed_key(1), PROGRAM_B58, posted(2, &solana_body(2))),
+        ];
+        // The slot's message exists only in the second case.
+        if accounts[0].2[9 + 32] != 0 {
+            all.pop();
+        }
+        all.extend(accounts);
+        let node = solana_node(all);
+        let source = SolanaSource::new(&sol_cfg(&node.url, 0)).unwrap();
+        let (messages, next) = source.poll(&source.start()).await.unwrap();
+        assert_eq!(sequences(&messages), vec![0]);
+        assert_eq!(next.next_sequence, 1);
+    }
+}
+
+#[tokio::test]
+async fn solana_pages_that_are_not_what_they_claim_are_refused() {
+    let poll = |page: Vec<u8>, slotted: Option<Vec<u8>>| async move {
+        let mut accounts = vec![
+            (config_key(), PROGRAM_B58, config_data(1)),
+            (page_key(0), PROGRAM_B58, page),
+        ];
+        if let Some(data) = slotted {
+            accounts.push((keyed_key(1), PROGRAM_B58, data));
+        }
+        let node = solana_node(accounts);
+        let source = SolanaSource::new(&sol_cfg(&node.url, 0)).unwrap();
+        format!("{:#}", source.poll(&Cursor::default()).await.unwrap_err())
+    };
+    let mut wrong = page_data(0, &[]);
+    wrong[0] = 5;
+    assert!(poll(wrong, None).await.contains("wrong discriminator"));
+    assert!(poll(vec![6; 40], None).await.contains("wrong length"));
+    assert!(poll(page_data(3, &[]), None).await.contains("holds page 3"));
+    // A slot whose message says it is another sequence.
+    let slotted = page_data(0, &[(0, keyed_key(1))]);
+    assert!(poll(slotted, Some(posted(9, &solana_body(9))))
+        .await
+        .contains("holds sequence 9, expected 0"));
+}
+
 #[test]
 fn a_solana_source_needs_a_valid_program_id() {
     let mut cfg = sol_cfg("http://127.0.0.1:1", 0);

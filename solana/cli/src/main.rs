@@ -43,7 +43,7 @@ struct Cli {
     /// Build the admin instruction with VAULT (a Squads vault) as the signing
     /// admin and print it for a Squads vault transaction; nothing is signed or
     /// sent and no keypair is read. Only for accept-admin, unpause, set-token,
-    /// set-protocol-fee, withdraw-fees and transfer-admin.
+    /// set-protocol-fee, withdraw-fees, transfer-admin and set-pauser.
     #[arg(long = "as", value_name = "VAULT", global = true)]
     as_admin: Option<Pubkey>,
     #[command(subcommand)]
@@ -117,6 +117,25 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         nonce: u32,
     },
+    /// `lock`, with the message account keyed by the signer and NONCE rather than the
+    /// sequence, so that another lock landing first does not fail this one. Needs the
+    /// upgraded program (docs/solana-upgrade.md). A nonce works once per signer.
+    LockKeyed {
+        #[command(flatten)]
+        program: ProgramArg,
+        #[arg(long)]
+        mint: Pubkey,
+        /// Native units of the mint.
+        #[arg(long)]
+        amount: u64,
+        /// The 32-byte `recipient_hash` of the recipient's shielded Rand address, hex.
+        #[arg(long)]
+        rand_recipient: String,
+        #[arg(long, default_value_t = 0)]
+        relayer_fee: u64,
+        #[arg(long)]
+        nonce: u32,
+    },
     /// Halt locks and releases (pauser or admin).
     Pause {
         #[command(flatten)]
@@ -126,6 +145,13 @@ enum Command {
     Unpause {
         #[command(flatten)]
         program: ProgramArg,
+    },
+    /// Move the pause role (admin). The zero pubkey is refused.
+    SetPauser {
+        #[command(flatten)]
+        program: ProgramArg,
+        #[arg(long)]
+        to: Pubkey,
     },
     /// Start an admin handover (admin); `--to 11111111111111111111111111111111` (the zero pubkey) cancels.
     TransferAdmin {
@@ -225,7 +251,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(vault) = cli.as_admin {
         let instruction = admin_instruction(&cli.command, &vault).ok_or_else(|| {
-            anyhow!("--as applies only to accept-admin, unpause, set-token, set-protocol-fee, withdraw-fees and transfer-admin")
+            anyhow!("--as applies only to accept-admin, unpause, set-token, set-protocol-fee, withdraw-fees, transfer-admin and set-pauser")
         })?;
         print!("{}", render_instruction(&instruction));
         return Ok(());
@@ -321,10 +347,50 @@ fn main() -> Result<()> {
                 config.sequence
             );
         }
+        Command::LockKeyed {
+            program,
+            mint,
+            amount,
+            rand_recipient,
+            relayer_fee,
+            nonce,
+        } => {
+            let kp = signer()?;
+            let recipient: [u8; 32] = hex::decode(rand_recipient.trim_start_matches("0x"))
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| anyhow!("--rand-recipient must be 32 bytes of hex"))?;
+            let data = client(&cli.rpc_url)
+                .get_account_data(&config_pda(&program.program).0)
+                .context("config account")?;
+            let config = Config::load(&data).map_err(|e| anyhow!("config account: {e}"))?;
+            let instruction = ix::lock_keyed(
+                &program.program,
+                &kp.pubkey(),
+                &ix::associated_token_address(&kp.pubkey(), &mint),
+                &mint,
+                config.sequence,
+                amount,
+                recipient,
+                relayer_fee,
+                nonce,
+            );
+            let sig = send(&cli.rpc_url, &kp, instruction)?;
+            println!("locked {amount} of {mint} with nonce {nonce} in {sig}");
+        }
         Command::Pause { program } => {
             let kp = signer()?;
             let sig = send(&cli.rpc_url, &kp, ix::pause(&program.program, &kp.pubkey()))?;
             println!("paused in {sig}");
+        }
+        Command::SetPauser { program, to } => {
+            let kp = signer()?;
+            let sig = send(
+                &cli.rpc_url,
+                &kp,
+                ix::set_pauser(&program.program, &kp.pubkey(), &to),
+            )?;
+            println!("pauser moved to {to} in {sig}");
         }
         Command::Unpause { program } => {
             let kp = signer()?;
@@ -664,6 +730,7 @@ fn admin_instruction(command: &Command, admin: &Pubkey) -> Option<Instruction> {
             amount,
         } => ix::withdraw_fees(&program.program, admin, mint, to, *amount),
         Command::TransferAdmin { program, to } => ix::transfer_admin(&program.program, admin, to),
+        Command::SetPauser { program, to } => ix::set_pauser(&program.program, admin, to),
         _ => return None,
     })
 }
@@ -768,13 +835,14 @@ mod tests {
         assert!(parse_guardians(&[]).is_err());
     }
 
-    const ADMIN_COMMANDS: [&str; 6] = [
+    const ADMIN_COMMANDS: [&str; 7] = [
         "accept-admin",
         "unpause",
         "set-token",
         "set-protocol-fee",
         "withdraw-fees",
         "transfer-admin",
+        "set-pauser",
     ];
 
     fn parse(vault: &Pubkey, program: &Pubkey, command: &str) -> Cli {
@@ -788,7 +856,7 @@ mod tests {
             "set-token" => args.extend(["--mint", &mint, "--per-transfer-cap", "5"]),
             "set-protocol-fee" => args.extend(["--bps", "20"]),
             "withdraw-fees" => args.extend(["--mint", &mint, "--to", &to, "--amount", "7"]),
-            "transfer-admin" => args.extend(["--to", &to]),
+            "transfer-admin" | "set-pauser" => args.extend(["--to", &to]),
             _ => {}
         }
         Cli::try_parse_from(args).unwrap()

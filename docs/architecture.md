@@ -481,7 +481,8 @@ checks the program owns the account and the discriminator matches before deseria
 | custody authority | `["authority"]` | none (no data) | the SPL signer for custody accounts |
 | custody | `["custody", mint]` | SPL token account | owned by the authority PDA |
 | `Consumed` | `["spent", digest]` | 4 | existence marks the digest consumed |
-| `PostedMessage` | `["msg", sequence u64 LE]` | 5 | the full body bytes of one outbound message |
+| `PostedMessage` | `["msg", sequence u64 LE]`, or `["keyed-msg", owner, nonce u32 LE]` from `LockKeyed` | 5 | the full body bytes of one outbound message |
+| message page | `["msg-page", sequence / 64, u64 LE]` | 6 | the addresses of the keyed messages of 64 sequences, by `sequence % 64`; zeroes elsewhere |
 
 Every account passed to an instruction is re-derived and compared; the wrong one fails with
 `InvalidPda`, or `InvalidAta` for the two associated token accounts a release pays into. The
@@ -495,12 +496,14 @@ SPL-owned, authority equal to the authority PDA, mint equal to the named mint.
 | `Initialize { admin, pauser, rand_emitter, guardians }` | the program's **upgrade authority** | one-shot; creates `Config` and guardian set 0 |
 | `SetToken { enabled, per_transfer_cap, daily_cap }` | admin | creates the registry and the custody token account the first time |
 | `Lock { amount, rand_recipient, relayer_fee, nonce }` | token owner | writes a `PostedMessage` at the config's current `sequence` |
+| `LockKeyed { amount, rand_recipient, relayer_fee, nonce }` | token owner | as `Lock`, with the message at `(owner, nonce)` and its address in the page of the sequence it is assigned |
 | `Release { attestation }` | relayer | pays into the recipient's and relayer's associated token accounts |
 | `GuardianSetUpgrade { attestation }` | any payer | allowed while paused |
 | `Pause` | pauser or admin | |
 | `Unpause` | admin | |
 | `TransferAdmin { to }` | admin | `to == default` cancels |
 | `AcceptAdmin` | pending admin | |
+| `SetPauser { pauser }` | admin | never to the zero key |
 | `SetProtocolFee { bps }` | admin | at most 100 bps (§3.5); `Initialize` sets 10 |
 | `WithdrawFees { amount }` | admin | pays `accrued_fees` out of the custody token account; never custody; allowed while paused |
 
@@ -517,9 +520,17 @@ made immutable before initialisation can never be initialised.
   therefore tops up, allocates and assigns instead when an account already holds lamports; it
   still requires the account to be empty and system-owned.
 - **Two locks in the same slot** name the same `["msg", sequence]` PDA. The second fails with
-  `InvalidPda`, nothing is locked, and the client re-reads `sequence` and retries.
-- **Compute budget.** Five recoveries cost about 125k compute units; clients prepend a
-  compute-unit-limit instruction.
+  `InvalidPda`, nothing is locked, and the client re-reads `sequence` and retries; dust locks can
+  force that at about 0.0023 SOL of rent each. `LockKeyed` removes the race. A transaction must
+  name every account it writes, so any account derived from the sequence would bring it back:
+  the page is shared by 64 sequences for that reason, and a keyed lock fails only if the sequence
+  leaves its page in flight. Guardians read the page first, then `["msg", sequence]`; design and
+  upgrade order in `docs/solana-upgrade.md`.
+- **Compute budget.** One recovery costs 25k compute units, so a seven-signature release at
+  `n = 10` costs 220,928 to 232,928 as measured on sBPF v0; clients prepend a compute-unit-limit instruction.
+  `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot
+  grow, so they are still searched. `Release` reads the clock through the syscall, which keeps
+  the seven-signature transaction at 1,231 of 1,232 bytes (§12, guardian-set size).
 - **`u64` native amounts.** Denormalising an 18-decimal mint's amount can overflow `u64` and is
   rejected as `AmountOverflow`. The same error refuses a lock whose *attested* amount exceeds
   `u64::MAX` (§3.4), mirroring the EVM `AmountTooLarge`.
@@ -915,18 +926,23 @@ fork on every bridged chain (the rename already was one: chain 10).
   comparison assumes the TVM's `ecrecover` returns the `0x41`-prefixed address form the migration
   stores, and a failure there fails closed (every release reverts `WrongGuardian`). The Nile
   round trip in the deployment plan is where that assumption is tested before mainnet.
-- **Guardian-set size is bounded by transport, not by any verifier.** `n_sigs` is one byte (255
-  max) and EVM gas is the only on-chain limit there, but a Solana release must fit a 1,232-byte
-  transaction: about seven signatures with the current account list, so `n <= 10` (the rotation
-  itself fits to `n = 11`), relaxable to roughly 20 with address lookup tables. At seven
-  signatures the legacy transaction has no room left for the compute-budget instruction the
-  recoveries need (1,224 of 1,232 bytes before its 40), so `n >= 9` already requires a v0
-  transaction with a lookup table; the launch set (`n = 6`, five signatures) fits with room.
-  Nothing on-chain refuses a rotation to a set too large to ever release under: that would
-  freeze Solana custody until a program upgrade. Rand's 16 KiB
-  attestation cap admits about 253. A rotation past the tightest chain's bound would be applied
-  there and be unsubmittable elsewhere, so the guardian sets would diverge per chain; governance
-  keeps `n` small (launch: 6) as a matter of policy.
+- **Guardian-set size has a different bound on each verifier.** Solana's `MAX_GUARDIANS` is 10:
+  at `n = 10` a seven-signature release with its compute-unit limit is 1,231 of 1,232 bytes and a
+  rotation to another ten keys 1,139 (`solana/programs/rand-bridge/tests/sbf_compute.rs`), and at
+  `n = 11` the eight-signature release no longer fits. Solana refuses a larger set
+  (`TooManyGuardians`, also at `Initialize`) rather than install one it could never release under,
+  which would freeze custody until a program upgrade. The EVM and Tron endpoints bound the set at
+  255, the most a one-byte count holds, with gas the only other limit, and Rand's 16 KiB
+  attestation cap admits about 253. **The parity rule, every verifier or none, is therefore not
+  met: this is a knowing exception, pending the owner's decision,** taken because the EVM contracts
+  cannot be upgraded. The 10 is also held off chain: `rand-bridge-gov` refuses to build or verify a
+  larger rotation, and `deploy/lib.sh` a larger deployment. A larger rotation built any other way
+  would apply on EVM and Rand and be refused on Solana. **Solana's releases would then stop**: the
+  relayer stamps each burn with the set it runs, Solana does not have that set, and every release
+  fails until a program upgrade raises the bound and the same attestation is applied. Solana's
+  custody is unreachable meanwhile, which is the freeze this bound avoids only so far as the tool
+  is used. An address lookup table would take a Solana release to roughly `n = 20`; the relayer
+  does not use one, and raising the bound needs that first.
 - **A deposit note's commitment can be front-run.** Every commitment input is public in a pending
   `BridgeAttest`, so anyone can land a conflicting commitment and fail the attest with
   `CommitmentExists`. The attestation's digest stays unspent and `deposit_note` recomputes the
