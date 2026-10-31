@@ -49,6 +49,63 @@ pub const DISCRIMINATOR_CONSUMED: u8 = 4;
 /// Leading discriminator byte of a [`PostedMessage`] account.
 pub const DISCRIMINATOR_POSTED_MESSAGE: u8 = 5;
 
+/// Leading discriminator byte of a message page; see [`MESSAGE_PAGE_LEN`].
+pub const DISCRIMINATOR_MESSAGE_PAGE: u8 = 6;
+
+/// How many sequences one message page indexes. A lock names the page of the
+/// sequence it read, so it fails only if that sequence moves past the end of
+/// the page while it is in flight. Part of the on-chain format, repeated in
+/// the daemons' Solana source: change both or neither, and never for pages
+/// that exist.
+pub const MESSAGE_PAGE_SLOTS: u64 = 64;
+
+/// A message page: the discriminator, the page number as a little-endian
+/// `u64`, then [`MESSAGE_PAGE_SLOTS`] addresses of 32 bytes each. Slot
+/// `sequence % MESSAGE_PAGE_SLOTS` holds the address of the message a
+/// `LockKeyed` posted at that sequence; all zeroes means none did.
+///
+/// It is read and written in place rather than through Borsh: 2 KiB would not
+/// survive a trip through the 4 KiB SBF stack frame.
+pub const MESSAGE_PAGE_LEN: usize = MESSAGE_PAGE_HEADER + MESSAGE_PAGE_SLOTS as usize * 32;
+const MESSAGE_PAGE_HEADER: usize = 1 + 8;
+
+/// The page that indexes `sequence`.
+pub const fn message_page(sequence: u64) -> u64 {
+    sequence / MESSAGE_PAGE_SLOTS
+}
+
+/// Starts page `page` in a newly allocated, zeroed account.
+pub fn init_message_page(data: &mut [u8], page: u64) -> Result<(), BridgeError> {
+    if data.len() != MESSAGE_PAGE_LEN {
+        return Err(BridgeError::Truncated);
+    }
+    data[0] = DISCRIMINATOR_MESSAGE_PAGE;
+    data[1..MESSAGE_PAGE_HEADER].copy_from_slice(&page.to_le_bytes());
+    Ok(())
+}
+
+/// Records `message` as the account of `sequence`, in the page that indexes it.
+/// A sequence is assigned once, so a slot already written is refused.
+pub fn set_message_page_slot(
+    data: &mut [u8],
+    sequence: u64,
+    message: &Pubkey,
+) -> Result<(), BridgeError> {
+    if data.len() != MESSAGE_PAGE_LEN
+        || data[0] != DISCRIMINATOR_MESSAGE_PAGE
+        || data[1..MESSAGE_PAGE_HEADER] != message_page(sequence).to_le_bytes()
+    {
+        return Err(BridgeError::InvalidPda);
+    }
+    let start = MESSAGE_PAGE_HEADER + (sequence % MESSAGE_PAGE_SLOTS) as usize * 32;
+    let slot = &mut data[start..start + 32];
+    if slot.iter().any(|byte| *byte != 0) {
+        return Err(BridgeError::InvalidPda);
+    }
+    slot.copy_from_slice(message.as_ref());
+    Ok(())
+}
+
 /// PDA seed prefixes. Kept in one place so the program and its clients
 /// derive the same addresses.
 pub mod seeds {
@@ -70,6 +127,12 @@ pub mod seeds {
     /// Seed prefix of a [`super::PostedMessage`], followed by the sequence
     /// number as a little-endian `u64`.
     pub const MSG: &[u8] = b"msg";
+    /// Seed prefix of a [`super::PostedMessage`] posted by `LockKeyed`,
+    /// followed by the owner and the nonce as a little-endian `u32`.
+    pub const KEYED_MSG: &[u8] = b"keyed-msg";
+    /// Seed prefix of a message page, followed by the page number as a
+    /// little-endian `u64`.
+    pub const MESSAGE_PAGE: &[u8] = b"msg-page";
 }
 
 /// The bridge's singleton configuration account.
@@ -244,6 +307,20 @@ pub fn msg_pda(program: &Pubkey, sequence: u64) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[seeds::MSG, &sequence.to_le_bytes()], program)
 }
 
+/// A message posted by `LockKeyed`: seeds `["keyed-msg", owner, nonce as LE
+/// u32]`. Only `owner` can create it, so nobody can take the address from them.
+pub fn keyed_msg_pda(program: &Pubkey, owner: &Pubkey, nonce: u32) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[seeds::KEYED_MSG, owner.as_ref(), &nonce.to_le_bytes()],
+        program,
+    )
+}
+
+/// A message page: seeds `["msg-page", page as LE u64]`.
+pub fn message_page_pda(program: &Pubkey, page: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[seeds::MESSAGE_PAGE, &page.to_le_bytes()], program)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +365,53 @@ mod tests {
         assert_eq!(custody_pda(&p, &mint), expect(&[b"custody", mint.as_ref()]));
         assert_eq!(spent_pda(&p, &digest), expect(&[b"spent", &digest]));
         assert_eq!(msg_pda(&p, 42), expect(&[b"msg", &42u64.to_le_bytes()]));
+        assert_eq!(
+            keyed_msg_pda(&p, &mint, 9),
+            expect(&[b"keyed-msg", mint.as_ref(), &9u32.to_le_bytes()])
+        );
+        assert_eq!(
+            message_page_pda(&p, 2),
+            expect(&[b"msg-page", &2u64.to_le_bytes()])
+        );
+    }
+
+    /// The addresses on the live program id, which
+    /// `the_message_addresses_are_the_programs` in the daemons' tests repeats.
+    #[test]
+    fn message_addresses_on_the_live_program() {
+        let live = Pubkey::from_str_const("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu");
+        let owner = Pubkey::new_from_array([7u8; 32]);
+        assert_eq!(
+            keyed_msg_pda(&live, &owner, 9).0.to_string(),
+            "66sKh7F4rtXeHdV1gxeEDG817YVsuVkVSbTajk9yCSFE"
+        );
+        assert_eq!(
+            message_page_pda(&live, 2).0.to_string(),
+            "7G8ABWRBDkeEgxTWVoroGLMhKAY4nrXRK9dmq5c6LKxH"
+        );
+    }
+
+    #[test]
+    fn message_pages_index_by_sequence() {
+        let message = Pubkey::new_from_array([3u8; 32]);
+        let mut data = vec![0u8; MESSAGE_PAGE_LEN];
+        assert_eq!(MESSAGE_PAGE_LEN, 2057);
+        init_message_page(&mut data, 2).expect("init");
+        set_message_page_slot(&mut data, 129, &message).expect("in the page");
+        assert_eq!(&data[..9], &[6, 2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&data[9 + 32..9 + 64], message.as_ref());
+        assert!(data[9..9 + 32].iter().all(|b| *b == 0));
+
+        // Once only, and only in its own page.
+        let refused = Err(BridgeError::InvalidPda);
+        assert_eq!(set_message_page_slot(&mut data, 129, &message), refused);
+        assert_eq!(set_message_page_slot(&mut data, 127, &message), refused);
+        assert_eq!(set_message_page_slot(&mut data, 192, &message), refused);
+        assert_eq!(set_message_page_slot(&mut [0u8; 9], 0, &message), refused);
+        assert_eq!(
+            init_message_page(&mut [0u8; 9], 0),
+            Err(BridgeError::Truncated)
+        );
     }
 
     #[test]
@@ -295,6 +419,12 @@ mod tests {
         let p = program();
         assert_ne!(guardian_pda(&p, 0).0, guardian_pda(&p, 1).0);
         assert_ne!(msg_pda(&p, 0).0, msg_pda(&p, 1).0);
+        let owner = Pubkey::new_from_array([4u8; 32]);
+        assert_ne!(
+            keyed_msg_pda(&p, &owner, 0).0,
+            keyed_msg_pda(&p, &owner, 1).0
+        );
+        assert_ne!(keyed_msg_pda(&p, &owner, 0).0, keyed_msg_pda(&p, &p, 0).0);
         assert_ne!(config_pda(&p).0, authority_pda(&p).0);
         let mint = Pubkey::new_from_array([3u8; 32]);
         assert_ne!(token_pda(&p, &mint).0, custody_pda(&p, &mint).0);
@@ -394,8 +524,9 @@ mod tests {
             DISCRIMINATOR_TOKEN_REGISTRY,
             DISCRIMINATOR_CONSUMED,
             DISCRIMINATOR_POSTED_MESSAGE,
+            DISCRIMINATOR_MESSAGE_PAGE,
         ];
-        assert_eq!(all, [1, 2, 3, 4, 5]);
+        assert_eq!(all, [1, 2, 3, 4, 5, 6]);
         assert_eq!(CHAIN_ID, bridge_codec::CHAIN_SOLANA);
         assert_eq!(CONSISTENCY_LEVEL, 1);
     }

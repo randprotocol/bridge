@@ -117,6 +117,25 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         nonce: u32,
     },
+    /// `lock`, with the message account keyed by the signer and NONCE rather than the
+    /// sequence, so that another lock landing first does not fail this one. Needs the
+    /// upgraded program (docs/solana-upgrade.md). A nonce works once per signer.
+    LockKeyed {
+        #[command(flatten)]
+        program: ProgramArg,
+        #[arg(long)]
+        mint: Pubkey,
+        /// Native units of the mint.
+        #[arg(long)]
+        amount: u64,
+        /// The 32-byte `recipient_hash` of the recipient's shielded Rand address, hex.
+        #[arg(long)]
+        rand_recipient: String,
+        #[arg(long, default_value_t = 0)]
+        relayer_fee: u64,
+        #[arg(long)]
+        nonce: u32,
+    },
     /// Halt locks and releases (pauser or admin).
     Pause {
         #[command(flatten)]
@@ -327,6 +346,37 @@ fn main() -> Result<()> {
                 "locked {amount} of {mint} as sequence {} in {sig}",
                 config.sequence
             );
+        }
+        Command::LockKeyed {
+            program,
+            mint,
+            amount,
+            rand_recipient,
+            relayer_fee,
+            nonce,
+        } => {
+            let kp = signer()?;
+            let recipient: [u8; 32] = hex::decode(rand_recipient.trim_start_matches("0x"))
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| anyhow!("--rand-recipient must be 32 bytes of hex"))?;
+            let data = client(&cli.rpc_url)
+                .get_account_data(&config_pda(&program.program).0)
+                .context("config account")?;
+            let config = Config::load(&data).map_err(|e| anyhow!("config account: {e}"))?;
+            let instruction = ix::lock_keyed(
+                &program.program,
+                &kp.pubkey(),
+                &ix::associated_token_address(&kp.pubkey(), &mint),
+                &mint,
+                config.sequence,
+                amount,
+                recipient,
+                relayer_fee,
+                nonce,
+            );
+            let sig = send(&cli.rpc_url, &kp, instruction)?;
+            println!("locked {amount} of {mint} with nonce {nonce} in {sig}");
         }
         Command::Pause { program } => {
             let kp = signer()?;

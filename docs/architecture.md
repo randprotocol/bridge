@@ -481,7 +481,8 @@ checks the program owns the account and the discriminator matches before deseria
 | custody authority | `["authority"]` | none (no data) | the SPL signer for custody accounts |
 | custody | `["custody", mint]` | SPL token account | owned by the authority PDA |
 | `Consumed` | `["spent", digest]` | 4 | existence marks the digest consumed |
-| `PostedMessage` | `["msg", sequence u64 LE]` | 5 | the full body bytes of one outbound message |
+| `PostedMessage` | `["msg", sequence u64 LE]`, or `["keyed-msg", owner, nonce u32 LE]` from `LockKeyed` | 5 | the full body bytes of one outbound message |
+| message page | `["msg-page", sequence / 64, u64 LE]` | 6 | the addresses of the keyed messages of 64 sequences, by `sequence % 64`; zeroes elsewhere |
 
 Every account passed to an instruction is re-derived and compared; the wrong one fails with
 `InvalidPda`, or `InvalidAta` for the two associated token accounts a release pays into. The
@@ -495,6 +496,7 @@ SPL-owned, authority equal to the authority PDA, mint equal to the named mint.
 | `Initialize { admin, pauser, rand_emitter, guardians }` | the program's **upgrade authority** | one-shot; creates `Config` and guardian set 0 |
 | `SetToken { enabled, per_transfer_cap, daily_cap }` | admin | creates the registry and the custody token account the first time |
 | `Lock { amount, rand_recipient, relayer_fee, nonce }` | token owner | writes a `PostedMessage` at the config's current `sequence` |
+| `LockKeyed { amount, rand_recipient, relayer_fee, nonce }` | token owner | as `Lock`, with the message at `(owner, nonce)` and its address in the page of the sequence it is assigned |
 | `Release { attestation }` | relayer | pays into the recipient's and relayer's associated token accounts |
 | `GuardianSetUpgrade { attestation }` | any payer | allowed while paused |
 | `Pause` | pauser or admin | |
@@ -518,7 +520,12 @@ made immutable before initialisation can never be initialised.
   therefore tops up, allocates and assigns instead when an account already holds lamports; it
   still requires the account to be empty and system-owned.
 - **Two locks in the same slot** name the same `["msg", sequence]` PDA. The second fails with
-  `InvalidPda`, nothing is locked, and the client re-reads `sequence` and retries.
+  `InvalidPda`, nothing is locked, and the client re-reads `sequence` and retries; dust locks can
+  force that at about 0.0023 SOL of rent each. `LockKeyed` removes the race. A transaction must
+  name every account it writes, so any account derived from the sequence would bring it back:
+  the page is shared by 64 sequences for that reason, and a keyed lock fails only if the sequence
+  leaves its page in flight. Guardians read the page first, then `["msg", sequence]`; design and
+  upgrade order in `docs/solana-upgrade.md`.
 - **Compute budget.** One recovery costs 25k compute units, so a seven-signature release at
   `n = 10` costs about 227k in all; clients prepend a compute-unit-limit instruction.
   `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot

@@ -358,3 +358,29 @@ async fn lock_fits_the_default_compute_limit() {
     let (_, units) = r.run("lock", ix).await;
     assert!(units < 200_000);
 }
+
+/// The longest keyed path: the first lock of a page creates it as well.
+#[tokio::test]
+#[ignore = "needs the SBF binary: see the module docs"]
+async fn keyed_lock_fits_the_default_compute_limit() {
+    let mut r = rig().await;
+    let build = |r: &Rig, sequence, nonce| {
+        bridge_ix::lock_keyed(
+            &r.program,
+            &r.user.pubkey(),
+            &bridge_ix::associated_token_address(&r.user.pubkey(), &r.mint),
+            &r.mint,
+            sequence,
+            1_000_000,
+            [0x44; 32],
+            0,
+            nonce,
+        )
+    };
+    let ix = build(&r, 0, 1);
+    let (_, units) = r.run("keyed lock, new page", ix).await;
+    assert!(units < 200_000);
+    let ix = build(&r, 1, 2);
+    let (_, units) = r.run("keyed lock, page exists", ix).await;
+    assert!(units < 200_000);
+}

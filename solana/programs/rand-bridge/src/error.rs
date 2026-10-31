@@ -172,6 +172,10 @@ pub enum BridgeError {
     /// EVM endpoint's, whose bound is the 255 a one-byte count allows.
     #[error("too many guardians")]
     TooManyGuardians,
+    /// `LockKeyed` with a nonce this owner has already used. Solana-only: the
+    /// EVM endpoints echo a nonce and do not key anything by it.
+    #[error("nonce already used")]
+    NonceUsed,
 }
 
 impl BridgeError {
@@ -223,6 +227,7 @@ impl BridgeError {
             ProtocolFeeTooHigh,
             InsufficientFees,
             TooManyGuardians,
+            NonceUsed,
         ]
     };
 
@@ -325,13 +330,14 @@ mod tests {
             ProtocolFeeTooHigh => 38,
             InsufficientFees => 39,
             TooManyGuardians => 40,
+            NonceUsed => 41,
         }
     }
 
     /// The highest code `declared_code` hands out. If a variant is added
     /// there but not to `BridgeError::ALL`, this stays ahead of
     /// `ALL.len()` and the test below catches it.
-    const HIGHEST_DECLARED_CODE: u32 = 40;
+    const HIGHEST_DECLARED_CODE: u32 = 41;
 
     #[test]
     fn every_variant_is_listed_once_and_round_trips() {

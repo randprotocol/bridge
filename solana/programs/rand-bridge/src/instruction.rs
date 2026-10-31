@@ -19,7 +19,8 @@ use solana_program::sysvar;
 use solana_sdk_ids::{bpf_loader_upgradeable, system_program};
 
 use crate::state::{
-    authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, spent_pda, token_pda,
+    authority_pda, config_pda, custody_pda, guardian_pda, keyed_msg_pda, message_page,
+    message_page_pda, msg_pda, spent_pda, token_pda,
 };
 
 /// A decoded instruction for the bridge program.
@@ -97,6 +98,21 @@ pub enum BridgeInstruction {
     SetPauser {
         /// The new pauser.
         pauser: Pubkey,
+    },
+    /// `Lock`, with the message account keyed by `(owner, nonce)` rather than
+    /// the sequence, so a lock cannot be made to fail by another landing
+    /// first. Assigns the sequence here and records the message in the page
+    /// that indexes it.
+    LockKeyed {
+        /// Amount in the mint's own units; the sub-attestable remainder
+        /// stays with the caller.
+        amount: u64,
+        /// The 32-byte Rand-side recipient; must not be all zeroes.
+        rand_recipient: [u8; 32],
+        /// Relayer fee, quoted in the mint's own units like `amount`.
+        relayer_fee: u64,
+        /// Unique per owner: a second lock with it fails with `NonceUsed`.
+        nonce: u32,
     },
 }
 
@@ -242,6 +258,53 @@ pub fn lock(
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
             AccountMeta::new_readonly(sysvar::clock::id(), false),
+        ],
+    )
+}
+
+/// `LockKeyed`.
+///
+/// `sequence` is the config's sequence as the client read it. It only selects
+/// the message page, so it can be stale by anything short of the end of that
+/// page; past it the instruction fails with `InvalidPda`, nothing moves, and
+/// the client re-reads the config.
+///
+/// Accounts 0 to 9 are `Lock`'s, except:
+/// 6. `[writable]` message PDA `["keyed-msg", owner, nonce LE]` — created.
+/// 10. `[writable]` message page PDA `["msg-page", sequence / 64 LE]` —
+///     created if missing, at the owner's expense.
+#[allow(clippy::too_many_arguments)]
+pub fn lock_keyed(
+    program: &Pubkey,
+    owner: &Pubkey,
+    owner_token_account: &Pubkey,
+    mint: &Pubkey,
+    sequence: u64,
+    amount: u64,
+    rand_recipient: [u8; 32],
+    relayer_fee: u64,
+    nonce: u32,
+) -> Instruction {
+    Instruction::new_with_borsh(
+        *program,
+        &BridgeInstruction::LockKeyed {
+            amount,
+            rand_recipient,
+            relayer_fee,
+            nonce,
+        },
+        vec![
+            AccountMeta::new(*owner, true),
+            AccountMeta::new(*owner_token_account, false),
+            AccountMeta::new(config_pda(program).0, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new(token_pda(program, mint).0, false),
+            AccountMeta::new(custody_pda(program, mint).0, false),
+            AccountMeta::new(keyed_msg_pda(program, owner, nonce).0, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::clock::id(), false),
+            AccountMeta::new(message_page_pda(program, message_page(sequence)).0, false),
         ],
     )
 }
@@ -522,6 +585,12 @@ mod tests {
             BridgeInstruction::SetPauser {
                 pauser: Pubkey::new_from_array([12u8; 32]),
             },
+            BridgeInstruction::LockKeyed {
+                amount: 13,
+                rand_recipient: [14u8; 32],
+                relayer_fee: 15,
+                nonce: 16,
+            },
         ];
         for (tag, ix) in all.iter().enumerate() {
             let bytes = borsh::to_vec(ix).expect("serializes");
@@ -563,6 +632,11 @@ mod tests {
         let ix = lock(&program, &signer, &signer, &mint, 7, 1, [1u8; 32], 0, 0);
         assert_eq!(ix.accounts.len(), 10);
         assert_eq!(ix.accounts[6].pubkey, msg_pda(&program, 7).0);
+
+        let ix = lock_keyed(&program, &signer, &signer, &mint, 70, 1, [1u8; 32], 0, 9);
+        assert_eq!(ix.accounts.len(), 11);
+        assert_eq!(ix.accounts[6].pubkey, keyed_msg_pda(&program, &signer, 9).0);
+        assert_eq!(ix.accounts[10].pubkey, message_page_pda(&program, 1).0);
 
         let ix = release(&program, &signer, &mint, 2, &signer, &[5u8; 32], vec![]);
         assert_eq!(ix.accounts.len(), 12);

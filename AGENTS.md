@@ -282,7 +282,8 @@ read it before touching anything there, it is worked on by many sessions in para
     #2 testnet round trips (closed 2026-09-28 as not planned: mainnet launched directly, the round
     trips and the rotation ran there) · #3 guardian + relayer daemons (closed 2026-09-28: live since
     09-20, every submit path exercised) · #6 sub-unit dust O-5 (closed 2026-09-28: fullnode `fec2947`
-    refuses a burn that is not a whole release unit) · **open:** #5 Solana lows O-1..O-4 (none fixed) ·
+    refuses a burn that is not a whole release unit) · **open:** #5 Solana lows O-1..O-4 (fixed in
+    code, not deployed: `docs/solana-upgrade.md`, daemons before the program) ·
     #4 external-audit gate
   - `randprotocol/fullnode` #1 genesis `check_bridge` guardian-count bound (closed, `544926c`) ·
     #2 no forward bound on block timestamps · #3 deposit-note commitment front-running (closed) ·
@@ -343,6 +344,13 @@ Parity across all verifiers is the security property; change these everywhere or
 - `BridgeBurn` = `{ asset_bundle, asset: u32, amount: u64, relayer_fee: u64, to_chain, to }`;
   burn checks: asset match, `burn == amount`, zero asset-bundle fee, disjoint
   nullifiers/commitments, zk proof last; `check_burn` screens the recipient (zero / EVM padding).
+
+- **Solana messages live at two addresses.** `["msg", sequence]` from `Lock`, and
+  `["keyed-msg", owner, nonce]` from `LockKeyed`, found through `["msg-page", sequence / 64]`. Do
+  not add an account derived from the sequence to a lock (a transaction must name it, which is the
+  griefing). `MESSAGE_PAGE_SLOTS` is repeated in `daemons/src/sources/solana.rs`, and no struct in
+  `state.rs` may grow, because `load` refuses trailing bytes. Upgrade order:
+  `docs/solana-upgrade.md`.
 
 ## Repo workflow traps
 

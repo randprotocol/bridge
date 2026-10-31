@@ -18,8 +18,9 @@ use rand_bridge::error::BridgeError;
 use rand_bridge::instruction as bridge_ix;
 use rand_bridge::processor::process_instruction;
 use rand_bridge::state::{
-    authority_pda, config_pda, custody_pda, guardian_pda, msg_pda, spent_pda, token_pda,
-    BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry, MAX_GUARDIANS,
+    authority_pda, config_pda, custody_pda, guardian_pda, keyed_msg_pda, message_page_pda, msg_pda,
+    spent_pda, token_pda, BridgeAccount, Config, GuardianSetAccount, PostedMessage, TokenRegistry,
+    MAX_GUARDIANS, MESSAGE_PAGE_LEN, MESSAGE_PAGE_SLOTS,
 };
 use serde_json::Value;
 use sha3::{Digest as _, Keccak256};
@@ -1651,6 +1652,159 @@ async fn admin_moves_the_pauser() {
         .await
         .expect("the new pauser pauses");
     assert!(b.config().await.paused);
+}
+
+impl Bridge {
+    /// A `LockKeyed` as a client builds it from the sequence it read.
+    fn lock_keyed_ix(&self, owner: &Keypair, read_sequence: u64, nonce: u32) -> Instruction {
+        bridge_ix::lock_keyed(
+            &self.program,
+            &owner.pubkey(),
+            &bridge_ix::associated_token_address(&owner.pubkey(), &self.mint),
+            &self.mint,
+            read_sequence,
+            1_000_000,
+            [0x44; 32],
+            0,
+            nonce,
+        )
+    }
+
+    async fn funded_owner(&mut self) -> Keypair {
+        let owner = Keypair::new();
+        self.fund(&owner.pubkey());
+        self.put_ata(&owner.pubkey(), 100_000_000);
+        owner
+    }
+
+    async fn page(&mut self, page: u64) -> Vec<u8> {
+        let account = self.account(message_page_pda(&self.program, page).0);
+        account.await.expect("the page exists").data
+    }
+}
+
+/// The griefing O-4 is about: everything built on one read of the sequence.
+/// `Lock` loses to whichever lands first, `LockKeyed` does not, and each is
+/// given the next sequence inside the instruction.
+#[tokio::test]
+async fn keyed_locks_built_on_one_sequence_all_land() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let (griefer, honest, other) = (
+        b.funded_owner().await,
+        b.funded_owner().await,
+        b.funded_owner().await,
+    );
+
+    let read = b.config().await.sequence;
+    let griefer_ata = bridge_ix::associated_token_address(&griefer.pubkey(), &b.mint);
+    let mint = b.mint;
+    let lock = |owner: &Keypair, ata: &Pubkey, nonce| {
+        bridge_ix::lock(
+            &program,
+            &owner.pubkey(),
+            ata,
+            &mint,
+            read,
+            1_000_000,
+            [0x44; 32],
+            0,
+            nonce,
+        )
+    };
+    b.send(lock(&griefer, &griefer_ata, 1), &[&griefer])
+        .await
+        .expect("the griefer's dust lock lands first");
+    let honest_ata = bridge_ix::associated_token_address(&honest.pubkey(), &mint);
+    assert_bridge_error(
+        b.send(lock(&honest, &honest_ata, 2), &[&honest]).await,
+        BridgeError::InvalidPda,
+    );
+
+    let ix = b.lock_keyed_ix(&honest, read, 2);
+    b.send(ix, &[&honest]).await.expect("keyed lock lands");
+    let ix = b.lock_keyed_ix(&other, read, 2);
+    b.send(ix, &[&other]).await.expect("so does another's");
+    assert_eq!(b.config().await.sequence, read + 3);
+    assert_eq!(b.custody_balance().await, 3_000_000);
+
+    // A guardian's view: the sequence inside the message is the one assigned,
+    // the page names the address, and the sequence `Lock` used has no slot.
+    let page = b.page(0).await;
+    assert_eq!(page.len(), MESSAGE_PAGE_LEN);
+    let slot = |s: u64| &page[9 + s as usize * 32..9 + (s as usize + 1) * 32];
+    assert_eq!(slot(read), &[0u8; 32]);
+    let first = keyed_msg_pda(&program, &honest.pubkey(), 2).0;
+    let second = keyed_msg_pda(&program, &other.pubkey(), 2).0;
+    assert_eq!(slot(read + 1), first.as_ref());
+    assert_eq!(slot(read + 2), second.as_ref());
+    for (key, sequence) in [(first, read + 1), (second, read + 2)] {
+        let posted: PostedMessage = b.state(key).await;
+        assert_eq!(posted.sequence, sequence);
+        let parsed = Body::decode(&posted.body).expect("a body");
+        assert_eq!((parsed.sequence, parsed.nonce), (sequence, 2));
+    }
+    let legacy: PostedMessage = b.state(msg_pda(&program, read).0).await;
+    assert_eq!(legacy.sequence, read);
+}
+
+#[tokio::test]
+async fn keyed_lock_refuses_a_used_nonce_and_a_stale_page() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let owner = b.funded_owner().await;
+
+    let ix = b.lock_keyed_ix(&owner, 0, 5);
+    b.send(ix, &[&owner]).await.expect("first");
+    let ix = b.lock_keyed_ix(&owner, 1, 5);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::NonceUsed);
+
+    // Someone else's address, and a page that does not index this sequence.
+    let other = b.funded_owner().await;
+    let mut ix = b.lock_keyed_ix(&owner, 1, 6);
+    ix.accounts[6].pubkey = keyed_msg_pda(&program, &other.pubkey(), 6).0;
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::InvalidPda);
+    let ix = b.lock_keyed_ix(&owner, MESSAGE_PAGE_SLOTS, 7);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::InvalidPda);
+
+    // The checks before the message are `Lock`'s.
+    assert_eq!(b.custody_balance().await, 1_000_000);
+    let ix = bridge_ix::pause(&program, &b.pauser.pubkey());
+    b.pauser_send(ix).await.expect("pause");
+    let ix = b.lock_keyed_ix(&owner, 1, 8);
+    assert_bridge_error(b.send(ix, &[&owner]).await, BridgeError::IsPaused);
+}
+
+/// Sequences walk across a page boundary, and a lamport sent ahead of time to
+/// a page or a message address stops neither.
+#[tokio::test]
+async fn keyed_locks_cross_a_page_through_prefunded_addresses() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    b.set_token(true, 0, 0).await.expect("set token");
+    let owner = b.funded_owner().await;
+
+    let mut config = b.config().await;
+    let start = MESSAGE_PAGE_SLOTS - 1;
+    config.sequence = start;
+    let mut account = b.account(config_pda(&program).0).await.expect("config");
+    config.store(&mut account.data).expect("stores");
+    b.ctx
+        .set_account(&config_pda(&program).0, &AccountSharedData::from(account));
+
+    for (sequence, nonce, page) in [(start, 1, 0), (start + 1, 2, 1)] {
+        b.grief(&message_page_pda(&program, page).0);
+        b.grief(&keyed_msg_pda(&program, &owner.pubkey(), nonce).0);
+        let ix = b.lock_keyed_ix(&owner, sequence, nonce);
+        b.send(ix, &[&owner]).await.expect("a griefed lock lands");
+        let key = keyed_msg_pda(&program, &owner.pubkey(), nonce).0;
+        let at = 9 + (sequence % MESSAGE_PAGE_SLOTS) as usize * 32;
+        assert_eq!(&b.page(page).await[at..at + 32], key.as_ref());
+        let posted: PostedMessage = b.state(key).await;
+        assert_eq!(posted.sequence, sequence);
+    }
 }
 
 async fn rotate_to(b: &mut Bridge, n: u8) -> Result<(), BanksClientError> {
