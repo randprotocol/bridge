@@ -38,6 +38,7 @@ spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
 thiserror = "1"
 
 [dev-dependencies]
+base64 = "0.22"
 hex = "0.4"
 # Signing test attestations with the shared vectors' guardian secrets;
 # `sign_digest` in the integration test mirrors `randprotocol-core`'s, rather

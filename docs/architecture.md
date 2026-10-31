@@ -518,8 +518,11 @@ made immutable before initialisation can never be initialised.
   still requires the account to be empty and system-owned.
 - **Two locks in the same slot** name the same `["msg", sequence]` PDA. The second fails with
   `InvalidPda`, nothing is locked, and the client re-reads `sequence` and retries.
-- **Compute budget.** Five recoveries cost about 125k compute units; clients prepend a
-  compute-unit-limit instruction.
+- **Compute budget.** One recovery costs 25k compute units, so a seven-signature release at
+  `n = 10` costs about 227k in all; clients prepend a compute-unit-limit instruction.
+  `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot
+  grow, so they are still searched. `Release` reads the clock through the syscall, which keeps
+  the seven-signature transaction at 1,231 of 1,232 bytes (§9, guardian-set size).
 - **`u64` native amounts.** Denormalising an 18-decimal mint's amount can overflow `u64` and is
   rejected as `AmountOverflow`. The same error refuses a lock whose *attested* amount exceeds
   `u64::MAX` (§3.4), mirroring the EVM `AmountTooLarge`.

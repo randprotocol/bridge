@@ -372,7 +372,7 @@ fn now_from(clock: &AccountInfo) -> Result<u64, ProgramError> {
 /// that reads or moves it.
 fn custody_state(
     account: &AccountInfo,
-    program_id: &Pubkey,
+    authority: &Pubkey,
     mint: &Pubkey,
 ) -> Result<spl_token::state::Account, ProgramError> {
     if account.owner != &spl_token::id() {
@@ -380,7 +380,7 @@ fn custody_state(
     }
     let data = account.data.borrow();
     let token = spl_token::state::Account::unpack(&data)?;
-    if token.owner != authority_pda(program_id).0 || token.mint != *mint {
+    if token.owner != *authority || token.mint != *mint {
         return Err(BridgeError::InvalidPda.into());
     }
     Ok(token)
@@ -447,11 +447,19 @@ fn transfer_from_custody<'a>(
     )
 }
 
-/// Loads the config, having first checked that the account really is the
-/// config PDA.
+/// Loads the config and checks that the account really is the config PDA,
+/// from the bump stored in it: one hash rather than the bump search, on
+/// every instruction but `Initialize`.
+///
+/// Only a canonical address can pass. The bump comes out of an account this
+/// program owns and holds a [`Config`], and the program writes one only at
+/// the canonical PDA, with that PDA's bump.
 fn load_config(account: &AccountInfo, program_id: &Pubkey) -> Result<Config, BridgeError> {
-    check_key(account.key, &config_pda(program_id).0)?;
-    load(account, program_id)
+    let config: Config = load(account, program_id)?;
+    let derived = Pubkey::create_program_address(&[seeds::CONFIG, &[config.bump]], program_id)
+        .map_err(|_| BridgeError::InvalidPda)?;
+    check_key(account.key, &derived)?;
+    Ok(config)
 }
 
 /// Loads a token registry, having checked both the PDA and that the entry
@@ -743,7 +751,8 @@ fn process_lock(
     // The balance delta is measured rather than trusted: a mint that
     // credits custody less than the attestation is about to promise is
     // rejected outright rather than mis-accounted.
-    let before = custody_state(custody_account, program_id, mint_account.key)?.amount;
+    let authority = authority_pda(program_id).0;
+    let before = custody_state(custody_account, &authority, mint_account.key)?.amount;
     invoke(
         &spl_token::instruction::transfer(
             &spl_token::id(),
@@ -760,7 +769,7 @@ fn process_lock(
             token_program.clone(),
         ],
     )?;
-    let after = custody_state(custody_account, program_id, mint_account.key)?.amount;
+    let after = custody_state(custody_account, &authority, mint_account.key)?.amount;
     if after.checked_sub(before) != Some(locked) {
         return Err(BridgeError::TransferAmountMismatch.into());
     }
@@ -833,7 +842,10 @@ fn process_release(
     let consumed_account = next_account_info(iter)?;
     let token_program = next_account_info(iter)?;
     let system_account = next_account_info(iter)?;
-    let clock_account = next_account_info(iter)?;
+    // The account list ended with the clock sysvar until a seven-signature
+    // release no longer fitted a transaction beside its compute-unit limit.
+    // It is read through the syscall now; a client that still passes the
+    // account has it ignored as a trailing extra.
 
     check_signer(relayer)?;
     check_key(token_program.key, &spl_token::id())?;
@@ -845,10 +857,11 @@ fn process_release(
     // token account for this mint under this program's custody
     // authority. Checked here, before any effect is written and long
     // before the payout CPIs.
-    custody_state(custody_account, program_id, mint_account.key)?;
     let (authority_key, authority_bump) = authority_pda(program_id);
+    custody_state(custody_account, &authority_key, mint_account.key)?;
     check_key(authority_account.key, &authority_key)?;
-    let now = now_from(clock_account)?;
+    let now =
+        u64::try_from(Clock::get()?.unix_timestamp).map_err(|_| BridgeError::AmountOverflow)?;
 
     let config = load_config(config_account, program_id)?;
     if config.paused {

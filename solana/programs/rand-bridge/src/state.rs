@@ -239,6 +239,9 @@ mod tests {
         Pubkey::new_from_array([7u8; 32])
     }
 
+    const LIVE_CONFIG: &str = "AfLAn6N4o937fdUEAAemqQa0qnVwqj5yuP4ixCKe2sFJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABw226UZJIkuPDBH9T4KkKvqnDAIqVVfr9Nu7iqhO+YwwDALfa6cMJFenQGeA2pdJKmrLV9xAdR5iefADpXBVnRXwEAAAAHAAAAAAAAAPwAAA==";
+    const LIVE_MESSAGE_6: &str = "BQYAAAAAAAAAuAAAAGq979YAAAAAAAXT5Y8ekxe7w8abY/rf9VjqgrpdAHZfHx5IPXBdIJtBOgAAAAAAAAAGAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWWgvAM4BDmCv7bInF71jGS9UFFo/llozu4LSxwKess4eIIJkAAUCBtFELeFAp59ZsTfvbrPrpzF7nT8wLOttjN78vAMT4QABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
     fn sample_config() -> Config {
         Config {
             admin: Pubkey::new_from_array([1u8; 32]),
@@ -326,6 +329,35 @@ mod tests {
             },
             DISCRIMINATOR_POSTED_MESSAGE,
         );
+    }
+
+    /// Bytes read from mainnet at `finalized` on 2026-10-31: the config and
+    /// the message at sequence 6. An upgrade must keep reading exactly these,
+    /// and `load` refuses trailing bytes, so no struct here may grow.
+    #[test]
+    fn mainnet_accounts_keep_deserialising() {
+        use base64::Engine;
+        let decode = |text: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .expect("base64")
+        };
+        let data = decode(LIVE_CONFIG);
+        assert_eq!(data.len(), 145);
+        let config = Config::load(&data).expect("the live config");
+        assert_eq!((config.current_guardian_set, config.sequence), (1, 7));
+        assert_eq!((config.bump, config.protocol_fee_bps), (252, 0));
+        let live = Pubkey::from_str_const("FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu");
+        assert_eq!(config_pda(&live).1, config.bump);
+        let mut stored = vec![0u8; data.len()];
+        config.store(&mut stored).expect("stores");
+        assert_eq!(stored, data);
+
+        let data = decode(LIVE_MESSAGE_6);
+        assert_eq!(data.len(), 197);
+        let message = PostedMessage::load(&data).expect("the live message");
+        assert_eq!(message.sequence, 6);
+        assert_eq!(message.body.len(), 184);
     }
 
     #[test]

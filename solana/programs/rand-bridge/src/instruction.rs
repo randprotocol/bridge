@@ -261,7 +261,11 @@ pub fn lock(
 /// 9. `[writable]` consumed PDA `["spent", digest]` — created.
 /// 10. `[]` SPL token program.
 /// 11. `[]` system program.
-/// 12. `[]` clock sysvar.
+///
+/// The program takes the time from the clock syscall. Through the 2026-09
+/// deployment it read a thirteenth account, the clock sysvar: that build
+/// refuses this list with `NotEnoughAccountKeys`, and a later build ignores
+/// a client that still sends it. See `docs/solana-upgrade.md`.
 pub fn release(
     program: &Pubkey,
     relayer: &Pubkey,
@@ -287,7 +291,6 @@ pub fn release(
             AccountMeta::new(spent_pda(program, digest).0, false),
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(system_program::id(), false),
-            AccountMeta::new_readonly(sysvar::clock::id(), false),
         ],
     )
 }
@@ -544,7 +547,7 @@ mod tests {
         assert_eq!(ix.accounts[6].pubkey, msg_pda(&program, 7).0);
 
         let ix = release(&program, &signer, &mint, 2, &signer, &[5u8; 32], vec![]);
-        assert_eq!(ix.accounts.len(), 13);
+        assert_eq!(ix.accounts.len(), 12);
         assert_eq!(ix.accounts[2].pubkey, guardian_pda(&program, 2).0);
         assert_eq!(
             ix.accounts[7].pubkey,

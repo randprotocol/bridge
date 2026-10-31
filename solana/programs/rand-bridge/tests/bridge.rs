@@ -27,7 +27,7 @@ use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_program_test::{processor, BanksClientError, ProgramTest, ProgramTestContext};
 use solana_sdk::account::{Account, AccountSharedData};
 use solana_sdk::clock::Clock;
-use solana_sdk::instruction::{Instruction, InstructionError};
+use solana_sdk::instruction::{AccountMeta, Instruction, InstructionError};
 use solana_sdk::program_option::COption;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -1622,6 +1622,63 @@ async fn prefunded_pdas_do_not_brick_release_lock_or_upgrade() {
     let set: GuardianSetAccount = b.state(guardian_pda(&program, 1).0).await;
     assert_eq!(set.keys, new_keys);
     assert_eq!(set.expiration_time, 0);
+}
+
+/// A relayer on the client from before the upgrade still ends its list with
+/// the clock sysvar; the upgraded program must take that release.
+#[tokio::test]
+async fn release_accepts_the_old_account_list_with_the_clock_sysvar() {
+    let mut b = Bridge::simple(6).await;
+    let mint = b.mint;
+    b.set_token(true, 0, 0).await.expect("set token");
+    b.fill_custody(5_000_000).await;
+
+    let relayer = Keypair::new();
+    b.fund(&relayer.pubkey());
+    b.put_ata(&relayer.pubkey(), 0);
+    let recipient = Pubkey::new_unique();
+    let recipient_ata = b.put_ata(&recipient, 0);
+    let (bytes, digest) = signed(
+        0,
+        body(
+            CHAIN_RAND,
+            RAND_EMITTER,
+            1,
+            transfer_payload(100_000_000, &mint, 5, &recipient, 5, 0),
+        ),
+        QUORUM,
+    );
+    let mut ix = bridge_ix::release(
+        &b.program,
+        &relayer.pubkey(),
+        &mint,
+        0,
+        &recipient,
+        &digest,
+        bytes,
+    );
+    ix.accounts.push(AccountMeta::new_readonly(
+        solana_sdk::sysvar::clock::id(),
+        false,
+    ));
+    b.send(ix, &[&relayer])
+        .await
+        .expect("the old list releases");
+    assert_eq!(b.token(recipient_ata).await.amount, 1_000_000);
+}
+
+/// A program-owned config at any address but the canonical one is refused,
+/// now that the check is made from the bump stored inside it.
+#[tokio::test]
+async fn a_copy_of_the_config_elsewhere_is_refused() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    let copy = b.account(config_pda(&program).0).await.expect("config");
+    let fake = Pubkey::new_unique();
+    b.ctx.set_account(&fake, &AccountSharedData::from(copy));
+    let mut ix = bridge_ix::pause(&program, &b.pauser.pubkey());
+    ix.accounts[1].pubkey = fake;
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::InvalidPda);
 }
 
 /// Every shared vector whose verifier is Solana, replayed against a bank

@@ -105,8 +105,17 @@ new `sequence`, and resubmit.
 
 ## Compute budget
 
-A release recovers one secp256k1 signature per guardian (about 25k
-compute units each), so a five-of-six quorum costs roughly 125k units on
-top of the CPIs. Clients should prepend a
-`ComputeBudgetInstruction::set_compute_unit_limit` rather than rely on
-the 200k default.
+A release recovers one secp256k1 signature per guardian (25k compute
+units each), and a seven-signature release at `n = 10` costs 226,929 units
+in all, measured on the SBF binary. Clients must prepend a
+`ComputeBudgetInstruction::set_compute_unit_limit`; that transaction is
+1,231 of 1,232 bytes. Native `solana-program-test` meters nothing, so the
+measurement is its own test against the built binary:
+
+```sh
+cargo build-sbf --manifest-path programs/rand-bridge/Cargo.toml --sbf-out-dir "$OUT"
+SBF_OUT_DIR="$OUT" cargo test -p rand-bridge --test sbf_compute -- --ignored --nocapture
+```
+
+`solana-program-test` 2 cannot execute sBPF v3, which is what `deploy/sol.sh`
+ships, so this runs the default architecture.
