@@ -96,6 +96,6 @@ case "$step" in
     run mainnet/run-relayer.sh
     ;;
   *)
-    sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 1 ;;
+    sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac
 (( yes )) || echo "DRY RUN: nothing was executed; re-run with --yes."

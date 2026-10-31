@@ -335,6 +335,11 @@ mod tests {
     const LIVE_CONFIG: &str = "AfLAn6N4o937fdUEAAemqQa0qnVwqj5yuP4ixCKe2sFJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABw226UZJIkuPDBH9T4KkKvqnDAIqVVfr9Nu7iqhO+YwwDALfa6cMJFenQGeA2pdJKmrLV9xAdR5iefADpXBVnRXwEAAAAHAAAAAAAAAPwAAA==";
     const LIVE_MESSAGE_6: &str = "BQYAAAAAAAAAuAAAAGq979YAAAAAAAXT5Y8ekxe7w8abY/rf9VjqgrpdAHZfHx5IPXBdIJtBOgAAAAAAAAAGAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWWgvAM4BDmCv7bInF71jGS9UFFo/llozu4LSxwKess4eIIJkAAUCBtFELeFAp59ZsTfvbrPrpzF7nT8wLOttjN78vAMT4QABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
+    const LIVE_REGISTRY_USDT: &str = "A84BDmCv7bInF71jGS9UFFo/llozu4LSxwKess4eIIJkAQYA4fUFAAAAAADKmjsAAAAA91AAAAAAAAAAJPQAAAAAAEB4fQEAAAAAqGEAAAAAAAA=";
+    const LIVE_REGISTRY_USDC: &str = "A8b6evO+2606PWXzaqvJdDGxu+TC0vbg5HymAgNFL11hAQYA4fUFAAAAAADKmjsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const LIVE_GUARDIAN_SET_0: &str = "AgAAAAAGAAAAW1wAe1Y4tkOh9rPBivsqd4Spoqo/rNr26lm8dc0YtMoYRDRABeZkU4zXR47KcjXopSZdS39jgIbyXMn1doRTR2ebh4wAFkkbGd78Wcg+IPti+j459WY2lV3yKJF+3S6eaPOpV7PxQJrg1bJGcin6dKksUbFfmARFEj23agAAAAA=";
+    const LIVE_GUARDIAN_SET_1: &str = "AgEAAAAIAAAAKYUdd7S1sJXNEPha127pF9zw8Ky6VtHOx2tGG3rrBKVZNQliBwtff8Cp/CUM/iro6/tnBHd+a+T74+N0b3GW6ESEFfZnsyzxYuhon5jmqYdNyTJYJmjb/rJMA7InAffpOtUzIG1jlHYnysB7uGPTbgFacUCZpXNZhJ9OniQg4RX6bmcV9TJ5rwpnnDmY//3sdShNd0M0BMHA/J+Qq7WKnAAAAAAAAAAA";
+
     fn sample_config() -> Config {
         Config {
             admin: Pubkey::new_from_array([1u8; 32]),
@@ -477,9 +482,11 @@ mod tests {
         );
     }
 
-    /// Bytes read from mainnet at `finalized` on 2026-10-31: the config and
-    /// the message at sequence 6. An upgrade must keep reading exactly these,
-    /// and `load` refuses trailing bytes, so no struct here may grow.
+    /// Bytes read from mainnet at `finalized` on 2026-10-31: one of every
+    /// layout that can be loaded and written back. An upgrade must keep
+    /// reading exactly these, and `load` refuses trailing bytes, so no struct
+    /// here may grow. `Consumed` is 32 bytes behind its discriminator and
+    /// nothing reads one back.
     #[test]
     fn mainnet_accounts_keep_deserialising() {
         use base64::Engine;
@@ -504,6 +511,41 @@ mod tests {
         let message = PostedMessage::load(&data).expect("the live message");
         assert_eq!(message.sequence, 6);
         assert_eq!(message.body.len(), 184);
+
+        let usdt = Pubkey::from_str_const("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+        let data = decode(LIVE_REGISTRY_USDT);
+        assert_eq!(data.len(), 83);
+        let registry = TokenRegistry::load(&data).expect("the live USDT registry");
+        assert_eq!(registry.mint, usdt);
+        assert!(registry.enabled);
+        assert_eq!((registry.decimals, registry.custody), (6, 25_000_000));
+        assert_eq!(registry.accrued_fees, 25_000);
+        let mut stored = vec![0u8; data.len()];
+        registry.store(&mut stored).expect("stores");
+        assert_eq!(stored, data);
+
+        let usdc = Pubkey::from_str_const("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let registry =
+            TokenRegistry::load(&decode(LIVE_REGISTRY_USDC)).expect("the live USDC registry");
+        assert_eq!((registry.mint, registry.custody), (usdc, 0));
+
+        // Set 0 was superseded and has an expiry; set 1 is in force and has
+        // none. An expiry is written back in place, so both shapes matter.
+        for (text, len, index, keys, expiration_time) in [
+            (LIVE_GUARDIAN_SET_0, 137, 0, 6, 1_790_393_618),
+            (LIVE_GUARDIAN_SET_1, 177, 1, 8, 0),
+        ] {
+            let data = decode(text);
+            assert_eq!(data.len(), len);
+            let set = GuardianSetAccount::load(&data).expect("a live guardian set");
+            assert_eq!(set.index, index);
+            assert_eq!(set.keys.len(), keys);
+            assert_eq!(set.expiration_time, expiration_time);
+            assert!(set.keys.len() <= MAX_GUARDIANS);
+            let mut stored = vec![0u8; data.len()];
+            set.store(&mut stored).expect("stores");
+            assert_eq!(stored, data);
+        }
     }
 
     #[test]

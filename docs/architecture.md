@@ -527,7 +527,7 @@ made immutable before initialisation can never be initialised.
   leaves its page in flight. Guardians read the page first, then `["msg", sequence]`; design and
   upgrade order in `docs/solana-upgrade.md`.
 - **Compute budget.** One recovery costs 25k compute units, so a seven-signature release at
-  `n = 10` costs 231,428 as measured; clients prepend a compute-unit-limit instruction.
+  `n = 10` costs 220,928 to 232,928 as measured on sBPF v0; clients prepend a compute-unit-limit instruction.
   `Config.bump` replaces the bump search on the config. The other accounts have no room for a stored bump, because a live layout cannot
   grow, so they are still searched. `Release` reads the clock through the syscall, which keeps
   the seven-signature transaction at 1,231 of 1,232 bytes (§12, guardian-set size).

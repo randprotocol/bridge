@@ -114,9 +114,10 @@ order in `docs/solana-upgrade.md`.
 ## Compute budget
 
 A release recovers one secp256k1 signature per guardian (25k compute
-units each), and a seven-signature release at `n = 10` costs 231,428
-units in all, measured on the SBF binary; test keys are random, so the
-bump searches move that by a few thousand from run to run. Clients must prepend a
+units each), and a seven-signature release at `n = 10` costs 220,928
+to 232,928 units in all, measured on the sBPF v0 binary. Test keys are
+random, and each extra step of a bump search adds 1,500. The ceiling that
+matters is the CLI's 400,000 limit. Clients must prepend a
 `ComputeBudgetInstruction::set_compute_unit_limit`; that transaction is
 1,231 of 1,232 bytes. Native `solana-program-test` meters nothing, so the
 measurement is its own test against the built binary:
@@ -127,4 +128,5 @@ SBF_OUT_DIR="$OUT" cargo test -p rand-bridge --test sbf_compute -- --ignored --n
 ```
 
 `solana-program-test` 2 cannot execute sBPF v3, which is what `deploy/sol.sh`
-ships, so this runs the default architecture.
+ships: on a v3 binary every test here fails with `UnsupportedProgramId`. So
+this runs the default architecture, and v3 compute is unmeasured.
