@@ -23,3 +23,9 @@ seven-signature release from 1,264 to 1,231 bytes including its compute-unit lim
 
 So the relayer's `rand-bridge-cli` moves after the program does. A release attempted in the wrong
 order fails before any effect and can be resubmitted.
+
+## O-2 and O-3
+
+Neither touches an account or an old instruction. `SetPauser` is new, and `MAX_GUARDIANS` only
+refuses a future set; the live set 1 has eight keys. `rand-bridge-cli set-pauser` works from the
+moment the program is upgraded.

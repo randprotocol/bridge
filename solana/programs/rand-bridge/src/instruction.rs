@@ -93,6 +93,11 @@ pub enum BridgeInstruction {
         /// Amount in the mint's own units.
         amount: u64,
     },
+    /// Move the pause role. Admin only; never to the zero key.
+    SetPauser {
+        /// The new pauser.
+        pauser: Pubkey,
+    },
 }
 
 /// `Initialize`.
@@ -358,6 +363,15 @@ pub fn set_protocol_fee(program: &Pubkey, admin: &Pubkey, bps: u16) -> Instructi
     role_instruction(program, admin, BridgeInstruction::SetProtocolFee { bps })
 }
 
+/// `SetPauser`: `[signer]` admin, `[writable]` config PDA.
+pub fn set_pauser(program: &Pubkey, admin: &Pubkey, pauser: &Pubkey) -> Instruction {
+    role_instruction(
+        program,
+        admin,
+        BridgeInstruction::SetPauser { pauser: *pauser },
+    )
+}
+
 /// `WithdrawFees`.
 ///
 /// Accounts:
@@ -505,6 +519,9 @@ mod tests {
             BridgeInstruction::AcceptAdmin,
             BridgeInstruction::SetProtocolFee { bps: 10 },
             BridgeInstruction::WithdrawFees { amount: 11 },
+            BridgeInstruction::SetPauser {
+                pauser: Pubkey::new_from_array([12u8; 32]),
+            },
         ];
         for (tag, ix) in all.iter().enumerate() {
             let bytes = borsh::to_vec(ix).expect("serializes");
@@ -566,6 +583,7 @@ mod tests {
             unpause(&program, &signer),
             transfer_admin(&program, &signer, &signer),
             accept_admin(&program, &signer),
+            set_pauser(&program, &signer, &signer),
         ] {
             assert_eq!(ix.accounts.len(), 2);
             assert!(ix.accounts[0].is_signer);

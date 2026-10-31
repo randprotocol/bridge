@@ -1624,6 +1624,35 @@ async fn prefunded_pdas_do_not_brick_release_lock_or_upgrade() {
     assert_eq!(set.expiration_time, 0);
 }
 
+/// A compromised pauser can stop the bridge again after every unpause, so
+/// the admin has to be able to take the role away. Mirrors `setPauser`.
+#[tokio::test]
+async fn admin_moves_the_pauser() {
+    let mut b = Bridge::simple(6).await;
+    let program = b.program;
+    let admin = b.admin.pubkey();
+    let old = b.pauser.pubkey();
+    let new = Keypair::new();
+    b.fund(&new.pubkey());
+
+    let ix = bridge_ix::set_pauser(&program, &old, &new.pubkey());
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::NotAdmin);
+    let ix = bridge_ix::set_pauser(&program, &admin, &Pubkey::default());
+    assert_bridge_error(b.admin_send(ix).await, BridgeError::ZeroAddress);
+    assert_eq!(b.config().await.pauser, old);
+
+    let ix = bridge_ix::set_pauser(&program, &admin, &new.pubkey());
+    b.admin_send(ix).await.expect("the admin moves the role");
+    assert_eq!(b.config().await.pauser, new.pubkey());
+
+    let ix = bridge_ix::pause(&program, &old);
+    assert_bridge_error(b.pauser_send(ix).await, BridgeError::NotPauser);
+    b.send(bridge_ix::pause(&program, &new.pubkey()), &[&new])
+        .await
+        .expect("the new pauser pauses");
+    assert!(b.config().await.paused);
+}
+
 async fn rotate_to(b: &mut Bridge, n: u8) -> Result<(), BanksClientError> {
     let keys = (6..6 + n).map(guardian_address).collect();
     let upgrade = Payload::GuardianSetUpgrade(GuardianSetUpgrade { new_index: 1, keys }).encode();

@@ -109,6 +109,7 @@ pub fn process_instruction(
         BridgeInstruction::WithdrawFees { amount } => {
             process_withdraw_fees(program_id, accounts, amount)
         }
+        BridgeInstruction::SetPauser { pauser } => process_set_pauser(program_id, accounts, pauser),
     }
 }
 
@@ -1257,6 +1258,26 @@ fn process_set_protocol_fee(
     config.protocol_fee_bps = bps;
     store(&config, config_account)?;
     msg!("rand-bridge: protocol fee {} bps", bps);
+    Ok(())
+}
+
+/// Never to the zero key, which would quietly leave pausing to the admin
+/// alone. Mirrors `RandBridgeBase.setPauser`.
+fn process_set_pauser(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    pauser: Pubkey,
+) -> ProgramResult {
+    let (signer, config_account, mut config) = role_accounts(accounts, program_id)?;
+    if *signer.key != config.admin {
+        return Err(BridgeError::NotAdmin.into());
+    }
+    if pauser == Pubkey::default() {
+        return Err(BridgeError::ZeroAddress.into());
+    }
+    config.pauser = pauser;
+    store(&config, config_account)?;
+    msg!("rand-bridge: pauser moved");
     Ok(())
 }
 

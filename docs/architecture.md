@@ -501,6 +501,7 @@ SPL-owned, authority equal to the authority PDA, mint equal to the named mint.
 | `Unpause` | admin | |
 | `TransferAdmin { to }` | admin | `to == default` cancels |
 | `AcceptAdmin` | pending admin | |
+| `SetPauser { pauser }` | admin | never to the zero key |
 | `SetProtocolFee { bps }` | admin | at most 100 bps (§3.5); `Initialize` sets 10 |
 | `WithdrawFees { amount }` | admin | pays `accrued_fees` out of the custody token account; never custody; allowed while paused |
 

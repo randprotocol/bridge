@@ -14,7 +14,7 @@ and check each with the audit (§5) before the next.
 |---|---|---|---|
 | Ethereum, BSC | OZ v5.0.2 `TimelockController`, 48 h, driven by the **admin Safe** | the **pause Safe** | no (the bridge is not upgradeable) |
 | Tron | the same timelock (Tron copy), driven by a **Tron multi-signature account** | a second Tron multi-signature account | no |
-| Solana | the **vault of an autonomous Squads v4 multisig** with a 48 h time lock | the existing single key `8bYj…jwES` (no `SetPauser` instruction exists; see §8) | the program's upgrade authority = the same vault |
+| Solana | the **vault of an autonomous Squads v4 multisig** with a 48 h time lock | the existing single key `8bYj…jwES` (see §8) | the program's upgrade authority = the same vault |
 
 Rules the audit enforces (`rand-bridge-audit --governance`, §5):
 
@@ -241,9 +241,10 @@ upgrade authority, but not a scheduled operation: that needs the event alert abo
   controls, and the pause key held apart from all of them. The code prerequisite, rotation of the
   PQ set and the pause key under the PQ quorum, is fullnode's genesis-gated rules v2 (chain 15).
   No code in this repository can do that move; it is people and machines.
-- **The Solana pauser** stays a single key. It can only pause; the timelocked admin unpauses. A
-  `SetPauser` instruction would need a program upgrade, which after §4 goes through the Squads
-  time lock like any other.
+- **The Solana pauser** is a single key until the program upgrade that adds `SetPauser`
+  (`docs/solana-upgrade.md`), which after §4 goes through the Squads time lock like any other. It
+  can only pause; the timelocked admin unpauses, and after that upgrade moves the role with
+  `rand-bridge-cli set-pauser` (`--as <vault>` for a Squads vault transaction).
 - **Custody.** The governance audit passing means no single key can change an endpoint's
   configuration or code. Releases are still authorised by the guardian quorum (above).
 - **Bytecode verification of the live EVM bridge** must use the remappings of its deploy commit
