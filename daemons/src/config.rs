@@ -1,8 +1,10 @@
 //! One TOML file configures either daemon; each reads the sections it needs.
 //! Secrets are never in the file: a section names the *environment variable*
-//! that holds its key.
+//! that holds its key, and an RPC URL or peer that carries one (a provider's
+//! API key) is written with a `${NAME}` placeholder, filled from the
+//! environment at load ([`Config::load_with`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -28,6 +30,24 @@ pub struct Config {
     /// The policy `rand-bridge-audit --governance` holds the endpoints to
     /// (BR-3). Optional: absent, the defaults below apply.
     pub governance: Option<GovernanceConfig>,
+    /// `${NAME}` placeholders the environment did not fill, as
+    /// `(field, NAME)`. Each is left as written; a guardian on a public
+    /// chain refuses to start while any remains ([`Config::mainnet_guardian_gaps`]).
+    #[serde(skip)]
+    pub unresolved: Vec<(String, String)>,
+}
+
+/// The first public Rand chain id. Chains 14–19 bind governance to the chain
+/// id, 20 onward to the genesis hash (BRG-901, `pq_gov::CHAIN_ID_BINDING_CHAIN_IDS`);
+/// both are public chains whose bridge moves real value. Ids below are
+/// devnets and retired testnets.
+pub const FIRST_PUBLIC_RAND_CHAIN_ID: u64 = 14;
+
+/// Whether a guardian configured for `chain_id` is held to the mainnet guard
+/// (BR-601). A config that names no chain is: nothing ties it to a test chain,
+/// since the node's id is compared at startup only when one is configured.
+pub fn is_public_rand_chain(chain_id: Option<u64>) -> bool {
+    chain_id.is_none_or(|id| id >= FIRST_PUBLIC_RAND_CHAIN_ID)
 }
 
 fn default_poll_secs() -> u64 {
@@ -351,13 +371,113 @@ impl Config {
         self.governance.clone().unwrap_or_default()
     }
 
+    /// [`Config::load_with`] the process environment.
     pub fn load(path: &Path) -> Result<Config> {
+        Config::load_with(path, |name| std::env::var(name).ok())
+    }
+
+    /// Reads, fills and checks a config. Every `${NAME}` in an RPC URL
+    /// (`rpc`, `rpcs`) or a guardian peer is replaced by `lookup(NAME)`; one
+    /// that is unset or empty stays as written and is recorded in
+    /// [`Config::unresolved`] — the file still loads, so the operator commands
+    /// (`--pause-signing`) work without the provider secrets. Values are never
+    /// logged or echoed in errors.
+    pub fn load_with(path: &Path, lookup: impl Fn(&str) -> Option<String>) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config
+            .fill_placeholders(&lookup)
+            .with_context(|| format!("parsing {}", path.display()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    fn fill_placeholders(&mut self, lookup: &dyn Fn(&str) -> Option<String>) -> Result<()> {
+        let mut unresolved = Vec::new();
+        let mut fill = |field: String, value: &mut String| -> Result<()> {
+            let (filled, missing) = expand(value, lookup).with_context(|| field.clone())?;
+            *value = filled;
+            unresolved.extend(missing.into_iter().map(|name| (field.clone(), name)));
+            Ok(())
+        };
+        fill("rand.rpc".into(), &mut self.rand.rpc)?;
+        for url in &mut self.rand.rpcs {
+            fill("rand.rpcs".into(), url)?;
+        }
+        for e in &mut self.evm {
+            fill(format!("evm.{}.rpc", e.name), &mut e.rpc)?;
+            for url in &mut e.rpcs {
+                fill(format!("evm.{}.rpcs", e.name), url)?;
+            }
+        }
+        if let Some(s) = &mut self.solana {
+            fill("solana.rpc".into(), &mut s.rpc)?;
+            for url in &mut s.rpcs {
+                fill("solana.rpcs".into(), url)?;
+            }
+        }
+        if let Some(g) = &mut self.guardian {
+            for peer in &mut g.peers {
+                fill("guardian.peers".into(), peer)?;
+            }
+        }
+        self.unresolved = unresolved;
+        Ok(())
+    }
+
+    /// The names of the placeholders the environment did not fill.
+    pub fn unresolved_vars(&self) -> BTreeSet<String> {
+        self.unresolved.iter().map(|(_, name)| name.clone()).collect()
+    }
+
+    /// What this config lacks to run a guardian on a public chain (BR-601),
+    /// one line each; empty when nothing is missing. Required: every watched
+    /// chain (Rand, each `[[evm]]`, `[solana]`) read through at least two
+    /// distinct providers at an `rpc_quorum` of at least two (BR-4), a
+    /// non-empty `guardian.peers` (BR-502), a `[guardian.limits]` section
+    /// (BRG-1), and every `${NAME}` placeholder filled. An unfilled provider
+    /// or peer does not count.
+    pub fn mainnet_guardian_gaps(&self) -> Vec<String> {
+        let mut gaps: Vec<String> = self
+            .unresolved
+            .iter()
+            .map(|(field, name)| format!("{field}: ${{{name}}} is not set in the environment"))
+            .collect();
+        let mut chain = |what: &str, (urls, quorum): (Vec<String>, usize)| {
+            let n = urls.iter().filter(|u| !has_placeholder(u)).count();
+            if n < 2 || quorum < 2 {
+                gaps.push(format!(
+                    "{what}: {n} provider(s) at rpc_quorum {quorum}; a public chain needs at least                      2 independent providers (rpcs) at an rpc_quorum of at least 2 (BR-4)"
+                ));
+            }
+        };
+        chain("rand", self.rand.providers());
+        for e in &self.evm {
+            chain(&format!("evm.{}", e.name), e.providers());
+        }
+        if let Some(s) = &self.solana {
+            chain("solana", s.providers());
+        }
+        match &self.guardian {
+            None => gaps.push("no [guardian] section".into()),
+            Some(g) => {
+                if !g.peers.iter().any(|p| !p.trim().is_empty() && !has_placeholder(p)) {
+                    gaps.push(
+                        "guardian.peers is empty: a first signature is checked against this                          guardian's own store only (BR-502)"
+                            .into(),
+                    );
+                }
+                if g.limits.is_none() {
+                    gaps.push(
+                        "no [guardian.limits]: signing would be uncapped per transfer and per                          window (BRG-1)"
+                            .into(),
+                    );
+                }
+            }
+        }
+        gaps
     }
 
     fn validate(&self) -> Result<()> {
@@ -417,6 +537,45 @@ impl Config {
             endpoints,
         })
     }
+}
+
+fn has_placeholder(s: &str) -> bool {
+    s.contains("${")
+}
+
+/// `value` with each `${NAME}` (NAME: a letter or `_`, then letters, digits,
+/// `_`) replaced by `lookup(NAME)`, and the names left unfilled (unset or
+/// empty; written back as they were). A malformed placeholder is an error.
+fn expand(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<(String, Vec<String>)> {
+    let mut out = String::with_capacity(value.len());
+    let mut missing = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after
+            .find('}')
+            .ok_or_else(|| anyhow!("an unterminated ${{…}} placeholder"))?;
+        let name = &after[..end];
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            bail!("a placeholder must be ${{NAME}} with NAME of letters, digits and _, got ${{{name}}}");
+        }
+        match lookup(name).filter(|v| !v.is_empty()) {
+            Some(v) => out.push_str(&v),
+            None => {
+                out.push_str(&rest[start..start + 2 + end + 1]);
+                missing.push(name.to_string());
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok((out, missing))
 }
 
 /// `[rpc] + rpcs`, without repeats, in order, and the quorum over them.
