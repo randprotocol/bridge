@@ -20,11 +20,22 @@ const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
 const REAL_ADDRESS: &str = include_str!("fixtures/rand-address.txt");
 const REAL_HASH: &str = "58bbaf413a0a303a1740c286673f0ce74199c7b64d035a7a6772468bac66b972";
 
+/// The guardian with the BR-601 mainnet guard overridden: these tests exercise the other startup
+/// checks and the signing loop on one-provider configs. The guard itself is tested through
+/// [`strict_guardian_cmd`].
 fn guardian_cmd() -> Command {
+    let mut c = strict_guardian_cmd();
+    c.env("RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS", "1");
+    c
+}
+
+/// The guardian as an operator runs it: no override of the mainnet guard (BR-601).
+fn strict_guardian_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_rand-guardian"));
     c.env_remove("GUARDIAN_KEY")
         .env_remove("GUARDIAN_PQ_SEED")
-        .env_remove("RAND_BRIDGE_CONFIG");
+        .env_remove("RAND_BRIDGE_CONFIG")
+        .env_remove("RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS");
     c
 }
 
@@ -361,6 +372,147 @@ fn a_relayer_cannot_bind_a_taken_registration_port() {
         ),
     );
     assert!(run_failing(&mut relayer_cmd(), &config).contains(&format!("binding {listen}")));
+}
+
+// ---- the mainnet guard (BR-601) ------------------------------------------------
+
+/// A guardian config on Rand chain `chain_id` (none: `""`) whose Rand node does not answer, with
+/// every BR-601 control in place, less the ones named in `drop` ("rpcs", "peers", "limits").
+fn guard_config(dir: &Path, chain_id: &str, drop: &[&str]) -> std::path::PathBuf {
+    let rand_rpcs = if drop.contains(&"rpcs") { "" } else { "rpcs = [\"http://127.0.0.1:2\"]\nrpc_quorum = 2\n" };
+    let eth_rpcs = if drop.contains(&"rpcs") { "" } else { "rpcs = [\"http://127.0.0.1:4\"]\n" };
+    let peers = if drop.contains(&"peers") { "" } else { "peers = [\"http://127.0.0.1:5\"]\n" };
+    let limits = if drop.contains(&"limits") {
+        ""
+    } else {
+        "[guardian.limits]\nper_transfer = 10000000000\nper_window = 100000000000\n"
+    };
+    write_config(
+        dir,
+        &format!(
+            "data_dir = {data:?}\npoll_secs = 1\n[rand]\nrpc = \"http://127.0.0.1:1\"\n{rand_rpcs}{chain_id}\nemitter = {emitter:?}\n\n\
+             [[evm]]\nname = \"ethereum\"\nchain = 2\nkind = \"evm\"\nrpc = \"http://127.0.0.1:3\"\n{eth_rpcs}contract = {CONTRACT:?}\nfinality = 0\n\n\
+             [guardian]\nlisten = \"127.0.0.1:0\"\n{peers}\n{limits}",
+            data = dir.join("data"),
+            emitter = hex::encode(RAND_EMITTER),
+        ),
+    )
+}
+
+/// What the guardian printed, run to its first failure with a valid key.
+fn failure(mut c: Command, config: &Path) -> String {
+    run_failing(c.env("GUARDIAN_KEY", format!("{:064x}", 1)), config)
+}
+
+/// Refused by the guard: the node was never asked for its chain id.
+fn refused(text: &str) -> bool {
+    text.contains("BR-601") && text.contains("refusing to start") && !text.contains("rand_chainId")
+}
+
+/// Past the guard: the next startup check (the Rand node, which does not answer) stopped it.
+fn past_the_guard(text: &str) -> bool {
+    !text.contains("refusing to start") && text.contains("rand_chainId")
+}
+
+#[test]
+fn a_guardian_on_a_public_chain_refuses_to_start_without_its_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = guard_config(dir.path(), "chain_id = 21", &["rpcs", "peers", "limits"]);
+    let text = failure(strict_guardian_cmd(), &config);
+    assert!(refused(&text), "{text}");
+    for gap in ["rand: 1 provider", "evm.ethereum: 1 provider", "guardian.peers", "[guardian.limits]"] {
+        assert!(text.contains(gap), "{gap} not named: {text}");
+    }
+    assert!(text.contains("--unsafe-skip-mainnet-guards"), "the override is named: {text}");
+}
+
+#[test]
+fn each_missing_guard_alone_stops_a_public_chain_guardian() {
+    for (drop, named) in [
+        ("rpcs", "evm.ethereum: 1 provider"),
+        ("peers", "guardian.peers"),
+        ("limits", "[guardian.limits]"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let text = failure(strict_guardian_cmd(), &guard_config(dir.path(), "chain_id = 21", &[drop]));
+        assert!(refused(&text) && text.contains(named), "{drop}: {text}");
+    }
+    // A config that names no chain is not exempt.
+    let dir = tempfile::tempdir().unwrap();
+    let text = failure(strict_guardian_cmd(), &guard_config(dir.path(), "", &["peers"]));
+    assert!(refused(&text) && text.contains("guardian.peers"), "{text}");
+    // An unset provider placeholder is a gap, named by its variable.
+    let dir = tempfile::tempdir().unwrap();
+    let config = guard_config(dir.path(), "chain_id = 21", &[]);
+    let text = std::fs::read_to_string(&config).unwrap().replace("http://127.0.0.1:4", "${GUARDIAN_RPC_TEST_UNSET}");
+    std::fs::write(&config, text).unwrap();
+    let text = failure(strict_guardian_cmd(), &config);
+    assert!(refused(&text) && text.contains("GUARDIAN_RPC_TEST_UNSET"), "{text}");
+}
+
+#[test]
+fn a_fully_guarded_public_chain_guardian_and_a_devnet_guardian_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = failure(strict_guardian_cmd(), &guard_config(dir.path(), "chain_id = 21", &[]));
+    assert!(past_the_guard(&text), "{text}");
+    // A devnet (chain ids under 14) is not held to the guard; the node check still applies.
+    let text = failure(strict_guardian_cmd(), &guard_config(dir.path(), "chain_id = 7", &["rpcs", "peers", "limits"]));
+    assert!(past_the_guard(&text), "{text}");
+}
+
+#[test]
+fn the_unsafe_override_starts_an_unguarded_guardian_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = guard_config(dir.path(), "chain_id = 21", &["rpcs", "peers", "limits"]);
+    let mut flag = strict_guardian_cmd();
+    flag.arg("--unsafe-skip-mainnet-guards");
+    let mut env = strict_guardian_cmd();
+    env.env("RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS", "1");
+    for c in [flag, env] {
+        let text = failure(c, &config);
+        assert!(past_the_guard(&text), "{text}");
+        assert!(text.contains("UNSAFE") && text.contains("guardian.peers"), "the gaps are logged: {text}");
+    }
+    // A false value is no override.
+    for off in ["0", "false"] {
+        let mut c = strict_guardian_cmd();
+        c.env("RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS", off);
+        let text = failure(c, &config);
+        assert!(refused(&text), "{off}: {text}");
+    }
+}
+
+#[test]
+fn check_config_reports_the_gaps_without_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = guard_config(dir.path(), "chain_id = 21", &["peers"]);
+    let o = strict_guardian_cmd().arg("--config").arg(&bad).arg("--check-config").output().unwrap();
+    let text = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && text.contains("BR-601") && text.contains("guardian.peers"), "{text}");
+    // The override does not make a bad config pass the check.
+    let o = guardian_cmd().arg("--config").arg(&bad).arg("--check-config").output().unwrap();
+    assert!(!o.status.success());
+    let dir = tempfile::tempdir().unwrap();
+    let good = guard_config(dir.path(), "chain_id = 21", &[]);
+    let o = strict_guardian_cmd().arg("--config").arg(&good).arg("--check-config").output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("config OK for Rand chain 21"));
+}
+
+#[test]
+fn the_operator_commands_work_on_an_unguarded_config() {
+    // Pausing is the emergency brake: it must not wait on the provider secrets or the guard.
+    let dir = tempfile::tempdir().unwrap();
+    let config = guard_config(dir.path(), "chain_id = 21", &["rpcs", "peers", "limits"]);
+    let o = strict_guardian_cmd()
+        .arg("--config")
+        .arg(&config)
+        .args(["--pause-signing", "drill"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = strict_guardian_cmd().arg("--config").arg(&config).arg("--resume-signing").output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 // ---- a guardian that runs ------------------------------------------------------

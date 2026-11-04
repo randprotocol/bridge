@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bridge_daemons::config::Config;
 use bridge_daemons::crypto::GuardianKey;
 use bridge_daemons::sources::{self, Source};
@@ -29,6 +29,21 @@ struct Cli {
     /// List the withheld transfers and exit.
     #[arg(long)]
     list_held: bool,
+    /// Check the config against the mainnet guard (BR-601) with this
+    /// environment's `${NAME}` values, print what it lacks, and exit: 0 when
+    /// the guardian would start. Needs no key.
+    #[arg(long)]
+    check_config: bool,
+    /// UNSAFE, for an emergency or a dev run only: start on a public Rand
+    /// chain (id 14 and up, or none configured) even though the config lacks
+    /// the multi-provider RPC quorum, `guardian.peers` or `[guardian.limits]`
+    /// (BR-601). Every missing control is logged at error level on start.
+    #[arg(
+        long,
+        env = "RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    unsafe_skip_mainnet_guards: bool,
 }
 
 #[tokio::main]
@@ -44,6 +59,11 @@ async fn main() -> Result<()> {
         .guardian
         .clone()
         .ok_or_else(|| anyhow!("the config has no [guardian] section"))?;
+    if cli.check_config {
+        mainnet_guard(&config, false)?;
+        println!("config OK for Rand chain {}", chain_label(&config));
+        return Ok(());
+    }
     if let Some(reason) = &cli.pause_signing {
         let store = Store::open(&config.data_dir)?;
         bridge_daemons::limits::pause(&store, bridge_daemons::limits::now(), reason)?;
@@ -68,6 +88,10 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+
+    // BR-601: on a public chain the controls below are required, not opt-in.
+    // Checked before the key is read; the operator commands above need none.
+    mainnet_guard(&config, cli.unsafe_skip_mainnet_guards)?;
 
     // The key comes from the environment only, and leaves it at once so no
     // child process or crash dump of the environment carries it.
@@ -277,6 +301,46 @@ async fn main() -> Result<()> {
             _ = tokio::signal::ctrl_c() => { tracing::info!("stopping"); return Ok(()); }
         }
     }
+}
+
+fn chain_label(config: &Config) -> String {
+    config
+        .rand
+        .chain_id
+        .map_or_else(|| "(none configured)".to_string(), |id| id.to_string())
+}
+
+/// Refuses a guardian on a public Rand chain whose config lacks the
+/// multi-provider quorum, the peers or the caps (BR-601), unless the operator
+/// overrides it explicitly — then every gap is logged at error level.
+fn mainnet_guard(config: &Config, unsafe_override: bool) -> Result<()> {
+    let chain = chain_label(config);
+    if !bridge_daemons::config::is_public_rand_chain(config.rand.chain_id) {
+        tracing::info!("Rand chain {chain} is a devnet: the mainnet guard (BR-601) does not apply");
+        return Ok(());
+    }
+    let gaps = config.mainnet_guardian_gaps();
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    if unsafe_override {
+        for gap in &gaps {
+            tracing::error!("UNSAFE (--unsafe-skip-mainnet-guards): {gap}");
+        }
+        tracing::error!(
+            "UNSAFE: signing on public Rand chain {chain} without {} mainnet control(s) (BR-601); \
+             remove the override as soon as the config is fixed",
+            gaps.len()
+        );
+        return Ok(());
+    }
+    bail!(
+        "BR-601: refusing to start on public Rand chain {chain}; the config lacks:\n  - {}\n\
+         Fix the config (daemons/mainnet/guardian-<i>.toml shows every control), or, for an \
+         emergency or a dev run only, pass --unsafe-skip-mainnet-guards \
+         (RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS=1)",
+        gaps.join("\n  - ")
+    )
 }
 
 fn source_name<S: bridge_daemons::sources::Source>(s: &S) -> &str {
