@@ -4,6 +4,8 @@ poll_secs = 15
 
 [rand]
 rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
+rpcs = ["${GUARDIAN_RPC_RAND}"]       # BR-4/BR-601: a second Rand node, not this host's (docs/guardian-hosts.md, "Providers")
+rpc_quorum = 2
 chain_id = 21                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
 emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
 
@@ -12,6 +14,8 @@ name = "ethereum"
 chain = 2
 kind = "evm"
 rpc = "https://ethereum-rpc.publicnode.com"
+rpcs = ["https://rpc.mevblocker.io", "${GUARDIAN_RPC_ETHEREUM}"]   # three operators; the keyed one from the env
+rpc_quorum = 2
 contract = "0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA"
 finality = "finalized"
 start_block = 26090266          # the 2026-09-30 endpoint (deploy block); cursors start at sequence 1, past the consume-step lock
@@ -21,6 +25,8 @@ name = "bsc"
 chain = 3
 kind = "evm"
 rpc = "https://bsc-rpc.publicnode.com"
+rpcs = ["${GUARDIAN_RPC_BSC}"]        # no second keyless BSC provider serves eth_getLogs over 1,000 blocks
+rpc_quorum = 2
 contract = "0x7aF6b17047C1db6cB54347FdEa45cF9179075bfA"
 finality = 15
 start_block = 125030322         # the 2026-09-30 endpoint (deploy block, 1 h before the cut); cursors start at sequence 1
@@ -31,6 +37,8 @@ name = "tron"
 chain = 4
 kind = "tron"
 rpc = "https://tron-rpc.publicnode.com"   # TronGrid rate-limits one IP without an API key
+rpcs = ["https://api.trongrid.io", "${GUARDIAN_RPC_TRON}"]
+rpc_quorum = 2
 contract = "0x6410797df959987a5baf65b5fab97edeb34d5163"   # TK6JJv55CCkFjNHq7WwoU91GKaZEiC93me
 finality = 19
 start_block = 86699346          # the 2026-09-30 endpoint (deploy block); cursors start at sequence 1
@@ -38,12 +46,23 @@ max_log_range = 1000
 
 [solana]
 rpc = "https://api.mainnet-beta.solana.com"
+rpcs = ["https://solana-rpc.publicnode.com", "${GUARDIAN_RPC_SOLANA}"]
+rpc_quorum = 2
 program = "FGA3kY3RjfDKjUszJESMYtYXAbsnkFhhoxM3Mb34vycu"
 
 [guardian]
 listen = "127.0.0.1:7072"
 key_env = "GUARDIAN2_PRIV_KEY"
 pq_seed_env = "GUARDIAN2_PQ_SEED"
+# BR-502: the other droplet guardians, each through this host's peer forward 127.0.0.1:717<j> ->
+# guardian j's 127.0.0.1:7071 (docs/guardian-hosts.md, "Peers"). Guardians 7 and 8 are offline (BR-402).
+peers = [
+  "http://127.0.0.1:7171",
+  "http://127.0.0.1:7173",
+  "http://127.0.0.1:7174",
+  "http://127.0.0.1:7175",
+  "http://127.0.0.1:7176",
+]
 
 # BRG-1: the published caps (100 per transfer, 1,000 per day, every token), in attested 8-decimal
 # units, held by this guardian before it signs. A transfer over per_transfer is withheld until
