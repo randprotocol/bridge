@@ -27,6 +27,11 @@ struct Cli {
     /// review, then exit: `<chain>:<sequence>`. Needs the guardian's keys.
     #[arg(long, value_name = "CHAIN:SEQUENCE")]
     release_held: Option<String>,
+    /// Vouch for one deferred transfer written by a build that did not seal its deferred
+    /// records (BR-1004), after review, then exit: `<chain>:<sequence>`. Prints the transfer.
+    /// Needs the guardian's key. Never use it on a record you cannot account for.
+    #[arg(long, value_name = "CHAIN:SEQUENCE")]
+    vouch_deferred: Option<String>,
     /// List the withheld transfers and exit.
     #[arg(long)]
     list_held: bool,
@@ -128,6 +133,28 @@ async fn main() -> Result<()> {
         None => tracing::warn!(
             "no [guardian.limits]: this guardian signs without per-transfer or per-window caps (BRG-1)"
         ),
+    }
+    if let Some(target) = &cli.vouch_deferred {
+        let (chain, sequence) = target
+            .split_once(':')
+            .and_then(|(c, s)| Some((c.parse::<u16>().ok()?, s.parse::<u64>().ok()?)))
+            .ok_or_else(|| anyhow!("--vouch-deferred takes <chain>:<sequence>, got {target:?}"))?;
+        let message = guardian::vouch_deferred(&store, &key, chain, sequence)?;
+        println!("chain {chain} sequence {sequence} vouched for; the next retry checks it like any other");
+        println!("  digest  0x{}", hex::encode(message.digest));
+        match bridge_codec::Payload::decode(&message.decoded().payload) {
+            Ok(bridge_codec::Payload::Transfer(t)) => println!(
+                "  amount  {:?} (8-decimal units), fee {:?}, token chain {} 0x{}, to chain {} 0x{}",
+                t.amount_u128(),
+                t.fee_u128(),
+                t.token_chain,
+                hex::encode(t.token_address),
+                t.to_chain,
+                hex::encode(t.to)
+            ),
+            _ => println!("  not a transfer: the signing policy will refuse it"),
+        }
+        return Ok(());
     }
     if let Some(target) = &cli.release_held {
         let (chain, sequence) = target

@@ -48,6 +48,21 @@ impl GuardianKey {
         self.address
     }
 
+    /// A keyed tag over one of this guardian's own on-disk records (BR-1004): what the daemon
+    /// wrote and will later act on without reading the chain again carries it, so a record
+    /// planted or edited by someone who can write the data directory but does not hold the
+    /// key is told apart from one this guardian wrote. It is a MAC under a key derived from
+    /// the signing key, never an ECDSA signature: nothing it produces verifies anywhere.
+    pub fn seal(&self, domain: &[u8], data: &[u8]) -> [u8; 32] {
+        let mut k = b"rand-bridge/guardian-record-seal/v1/key".to_vec();
+        k.extend_from_slice(&self.key.to_bytes());
+        let mut m = keccak256(&k).to_vec();
+        m.extend_from_slice(&(domain.len() as u64).to_be_bytes());
+        m.extend_from_slice(domain);
+        m.extend_from_slice(data);
+        keccak256(&m)
+    }
+
     /// Signs `mu`. k256 normalises to low-s itself and adjusts the recovery
     /// id with it; both are asserted rather than assumed, because a high-s
     /// signature is refused by every verifier.

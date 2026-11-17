@@ -336,3 +336,148 @@ async fn br761_refusals_and_a_sequence_claim_cannot_skip_a_block_that_holds_a_lo
     assert!(messages.is_empty());
     assert_eq!(next, at(7, 0));
 }
+
+// ---- BR-1004: a planted deferred record -----------------------------------------
+
+mod br1004 {
+    use super::*;
+    use bridge_daemons::guardian::{self, Guards};
+    use bridge_daemons::limits::{self, Limits, LimitsConfig};
+    use bridge_daemons::message::{Emitters, Observed};
+    use bridge_daemons::sources::Located;
+    use bridge_daemons::store::Store;
+
+    const ETH: &str = "0x1111111111111111111111111111111111111111";
+
+    fn emitters() -> Emitters {
+        Emitters {
+            rand: RAND_EMITTER,
+            endpoints: vec![(2, word(ETH))],
+        }
+    }
+
+    fn signed(store: &Store, chain: u16, sequence: u64) -> Option<Value> {
+        store.read_message("signed", chain, sequence).unwrap()
+    }
+
+    fn plant(store: &Store, chain: u16, sequence: u64, record: Value) {
+        store.write_message(limits::DEFERRED, chain, sequence, &record).unwrap();
+    }
+
+    fn record_of(m: &Observed) -> Value {
+        json!({ "message": m, "at": 1, "kind": "window", "reason": "planted" })
+    }
+
+    /// The auditor's record: the body of a small burn, and beside it the digest of a burn of a
+    /// million tokens. The retry signed the stored digest — a valid guardian signature over a
+    /// burn the cap would have held — with no caps and no peers configured.
+    #[tokio::test]
+    async fn br1004_a_planted_record_whose_digest_is_not_its_bodys_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let key = &guardian_keys(1)[0];
+        let (small, big) = (burn(7, 2, 100_000_000, 0), burn(7, 2, 100_000_000_000_000, 0));
+        let mut record = record_of(&small);
+        record["message"]["digest"] = json!(hex::encode(big.digest));
+        plant(&store, 1, 7, record);
+
+        let n = guardian::retry_deferred(&store, key, None, &emitters(), &Guards::default()).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(signed(&store, 1, 7).is_none(), "no signature over the planted digest");
+        assert_eq!(limits::listed(&store, limits::DEFERRED).unwrap(), vec![(1, 7)], "left for the operator");
+    }
+
+    /// A record that is consistent with itself but that this daemon never wrote — a burn no
+    /// source ever showed it — and one filed under another sequence than its body's.
+    #[tokio::test]
+    async fn br1004_a_planted_record_this_guardian_did_not_seal_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let keys = guardian_keys(2);
+        let invented = burn(3, 2, 50_000_000, 0);
+        plant(&store, 1, 3, record_of(&invented));
+        // Sealed, but by another guardian's key.
+        let mut foreign = record_of(&burn(4, 2, 50_000_000, 0));
+        foreign["seal"] = json!(limits::deferral_seal(&keys[1], &burn(4, 2, 50_000_000, 0)));
+        plant(&store, 1, 4, foreign);
+        // This guardian's seal over sequence 5, moved to sequence 6's place.
+        let mut moved = record_of(&burn(5, 2, 50_000_000, 0));
+        moved["seal"] = json!(limits::deferral_seal(&keys[0], &burn(5, 2, 50_000_000, 0)));
+        plant(&store, 1, 6, moved);
+
+        let n = guardian::retry_deferred(&store, &keys[0], None, &emitters(), &Guards::default()).await.unwrap();
+        assert_eq!(n, 0);
+        for sequence in [3, 4, 5, 6] {
+            assert!(signed(&store, 1, sequence).is_none(), "sequence {sequence}");
+        }
+    }
+
+    struct Batch(Vec<Located>, Cursor);
+
+    impl Source for Batch {
+        fn name(&self) -> &str {
+            "batch"
+        }
+        fn start(&self) -> Cursor {
+            Cursor::default()
+        }
+        async fn poll(&self, _: &Cursor) -> anyhow::Result<(Vec<Observed>, Cursor)> {
+            Ok((self.0.iter().map(|l| l.message.clone()).collect(), self.1.clone()))
+        }
+    }
+
+    /// What the daemon defers itself is still signed once its window has room; the same record
+    /// edited on disk (another amount, digest recomputed to match) is not; and an unsealed
+    /// record an operator vouches for goes through the caps like any other.
+    #[tokio::test]
+    async fn br1004_the_daemons_own_deferred_record_signs_and_an_edited_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let key = &guardian_keys(1)[0];
+        let caps = Limits::new(&LimitsConfig {
+            per_transfer: 1_000_000_000,
+            per_window: 1_000_000_000,
+            window_secs: 2,
+            token: vec![],
+        })
+        .unwrap();
+        let guards = Guards { limits: Some(&caps), ..Default::default() };
+        let burns: Vec<Observed> = (0..3).map(|s| burn(s, 2, 600_000_000, 0)).collect();
+        let source = Batch(
+            burns.iter().map(|m| Located { message: m.clone(), resume: Cursor::default() }).collect(),
+            at(0, 3),
+        );
+        assert_eq!(guardian::step_guarded(&source, &store, key, None, &emitters(), &guards).await.unwrap(), 1);
+        assert_eq!(limits::listed(&store, limits::DEFERRED).unwrap(), vec![(1, 1), (1, 2)]);
+
+        // Sequence 1 is edited in place: ten times the per-transfer cap, digest to match, the
+        // daemon's seal left as it was.
+        let mut edited: Value = store.read_message(limits::DEFERRED, 1, 1).unwrap().unwrap();
+        assert!(edited["seal"].is_string(), "the daemon seals what it defers");
+        edited["message"] = json!(burn(1, 2, 10_000_000_000, 0));
+        plant(&store, 1, 1, edited);
+
+        std::thread::sleep(std::time::Duration::from_millis(3100));
+        let n = guardian::retry_deferred(&store, key, None, &emitters(), &guards).await.unwrap();
+        assert_eq!(n, 1, "sequence 2, the daemon's own record; the edited one holds nothing back");
+        assert!(signed(&store, 1, 1).is_none());
+        assert_eq!(signed(&store, 1, 2).unwrap()["message"]["digest"], hex::encode(burns[2].digest));
+
+        // An operator vouches for an unsealed record (one from before this build): it is then
+        // checked like any other — here, over the per-transfer cap, so held and not signed.
+        plant(&store, 1, 9, record_of(&burn(9, 2, 10_000_000_000, 0)));
+        plant(&store, 1, 10, record_of(&burn(10, 2, 100_000_000, 0)));
+        for sequence in [9, 10] {
+            guardian::vouch_deferred(&store, key, 1, sequence).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        guardian::retry_deferred(&store, key, None, &emitters(), &guards).await.unwrap();
+        assert!(signed(&store, 1, 9).is_none() && limits::held(&store).unwrap().contains(&(1, 9)));
+        assert!(signed(&store, 1, 10).is_some());
+        // Vouching does not launder a record whose digest is not its body's.
+        let mut bad = record_of(&burn(11, 2, 100_000_000, 0));
+        bad["message"]["digest"] = json!(hex::encode(burns[0].digest));
+        plant(&store, 1, 11, bad);
+        assert!(guardian::vouch_deferred(&store, key, 1, 11).is_err());
+    }
+}
