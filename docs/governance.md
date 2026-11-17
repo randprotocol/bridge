@@ -4,6 +4,15 @@ What this closes: security-report finding **BR-3** (High), "multisig and timeloc
 contracts; Solana upgrade authority". Design and rationale:
 `docs/superpowers/specs/2026-09-25-br3-governance-design.md`.
 
+> **UNRECONCILED — needs on-chain check (audit v14, BR-1009).** The paragraph below says the Tron
+> multi-signature account permissions "are still to do". `docs/mainnet-deployment.md` (section on
+> the Tron governance accounts) records them as done on 2026-09-26 — admin account owner 3 of 5
+> and active 3 of 5, pause account owner 3 of 5 and active 2 of 5, each with an
+> `AccountPermissionUpdate` transaction id — and strikes that step out. Both cannot be right, and
+> nothing in this repository settles it. Until someone reads `wallet/getaccount` for the two
+> accounts on Tron mainnet (or runs `rand-bridge-audit --governance`, whose Tron rules 10 and 13
+> read exactly that) and corrects whichever document is wrong, treat neither statement as fact.
+
 **Tron steps 0–3 ran on mainnet on 2026-09-26** (timelock `TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k`, pauser and pending admin set; `docs/mainnet-deployment.md`); the multi-signature account permissions and the accept are still to do. **No other on-chain step below has been run.** They move control of live custody and are
 irreversible once a timelock or multisig accepts. Run them in the order given, one chain at a time,
 and check each with the audit (§5) before the next.

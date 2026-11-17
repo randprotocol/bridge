@@ -138,8 +138,9 @@ listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, addr
 #     singleton, fallback handler not the Safe itself, no enabled module, getThreshold() >= min_threshold, at least
 #     that many owners (Tron: an account whose owner and active permissions each
 #     need >= min_threshold keys);
-#   pauser() — != admin(), != admin_multisig; a Safe as above (Tron: a
-#     contract, or an account needing >= min_threshold signatures);
+#   pauser() — != admin(), != admin_multisig; a Safe as above (Tron: like the
+#     admin multisig, an account whose owner and active permissions each need
+#     >= min_threshold signatures; an address with code is NOT enough, BR-1009);
 #   pendingAdmin() — zero;
 #   Solana — Config.admin is the vault ["multisig", solana_multisig, "vault",
 #     solana_vault_index] of Squads v4; no pending_admin; the multisig is
