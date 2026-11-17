@@ -148,9 +148,14 @@ fn parse_posted_message(data: &[u8], expect_sequence: u64) -> Result<Vec<u8>> {
             .ok_or_else(|| anyhow!("message account too short"))?
             .try_into()
             .expect("4"),
-    ) as usize;
+    );
+    // The length is the node's word (BR-846): no sum on it may overflow, on any target.
+    let end = usize::try_from(len)
+        .ok()
+        .and_then(|len| len.checked_add(13))
+        .ok_or_else(|| anyhow!("message body truncated"))?;
     Ok(data
-        .get(13..13 + len)
+        .get(13..end)
         .ok_or_else(|| anyhow!("message body truncated"))?
         .to_vec())
 }
@@ -233,7 +238,7 @@ impl Source for SolanaSource {
                     next_sequence: next,
                 },
             });
-            next += 1;
+            next = next.saturating_add(1); // below the program's sequence, so it fits
         }
         Ok((
             out,

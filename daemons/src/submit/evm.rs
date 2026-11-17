@@ -94,7 +94,11 @@ impl EvmSubmitter {
                 .await
                 .with_context(|| format!("{}: {what} would revert", self.name))?,
         )?;
-        let gas = gas + gas / 5;
+        // The estimate, the tip and the base fee are the node's words (BR-846): a number
+        // that does not fit is an error and no transaction, never an overflow.
+        let gas = gas.checked_add(gas / 5).ok_or_else(|| {
+            anyhow!("{}: eth_estimateGas answered {gas}, which is no gas limit", self.name)
+        })?;
 
         let chain_id = quantity(&self.rpc.call("eth_chainId", json!([])).await?)?;
         let nonce = quantity(
@@ -120,7 +124,15 @@ impl EvmSubmitter {
             .map(quantity_u128)
             .transpose()?
             .unwrap_or(0);
-        let max_fee = base_fee * 2 + tip;
+        let max_fee = base_fee
+            .checked_mul(2)
+            .and_then(|f| f.checked_add(tip))
+            .ok_or_else(|| {
+                anyhow!(
+                    "{}: base fee {base_fee} and tip {tip} do not make a fee that fits",
+                    self.name
+                )
+            })?;
 
         let raw = sign_eip1559(
             &self.key,

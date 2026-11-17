@@ -75,7 +75,9 @@ pub async fn bridge_state(rpc: &JsonRpc) -> Result<Option<BridgeState>> {
     Ok(Some(BridgeState {
         guardian_set_index: v["guardian_set_index"]
             .as_u64()
-            .ok_or_else(|| anyhow!("no guardian_set_index"))? as u32,
+            .ok_or_else(|| anyhow!("no guardian_set_index"))?
+            .try_into()
+            .map_err(|_| anyhow!("guardian_set_index does not fit a u32"))?,
         guardians,
         burn_sequence: v["burn_sequence"]
             .as_u64()
@@ -191,7 +193,7 @@ impl Source for RandSource {
                     next_sequence: next,
                 },
             });
-            next += 1;
+            next = next.saturating_add(1); // below burn_sequence, so it fits
         }
         Ok((
             out,

@@ -617,8 +617,12 @@ fn refusing_node(head: u64, published: Option<u64>) -> Fake {
     })
 }
 
+/// Audit v14, BR-1008: this test used to assert the opposite — that a refused range was passed
+/// over, to just after the safe head, when the same provider answered `sequence()` with the
+/// number the cursor expected. A stub that refused the range and answered that number moved
+/// the cursor past a block holding a lock. A refusal is now an error and the cursor stays.
 #[tokio::test]
-async fn a_refused_log_range_is_passed_when_the_endpoint_published_nothing_in_it() {
+async fn a_refused_log_range_is_never_passed_even_when_the_endpoint_says_nothing_was_published() {
     // Head 20 000, 15 confirmations: the safe head is 19 985. The cursor is
     // 12 000 blocks behind it, past the RPC's log window.
     let node = refusing_node(20_000, Some(5));
@@ -629,24 +633,25 @@ async fn a_refused_log_range_is_passed_when_the_endpoint_published_nothing_in_it
         1000,
     ))
     .unwrap();
-    let (messages, next) = source
+    let err = source
         .poll(&Cursor {
             next_block: 7_985,
             next_sequence: 5,
         })
         .await
-        .unwrap();
-    assert!(messages.is_empty());
-    assert_eq!(
-        next,
-        Cursor {
-            next_block: 19_986,
-            next_sequence: 5
-        },
-        "resumes right after the safe head whose sequence() was read"
+        .unwrap_err();
+    let refusal = err
+        .downcast_ref::<bridge_daemons::sources::RangeNotServed>()
+        .expect("a typed refusal");
+    assert_eq!((refusal.from, refusal.to), (7_985, 8_984));
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("403") && text.contains("never passed over") && text.contains("cursors/testnet.json"),
+        "{text}"
     );
-    // The counter was read at the safe head itself, from the endpoint, with
-    // the `sequence()` selector.
+    // The counter is still read at the safe head, from the endpoint, with the `sequence()`
+    // selector — to tell the operator what the provider claims, and for nothing else.
+    assert!(text.contains("sequence() at block 19985 is 5"), "{text}");
     let call = node
         .requests()
         .into_iter()
@@ -676,7 +681,7 @@ async fn a_refused_log_range_with_a_message_in_it_stays_an_error() {
         .unwrap_err();
     let text = format!("{err:#}");
     assert!(
-        text.contains("403") && text.contains("sequence() is 6") && text.contains("expects 5"),
+        text.contains("403") && text.contains("is 6 and the cursor expects 5"),
         "{text}"
     );
 }

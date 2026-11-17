@@ -600,8 +600,11 @@ fn a_relayer_observes_collects_a_quorum_and_records_the_release() {
         .arg(&config)
         .env("RELAYER_EVM_KEY", format!("{:064x}", 2));
     let mut daemon = Daemon::spawn(cmd, dir.path());
-    wait_until("the release recorded", || {
-        daemon.exited().is_none() && done_exists(dir.path(), 1, 0)
+    // The record is renamed into place, then its directories are synced, and only then does
+    // the relayer log the relay: the log line is waited for too, not read the instant the file
+    // appears (that raced under a busy disk).
+    wait_until("the release recorded and logged", || {
+        daemon.exited().is_none() && done_exists(dir.path(), 1, 0) && daemon.log().contains("Done")
     });
 
     let done: Value = serde_json::from_slice(

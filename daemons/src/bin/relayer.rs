@@ -13,6 +13,7 @@ use bridge_daemons::config::{address20, hex32, Config, EvmKind, RelayerConfig};
 use bridge_daemons::relayer::{
     self, Destinations, EndpointSubmitter, GuardianSet, Progress, RegistrationError,
 };
+use bridge_daemons::isolate::isolated;
 use bridge_daemons::rpc::JsonRpc;
 use bridge_daemons::sources::{evm::EvmSource, rand::RandSource, solana::SolanaSource, Source};
 use bridge_daemons::store::Store;
@@ -214,17 +215,19 @@ async fn main() -> Result<()> {
     }
 
     loop {
+        // Each source and each relay on its own (BR-846): whatever one provider answers —
+        // an error, or a panic nothing should be able to cause — the others still run.
         for source in &evm {
-            if let Err(e) = relayer::observe(source, &store).await {
+            if let Err(e) = isolated(source.name(), relayer::observe(source, &store)).await {
                 tracing::warn!("{e:#}");
             }
         }
         if let Some(source) = &solana {
-            if let Err(e) = relayer::observe(source, &store).await {
+            if let Err(e) = isolated(source.name(), relayer::observe(source, &store)).await {
                 tracing::warn!("{e:#}");
             }
         }
-        if let Err(e) = relayer::observe(&rand, &store).await {
+        if let Err(e) = isolated("rand", relayer::observe(&rand, &store)).await {
             tracing::warn!("rand: {e:#}");
         }
 
@@ -232,8 +235,11 @@ async fn main() -> Result<()> {
             Ok(set) => {
                 for message in relayer::pending(&store)? {
                     let (chain, sequence) = (message.emitter_chain, message.sequence);
-                    match relayer::relay_one(&message, &store, &guardians, &set, &destinations)
-                        .await
+                    match isolated(
+                        "relay",
+                        relayer::relay_one(&message, &store, &guardians, &set, &destinations),
+                    )
+                    .await
                     {
                         Ok(Progress::Done(outcome)) => {
                             tracing::info!(chain, sequence, "relayed: {outcome:?}")

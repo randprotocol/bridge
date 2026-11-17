@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bridge_codec::Body;
 use serde_json::{json, Value};
 
-use super::{Confirm, Cursor, Located, Source};
+use super::{Confirm, Cursor, Located, RangeNotServed, Source};
 use crate::config::{address20, EvmConfig, Finality};
 use crate::crypto::keccak256;
 use crate::message::Observed;
@@ -141,13 +141,23 @@ impl EvmSource {
         };
         let nonce = small(word(0)?, 4)? as u32;
         let consistency_level = small(word(1)?, 1)? as u8;
-        let offset = small(word(2)?, 8)? as usize;
-        let len_word = data
-            .get(offset..offset + 32)
+        // The offset and the length are the provider's words: every sum on them is checked,
+        // so a log no contract would emit is an error and never an overflow (BR-846).
+        let offset = usize::try_from(small(word(2)?, 8)?)
+            .map_err(|_| anyhow!("payload offset out of range"))?;
+        let len_end = offset
+            .checked_add(32)
             .ok_or_else(|| anyhow!("payload offset out of range"))?;
-        let len = small(len_word, 8)? as usize;
+        let len_word = data
+            .get(offset..len_end)
+            .ok_or_else(|| anyhow!("payload offset out of range"))?;
+        let len = usize::try_from(small(len_word, 8)?)
+            .map_err(|_| anyhow!("payload length out of range"))?;
+        let end = len_end
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("payload length out of range"))?;
         let payload = data
-            .get(offset + 32..offset + 32 + len)
+            .get(len_end..end)
             .ok_or_else(|| anyhow!("payload length out of range"))?
             .to_vec();
 
@@ -198,7 +208,21 @@ impl EvmSource {
         if cursor.next_block > safe {
             return Ok((Vec::new(), cursor.clone()));
         }
-        let to = safe.min(cursor.next_block + self.cfg.max_log_range.max(1) - 1);
+        // The head is the provider's word and the cursor came from one: no sum on either may
+        // overflow (BR-846).
+        let to = safe.min(
+            cursor
+                .next_block
+                .saturating_add(self.cfg.max_log_range.max(1) - 1),
+        );
+        let after = to.checked_add(1).ok_or_else(|| {
+            anyhow!(
+                "{}: the range from block {} ends at block u64::MAX, which no chain has reached; \
+                 refusing the provider's head",
+                self.cfg.name,
+                cursor.next_block
+            )
+        })?;
         let logs = match self
             .rpc
             .call(
@@ -213,44 +237,30 @@ impl EvmSource {
             .await
         {
             Ok(logs) => logs,
-            // The node will not serve this range: a public RPC that calls any
-            // range older than its log window "archive" (publicnode: HTTP 403
-            // past 10 000 blocks behind head, on Ethereum and BSC alike), so a
-            // daemon stopped for longer than that would otherwise never catch
-            // up. The endpoint's own counter settles whether the range holds
-            // anything: `sequence()` at the safe head equal to the sequence the
-            // cursor is waiting for means nothing was published through that
-            // block, and the scan may resume past it. Anything else keeps the
-            // cursor where it is, since a message would be missed.
+            // The node will not serve this range: a public RPC that calls any range older
+            // than its log window "archive" (publicnode: HTTP 403 past 10 000 blocks behind
+            // head, on Ethereum and BSC alike). That is an error and nothing else (BR-1008,
+            // BR-761): a refusal is not a reading of the range, so it never counts as "empty"
+            // and never moves the cursor — not even when the endpoint's own `sequence()`,
+            // answered by the same provider, says nothing was published. The counter is read
+            // only to tell the operator what this provider claims.
             Err(refused) => {
-                let published = match self.published_through(safe).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        return Err(refused.context(format!(
-                            "{}: and sequence() at block {safe} could not be read: {e:#}",
-                            self.cfg.name
-                        )))
-                    }
+                let claim = match self.published_through(safe).await {
+                    Ok(n) => format!(
+                        "this provider's own sequence() at block {safe} is {n} and the cursor \
+                         expects {}; that is its claim, not a reading of the range",
+                        cursor.next_sequence
+                    ),
+                    Err(e) => format!("its sequence() at block {safe} could not be read: {e:#}"),
                 };
-                if published != cursor.next_sequence {
-                    return Err(refused.context(format!(
-                        "{}: blocks [{}, {to}] hold a message this node will not serve (sequence() is {published} at block {safe}, the cursor expects {}); use an RPC that serves that range",
-                        self.cfg.name, cursor.next_block, cursor.next_sequence
-                    )));
+                return Err(RangeNotServed {
+                    source_name: self.cfg.name.clone(),
+                    from: cursor.next_block,
+                    to,
+                    cause: format!("{refused:#}"),
+                    claim,
                 }
-                tracing::warn!(
-                    "{}: eth_getLogs [{}, {to}] refused ({refused:#}); sequence() at block {safe} is still {published}, nothing was published through it — resuming at {}",
-                    self.cfg.name,
-                    cursor.next_block,
-                    safe + 1
-                );
-                return Ok((
-                    Vec::new(),
-                    Cursor {
-                        next_block: safe + 1,
-                        next_sequence: cursor.next_sequence,
-                    },
-                ));
+                .into());
             }
         };
         let logs = logs
@@ -296,7 +306,9 @@ impl EvmSource {
                     observed.sequence
                 );
             }
-            next_sequence += 1;
+            next_sequence = next_sequence.checked_add(1).ok_or_else(|| {
+                anyhow!("{}: sequence u64::MAX has no successor", self.cfg.name)
+            })?;
             // Re-reading this message means scanning its block again; the
             // sequence skips what came before it in that block.
             out.push(Located {
@@ -310,7 +322,7 @@ impl EvmSource {
         Ok((
             out,
             Cursor {
-                next_block: to + 1,
+                next_block: after,
                 next_sequence,
             },
         ))
