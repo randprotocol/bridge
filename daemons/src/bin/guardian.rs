@@ -115,6 +115,14 @@ async fn main() -> Result<()> {
             None
         }
     };
+    // BR-1005: which Rand chain this guardian signs burns of — its id and its genesis hash —
+    // is configuration, and mandatory: without both the daemon stops here, before it holds a
+    // store or a socket. Both are checked against the node below and again on every poll.
+    let (rand_chain_id, rand_genesis) = config.rand.chain_binding()?;
+    tracing::info!(
+        "signing burns of Rand chain {rand_chain_id}, genesis {}",
+        hex::encode(rand_genesis)
+    );
     let store = Store::open(&config.data_dir)?;
     let emitters = config.emitters()?;
     let limits = section
@@ -267,7 +275,13 @@ async fn main() -> Result<()> {
     {
         let rpc = bridge_daemons::rpc::JsonRpc::new(&config.rand.rpc);
         let cursor = store.cursor(rand.name())?.unwrap_or_else(|| rand.start());
-        bridge_daemons::sources::rand::check_startup(&rpc, config.rand.chain_id, &cursor).await?;
+        bridge_daemons::sources::rand::check_startup(
+            &rpc,
+            Some(rand_chain_id),
+            Some(rand_genesis),
+            &cursor,
+        )
+        .await?;
     }
 
     loop {

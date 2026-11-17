@@ -210,6 +210,7 @@ async fn rand_burns_need_the_same_body_from_a_quorum_of_nodes() {
                 "burn_sequence": 1, "pq_guardians": [],
             }))),
             "rand_getBridgeBurn" => Some(Ok(r(p[0].as_u64().unwrap()))),
+            "rand_chainId" => Some(Ok(json!(21))),
             _ => None,
         })
     };
@@ -220,6 +221,7 @@ async fn rand_burns_need_the_same_body_from_a_quorum_of_nodes() {
         emitter: hex::encode(RAND_EMITTER),
         start_sequence: 0,
         chain_id: Some(21),
+        genesis_hash: None,
     };
     let (a, b, liar) = (node(50_000_000), node(50_000_000), node(90_000_000_000));
     let agree = sources::rand_quorum(&cfg(&[&a.url, &b.url])).unwrap();

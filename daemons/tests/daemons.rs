@@ -158,7 +158,7 @@ fn a_guardian_needs_a_valid_key_chain_id_and_listen_address() {
         &base(
             dir.path(),
             "http://127.0.0.1:1",
-            "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"127.0.0.1:0\"",
         ),
     );
     assert!(run_failing(
@@ -174,13 +174,81 @@ fn a_guardian_needs_a_valid_key_chain_id_and_listen_address() {
         &base(
             dir.path(),
             "http://127.0.0.1:1",
-            "[guardian]\nlisten = \"999.1.1.1:1\"",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"999.1.1.1:1\"",
         ),
     );
     assert!(
         run_failing(guardian_cmd().env("GUARDIAN_KEY", &key), &bad_listen)
             .contains("binding 999.1.1.1:1")
     );
+
+    // BR-1005: a guardian does not start without both rand.chain_id and rand.genesis_hash —
+    // with a valid key and no PQ seed, before it opens its store or binds its port.
+    for (extra, names) in [
+        ("", "rand.chain_id is not set"),
+        ("chain_id = 14\n", "rand.genesis_hash is not set"),
+        ("genesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n", "rand.chain_id is not set"),
+        ("chain_id = 14\ngenesis_hash = \"<the chain's genesis hash>\"\n", "rand.genesis_hash must be"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_config(
+            dir.path(),
+            &base(dir.path(), "http://127.0.0.1:1", &format!("{extra}[guardian]\nlisten = \"127.0.0.1:0\"")),
+        );
+        let text = run_failing(guardian_cmd().env("GUARDIAN_KEY", &key), &config);
+        assert!(text.contains(names) && text.contains("BR-1005"), "{names}: {text}");
+        assert!(!dir.path().join("data").exists(), "{names}: stopped before the store was opened");
+    }
+}
+
+/// BR-1005, the running daemon: a guardian started on its chain keeps running when its node is
+/// switched to another one, signs none of that chain's burns, and says so at error level.
+#[test]
+fn a_running_guardian_signs_no_burn_once_its_node_serves_another_chain() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    let dir = tempfile::tempdir().unwrap();
+    let burn = burn(0, 2, 50_000_000, 0);
+    let served = std::sync::Arc::new(AtomicU64::new(14));
+    let burns = std::sync::Arc::new(AtomicU64::new(0));
+    let (chain, count, body) = (served.clone(), burns.clone(), burn.clone());
+    let rand = rpc(move |m, _| match m {
+        "rand_chainId" => Some(Ok(json!(chain.load(SeqCst)))),
+        "rand_getGenesisHash" => Some(Ok(json!("ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a"))),
+        "rand_getBridgeState" => Some(Ok(json!({
+            "enabled": true, "guardian_set_index": 0, "guardians": [],
+            "burn_sequence": count.load(SeqCst), "pq_guardians": [],
+        }))),
+        "rand_getBridgeBurn" => Some(Ok(json!({ "body_hex": hex::encode(&body.body), "digest": hex::encode(body.digest) }))),
+        _ => None,
+    });
+    let launch = |port: u16| {
+        let config = write_config(
+            dir.path(),
+            &base(
+                dir.path(),
+                &rand.url,
+                &format!("chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"127.0.0.1:{port}\"\n"),
+            ),
+        );
+        let mut cmd = guardian_cmd();
+        cmd.arg("--config").arg(&config).env("GUARDIAN_KEY", format!("{:064x}", 1));
+        cmd
+    };
+    let (daemon, _port) = start_daemon(dir.path(), launch);
+    // The node is switched to chain 15, and that chain has a burn at sequence 0.
+    served.store(15, SeqCst);
+    burns.store(1, SeqCst);
+    wait_until("the guardian says it is not signing", || {
+        daemon.log().contains("NOT SIGNING FOR RAND") && daemon.log().contains("serves chain 15")
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // two more rounds
+    assert!(!dir.path().join("data/signed/1").exists(), "{}", daemon.log());
+    // Switched back, the burn of its own chain is signed.
+    served.store(14, SeqCst);
+    wait_until("the burn signed", || dir.path().join(format!("data/signed/1/{:020}.json", 0)).exists());
+    // The daemon listens for SIGINT only between rounds; let the round that signed finish.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(daemon.stop().success());
 }
 
 #[test]
@@ -192,7 +260,7 @@ fn a_guardian_refuses_a_chain_id_the_node_contradicts() {
         &base(
             dir.path(),
             &node.url,
-            "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"127.0.0.1:0\"",
         ),
     );
     let text = run_failing(
@@ -221,7 +289,7 @@ fn a_guardian_refuses_to_start_when_its_rand_node_does_not_answer() {
             &base(
                 dir.path(),
                 url,
-                "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+                "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"127.0.0.1:0\"",
             ),
         );
         let text = run_failing(
@@ -230,7 +298,8 @@ fn a_guardian_refuses_to_start_when_its_rand_node_does_not_answer() {
         );
         assert!(text.contains(expect), "{text}");
     }
-    // Without a chain id there is nothing to compare, but the bridge state must still answer.
+    // Without a chain id a guardian no longer reaches the node at all (audit v14, BR-1005: it
+    // used to start and compare nothing): it stops on its configuration.
     let config = write_config(
         dir.path(),
         &base(
@@ -243,7 +312,7 @@ fn a_guardian_refuses_to_start_when_its_rand_node_does_not_answer() {
         guardian_cmd().env("GUARDIAN_KEY", format!("{:064x}", 1)),
         &config,
     );
-    assert!(text.contains("rand_getBridgeState"), "{text}");
+    assert!(text.contains("rand.chain_id is not set"), "{text}");
 }
 
 #[test]
@@ -255,7 +324,7 @@ fn a_relayer_refuses_a_chain_id_the_node_contradicts_or_does_not_confirm() {
         &base(
             dir.path(),
             &node.url,
-            "chain_id = 14\n[relayer]\nguardians = []",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[relayer]\nguardians = []",
         ),
     );
     let text = run_failing(&mut relayer_cmd(), &config);
@@ -269,7 +338,7 @@ fn a_relayer_refuses_a_chain_id_the_node_contradicts_or_does_not_confirm() {
         &base(
             dir.path(),
             &mute.url,
-            "chain_id = 14\n[relayer]\nguardians = []",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[relayer]\nguardians = []",
         ),
     );
     let text = run_failing(&mut relayer_cmd(), &config);
@@ -284,12 +353,12 @@ fn a_rand_cursor_ahead_of_the_chain_stops_either_daemon_at_startup() {
         (
             "guardian",
             guardian_cmd(),
-            "chain_id = 14\n[guardian]\nlisten = \"127.0.0.1:0\"",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[guardian]\nlisten = \"127.0.0.1:0\"",
         ),
         (
             "relayer",
             relayer_cmd(),
-            "chain_id = 14\n[relayer]\nguardians = []",
+            "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[relayer]\nguardians = []",
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -372,6 +441,7 @@ fn rand_node(burns: Vec<Observed>, chain_id: u64, guardians: &[GuardianKey]) -> 
         .collect();
     rpc(move |m, p| match m {
         "rand_chainId" => Some(Ok(json!(chain_id))),
+        "rand_getGenesisHash" => Some(Ok(json!("ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a"))),
         "rand_getBridgeState" => Some(Ok(json!({
             "enabled": true, "guardian_set_index": 0, "guardians": addresses,
             "burn_sequence": burns.len(), "pq_guardians": [],
@@ -432,7 +502,7 @@ fn a_guardian_signs_what_it_watches_and_serves_it_until_interrupted() {
             dir.path(),
             &rand.url,
             &format!(
-                "chain_id = 14\n\n[[evm]]\nname = \"eth\"\nchain = 2\nkind = \"evm\"\nrpc = {:?}\ncontract = {CONTRACT:?}\nfinality = 0\n\n\
+                "chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n\n[[evm]]\nname = \"eth\"\nchain = 2\nkind = \"evm\"\nrpc = {:?}\ncontract = {CONTRACT:?}\nfinality = 0\n\n\
                  [solana]\nrpc = {:?}\nprogram = \"11111111111111111111111111111111\"\n\n[guardian]\nlisten = \"127.0.0.1:{port}\"\n",
                 eth.url, sol.url
             ),
@@ -501,14 +571,19 @@ fn a_guardian_with_no_pq_seed_warns_and_signs_classically() {
     let deposit = eth_lock(0, [9; 32]);
     let eth = evm_node(vec![evm_log(CONTRACT, &deposit, 50)], false);
     // A Rand node without a bridge: the source has nothing to offer and says so.
-    let rand = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
+    let rand = rpc(|m, _| match m {
+        "rand_getBridgeState" => Some(Ok(json!({ "enabled": false }))),
+        "rand_chainId" => Some(Ok(json!(14))),
+        "rand_getGenesisHash" => Some(Ok(json!("ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a"))),
+        _ => None,
+    });
     let launch = |port: u16| {
         let config = write_config(
         dir.path(),
         &base(
             dir.path(),
             &rand.url,
-            &format!("[[evm]]\nname = \"eth\"\nchain = 2\nkind = \"evm\"\nrpc = {:?}\ncontract = {CONTRACT:?}\nfinality = \"latest\"\n\n[guardian]\nlisten = \"127.0.0.1:{port}\"\n", eth.url),
+            &format!("chain_id = 14\ngenesis_hash = \"ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a\"\n[[evm]]\nname = \"eth\"\nchain = 2\nkind = \"evm\"\nrpc = {:?}\ncontract = {CONTRACT:?}\nfinality = \"latest\"\n\n[guardian]\nlisten = \"127.0.0.1:{port}\"\n", eth.url),
         ),
     );
         let mut cmd = guardian_cmd();

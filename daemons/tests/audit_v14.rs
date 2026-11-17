@@ -481,3 +481,186 @@ mod br1004 {
         assert!(guardian::vouch_deferred(&store, key, 1, 11).is_err());
     }
 }
+
+// ---- BR-1005: the Rand chain a guardian signs burns of ---------------------------
+// ---- BR-1006: an undecodable post-quantum guardian key ---------------------------
+
+mod br1005 {
+    use super::*;
+    use bridge_daemons::config::RandConfig;
+    use bridge_daemons::rpc::JsonRpc;
+    use bridge_daemons::sources::rand::{self, RandSource};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    use std::sync::Arc;
+
+    /// Chain 21's genesis hash, as the repository records it (AGENTS.md, spec/PQ-COSIGNATURE.md).
+    const CHAIN21: &str = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a";
+    const OTHER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn cfg(url: &str, chain_id: Option<u64>, genesis: Option<&str>) -> RandConfig {
+        RandConfig {
+            rpc: url.into(),
+            emitter: hex::encode(RAND_EMITTER),
+            start_sequence: 0,
+            chain_id,
+            genesis_hash: genesis.map(str::to_string),
+            rpcs: Vec::new(),
+            rpc_quorum: None,
+        }
+    }
+
+    struct Node {
+        chain_id: AtomicU64,
+        other_genesis: AtomicBool,
+        /// Switch to chain 22 the moment a burn is served: a node restarted mid-poll.
+        flip_on_burn: AtomicBool,
+    }
+
+    /// A Rand node with one burn, whose chain an operator can switch under the guardian.
+    fn node() -> (Fake, Arc<Node>) {
+        let state = Arc::new(Node {
+            chain_id: AtomicU64::new(21),
+            other_genesis: AtomicBool::new(false),
+            flip_on_burn: AtomicBool::new(false),
+        });
+        let s = state.clone();
+        let burn = burn(0, 2, 50_000_000, 0);
+        let fake = rpc(move |m, _| match m {
+            "rand_chainId" => Some(Ok(json!(s.chain_id.load(SeqCst)))),
+            "rand_getGenesisHash" => Some(Ok(json!(if s.other_genesis.load(SeqCst) { OTHER } else { CHAIN21 }))),
+            "rand_getBridgeState" => Some(Ok(json!({
+                "enabled": true, "guardian_set_index": 1, "guardians": [],
+                "burn_sequence": 1, "pq_guardians": [],
+            }))),
+            "rand_getBridgeBurn" => {
+                if s.flip_on_burn.load(SeqCst) {
+                    s.chain_id.store(22, SeqCst);
+                }
+                Some(Ok(json!({ "body_hex": hex::encode(&burn.body), "digest": hex::encode(burn.digest) })))
+            }
+            _ => None,
+        });
+        (fake, state)
+    }
+
+    /// The auditor's sequence: a guardian started on chain 21, its node switched to chain 22.
+    /// Every poll asks the node which chain it serves, by id and by genesis hash, before it
+    /// reads a burn; a node on another chain yields an error and no burn.
+    #[tokio::test]
+    async fn br1005_a_node_switched_to_another_chain_yields_no_burn_to_sign() {
+        let (fake, state) = node();
+        let source = RandSource::new(&cfg(&fake.url, Some(21), Some(CHAIN21)));
+        let (burns, next) = source.poll(&at(0, 0)).await.unwrap();
+        assert_eq!((burns.len(), next), (1, at(0, 1)), "on its own chain the burn is read");
+
+        // The node is switched to chain 22 (another id; chain 22's burn 0 is another burn).
+        state.chain_id.store(22, SeqCst);
+        let err = format!("{:#}", source.poll(&at(0, 0)).await.unwrap_err());
+        assert!(err.contains("serves chain 22") && err.contains("rand.chain_id is 21"), "{err}");
+
+        // The same id over another genesis: a re-cut chain, or a node made to answer 21.
+        state.chain_id.store(21, SeqCst);
+        state.other_genesis.store(true, SeqCst);
+        let err = format!("{:#}", source.poll(&at(0, 0)).await.unwrap_err());
+        assert!(err.contains("genesis") && err.contains(OTHER) && err.contains(CHAIN21), "{err}");
+
+        // Switched between the check and the read: the check after the burns catches it, and
+        // the burn read in between is not returned.
+        state.other_genesis.store(false, SeqCst);
+        state.flip_on_burn.store(true, SeqCst);
+        let err = format!("{:#}", source.poll(&at(0, 0)).await.unwrap_err());
+        assert!(err.contains("serves chain 22"), "{err}");
+        assert!(fake.count("rand_getBridgeBurn") >= 2, "the burn was served and then dropped");
+    }
+
+    /// Through the guardian's own step, as a quorum of one: nothing is signed, the cursor stays.
+    #[tokio::test]
+    async fn br1005_the_guardian_signs_no_burn_of_a_switched_node() {
+        let (fake, state) = node();
+        let dir = tempfile::tempdir().unwrap();
+        let store = bridge_daemons::store::Store::open(dir.path()).unwrap();
+        let source = sources::rand_quorum(&cfg(&fake.url, Some(21), Some(CHAIN21))).unwrap();
+        let key = &guardian_keys(1)[0];
+        let emitters = bridge_daemons::message::Emitters { rand: RAND_EMITTER, endpoints: vec![] };
+        state.chain_id.store(22, SeqCst);
+        let err = bridge_daemons::guardian::step(&source, &store, key, None, &emitters).await.unwrap_err();
+        assert!(format!("{err:#}").contains("serves chain 22"), "{err:#}");
+        assert!(store.read_message::<Value>("signed", 1, 0).unwrap().is_none());
+        assert_eq!(store.cursor("rand").unwrap(), None);
+        // Back on chain 21 it signs.
+        state.chain_id.store(21, SeqCst);
+        assert_eq!(bridge_daemons::guardian::step(&source, &store, key, None, &emitters).await.unwrap(), 1);
+    }
+
+    /// The startup check reads the genesis hash too, and a guardian's configuration must name
+    /// both: `chain_binding` is what rand-guardian refuses to start without.
+    #[tokio::test]
+    async fn br1005_startup_checks_the_genesis_hash_and_a_guardian_must_configure_both() {
+        let (fake, state) = node();
+        let client = JsonRpc::new(&fake.url);
+        let g = bridge_daemons::config::hex32(CHAIN21).unwrap();
+        rand::check_startup(&client, Some(21), Some(g), &at(0, 0)).await.unwrap();
+        state.other_genesis.store(true, SeqCst);
+        let err = format!("{:#}", rand::check_startup(&client, Some(21), Some(g), &at(0, 0)).await.unwrap_err());
+        assert!(err.contains("rand.genesis_hash") && err.contains(OTHER), "{err}");
+
+        assert_eq!(cfg("http://x", Some(21), Some(CHAIN21)).chain_binding().unwrap(), (21, g));
+        for (chain_id, genesis, names) in [
+            (None, Some(CHAIN21), "rand.chain_id"),
+            (Some(21), None, "rand.genesis_hash"),
+            (None, None, "rand.chain_id"),
+            (Some(21), Some("ca76"), "rand.genesis_hash"),
+            (Some(21), Some("<the chain's genesis hash>"), "rand.genesis_hash"),
+        ] {
+            let err = format!("{:#}", cfg("http://x", chain_id, genesis).chain_binding().unwrap_err());
+            assert!(err.contains(names) && err.contains("BR-1005"), "{err}");
+        }
+    }
+
+    /// The mainnet configs in the repository carry chain 21 and its recorded genesis hash.
+    #[test]
+    fn br1005_the_mainnet_configs_name_chain_21_and_its_genesis_hash() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mainnet");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let config = bridge_daemons::config::Config::load(&path).unwrap();
+            let (chain_id, genesis) = config.rand.chain_binding().unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            assert_eq!((chain_id, hex::encode(genesis).as_str()), (21, CHAIN21), "{}", path.display());
+            seen += 1;
+        }
+        assert_eq!(seen, 9, "eight guardians and the relayer");
+    }
+
+    /// BR-1006: an entry of `pq_guardians` that is not hex was dropped in silence, which moved
+    /// every later key down one index; an undecodable ECDSA guardian was already an error.
+    #[tokio::test]
+    async fn br1006_an_undecodable_pq_guardian_key_is_an_error_that_names_its_index() {
+        for (keys, why) in [
+            (json!(["0a0b", "zz", "0c"]), "pq_guardians[1]"),
+            (json!(["0a0b", 7]), "pq_guardians[1]"),
+            (json!([null]), "pq_guardians[0]"),
+            (json!("0a0b"), "pq_guardians is not a list"),
+        ] {
+            let node = rpc(move |_, _| {
+                Some(Ok(json!({ "enabled": true, "guardian_set_index": 1, "guardians": [],
+                    "burn_sequence": 0, "pq_guardians": keys.clone() })))
+            });
+            let err = match rand::bridge_state(&JsonRpc::new(&node.url)).await {
+                Err(e) => format!("{e:#}"),
+                Ok(_) => panic!("{why}: accepted"),
+            };
+            assert!(err.contains(why), "{why}: {err}");
+        }
+        // Hex with a 0x prefix, and no list at all, are still read.
+        let node = rpc(|_, _| {
+            Some(Ok(json!({ "enabled": true, "guardian_set_index": 1, "guardians": [],
+                "burn_sequence": 0, "pq_guardians": ["0x0a0b", "0c"] })))
+        });
+        let state = rand::bridge_state(&JsonRpc::new(&node.url)).await.unwrap().unwrap();
+        assert_eq!(state.pq_guardians, vec![vec![0x0a, 0x0b], vec![0x0c]]);
+    }
+}

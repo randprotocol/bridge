@@ -79,6 +79,34 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   guardian index: `mu` covers the body only, so after a rotation the same signature is simply
   assembled under the new set's indices. That is all "re-signing under the current set" takes.
 
+### What an operator must know before rolling this build (audit v14)
+
+Nothing here is deployed by merging it. Before a guardian host gets a binary built from it:
+
+- **`rand.genesis_hash` is mandatory for `rand-guardian`, with `rand.chain_id` (BR-1005).** A
+  guardian whose `/etc/rand-guardian.toml` lacks either stops at startup with an error that names
+  the missing line. Add `genesis_hash = "<64 hex>"` under `[rand]` on every guardian host *before*
+  the binary is replaced; the value is the chain's genesis hash from its cut record (chain 21:
+  `daemons/mainnet/guardian-*.toml`), not something copied from the node. Both are checked against
+  every Rand node at startup and on every poll; a node on another chain yields no burn and an
+  error (`NOT SIGNING FOR RAND`) each round, while locks from the other chains are still signed.
+  A cut to a new chain changes both lines (the `cut-chain*.sh` scripts so far edit `chain_id` only).
+  The signed body still names no Rand chain: binding it there is a wire-format change for a cut.
+- **A log range a provider will not serve is never passed over (BR-1008, BR-761).** A guardian
+  stopped for longer than its provider's log window used to resume on its own when the same
+  provider's `sequence()` matched the cursor. It now stays where it is and logs the range, every
+  round, until it has a provider that serves it (or, under `rpcs`, a quorum of them) or an
+  operator moves the cursor by hand as `docs/guardian-hosts.md` describes. Keep restarts shorter
+  than the window (publicnode: about an hour on BSC), or give the guardians archive-capable RPCs.
+- **Deferred records are sealed (BR-1004).** A transfer deferred by this build carries the
+  guardian's seal and is retried as before. A record in `deferred/` written by an earlier build has
+  none and is refused, with an error every round, until it is reviewed and vouched for:
+  `rand-guardian --config … --vouch-deferred <chain>:<sequence>` (needs the key). Check
+  `deferred/` on each host before the roll; empty means nothing to do. A seal is tied to the
+  guardian key, so a key change needs the same step.
+- **`rand_getBridgeState` with an undecodable `pq_guardians` entry is an error (BR-1006)**, where
+  it used to be read as a shorter list.
+
 ## Relayer
 
 - Watches the same sources itself, so it trusts no guardian about what was said on a chain: a
