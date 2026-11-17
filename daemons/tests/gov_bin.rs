@@ -330,6 +330,11 @@ fn cosign_writes_a_pq_quorum_that_the_ledger_rules_accept() {
     let mut c = gov();
     c.args([
         "cosign",
+        "--current-index",
+        "0",
+        "--current-guardians",
+        &current(),
+        "--yes",
         "--rand-chain-id",
         "14",
         "--seed-envs",
@@ -371,6 +376,11 @@ fn cosign_refuses_a_seed_that_is_not_a_guardian_and_a_short_quorum() {
         let mut c = gov();
         c.args([
             "cosign",
+            "--current-index",
+            "0",
+            "--current-guardians",
+            &current(),
+            "--yes",
             "--rand-chain-id",
             "14",
             "--seed-envs",
@@ -1149,4 +1159,141 @@ fn submit_tron_reads_consumed_from_the_node() {
         .unwrap();
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(out(&o).trim(), "AlreadyDone");
+}
+
+// ---- audit v14, BR-1002: cosign reads, verifies and asks before it signs ---------------
+
+/// `cosign` over `file`, with PQ1..PQ3 set, against the three current guardians.
+fn cosign(dir: &Path, file: &Path, extra: &[&str]) -> Output {
+    let pq_file = pq_set(dir, &[1, 2, 3]);
+    let mut c = gov();
+    c.args(["cosign", "--current-index", "0", "--current-guardians", &current()])
+        .args(["--rand-chain-id", "21", "--seed-envs", "PQ1,PQ2,PQ3", "--attestation-file"])
+        .arg(file)
+        .arg("--pq-guardians-file")
+        .arg(&pq_file)
+        .arg("--out")
+        .arg(dir.join("pq-sigs.json"))
+        .args(extra)
+        .stdin(std::process::Stdio::null());
+    with_seeds(&mut c, &[1, 2, 3]);
+    c.output().unwrap()
+}
+
+/// A deposit of 1.00000000 from Ethereum to Rand, signed by the current guardians in `signers`.
+fn deposit_file(dir: &Path, name: &str, signers: &[u8]) -> std::path::PathBuf {
+    let message = lock(2, word("0x1111111111111111111111111111111111111111"), 5, [9; 32]);
+    let attestation = bridge_codec::Attestation {
+        guardian_set_index: 0,
+        signatures: signers.iter().map(|&i| key(i).sign(&message.digest).unwrap().indexed(i - 1)).collect(),
+        body: message.decoded(),
+    };
+    let path = dir.join(name);
+    std::fs::write(&path, hex::encode(attestation.encode())).unwrap();
+    path
+}
+
+/// The auditor's case: an unsigned deposit body in an envelope. `cosign` wrote a post-quantum
+/// quorum over it, identical to a mint co-signature. It now prints what it was given, finds no
+/// quorum of the current set on it, and signs nothing — whatever flags it is given.
+#[test]
+fn cosign_refuses_an_envelope_the_current_set_did_not_sign() {
+    let dir = tempfile::tempdir().unwrap();
+    let sigs = dir.path().join("pq-sigs.json");
+    let unsigned = deposit_file(dir.path(), "unsigned.hex", &[]);
+    for flags in [&["--yes"][..], &["--yes", "--allow-transfer"]] {
+        let o = cosign(dir.path(), &unsigned, flags);
+        assert!(!o.status.success());
+        assert!(out(&o).contains("TRANSFER") && out(&o).contains("amount      100000000"), "{}", out(&o));
+        assert!(err(&o).contains("REFUSED") && err(&o).contains("NoQuorum"), "{}", err(&o));
+        assert!(!sigs.exists(), "nothing was signed");
+    }
+    // Two of three is short of the quorum of three; a signature by a key outside the set.
+    let short = deposit_file(dir.path(), "short.hex", &[1, 2]);
+    assert!(err(&cosign(dir.path(), &short, &["--yes", "--allow-transfer"])).contains("NoQuorum"));
+    // A rotation verified against another set than the one that signed it.
+    assert!(rotate(dir.path(), &[]).status.success());
+    let rotation = dir.path().join("rotation.hex");
+    let pq_file = pq_set(dir.path(), &[1, 2, 3]);
+    let mut c = gov();
+    c.args(["cosign", "--yes", "--current-index", "0", "--current-guardians"])
+        .arg(format!("{},{},{}", addr(2), addr(1), addr(3)))
+        .args(["--rand-chain-id", "21", "--seed-envs", "PQ1,PQ2,PQ3", "--attestation-file"])
+        .arg(&rotation)
+        .arg("--pq-guardians-file")
+        .arg(&pq_file)
+        .arg("--out")
+        .arg(&sigs);
+    with_seeds(&mut c, &[1, 2, 3]);
+    let o = c.output().unwrap();
+    assert!(err(&o).contains("REFUSED") && err(&o).contains("does not recover to guardian"), "{}", err(&o));
+    // …and against the wrong current index.
+    let mut c = gov();
+    c.args(["cosign", "--yes", "--current-index", "4", "--current-guardians", &current()])
+        .args(["--rand-chain-id", "21", "--seed-envs", "PQ1,PQ2,PQ3", "--attestation-file"])
+        .arg(&rotation)
+        .arg("--pq-guardians-file")
+        .arg(&pq_file)
+        .arg("--out")
+        .arg(&sigs);
+    with_seeds(&mut c, &[1, 2, 3]);
+    assert!(err(&c.output().unwrap()).contains("must be signed by the current set 4"));
+    assert!(!sigs.exists());
+}
+
+/// A good rotation: the whole body is printed before anything is signed, and without a
+/// confirmation (no terminal, no --yes) nothing is.
+#[test]
+fn cosign_prints_the_body_and_needs_a_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(rotate(dir.path(), &[]).status.success());
+    let rotation = dir.path().join("rotation.hex");
+    let sigs = dir.path().join("pq-sigs.json");
+
+    let o = cosign(dir.path(), &rotation, &[]);
+    assert!(!o.status.success());
+    let text = out(&o);
+    for shown in [
+        "About to co-sign, for Rand chain 21",
+        "signed by     guardian set 0, 3 signature(s), indices [0, 1, 2]",
+        "timestamp     1800000000",
+        "emitter       chain 1 address 0x",
+        "GUARDIAN-SET UPGRADE to set 1 with 2 key(s)",
+        &format!("new [0]     {}", addr(7)),
+        &format!("new [1]     {}", addr(8)),
+        "verified: a rotation from set 0 to set 1",
+    ] {
+        assert!(text.contains(shown), "{shown}\n{text}");
+    }
+    assert!(err(&o).contains("not confirmed") && err(&o).contains("--yes"), "{}", err(&o));
+    assert!(!sigs.exists(), "nothing is signed without the confirmation");
+
+    let o = cosign(dir.path(), &rotation, &["--yes"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(sigs.exists());
+}
+
+/// A deposit that does carry the current set's quorum is still not what `cosign` is for: it
+/// takes --allow-transfer, and a release (a burn on Rand) is refused even then.
+#[test]
+fn cosign_takes_a_signed_deposit_only_when_told_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let sigs = dir.path().join("pq-sigs.json");
+    let deposit = deposit_file(dir.path(), "deposit.hex", &[1, 2, 3]);
+    let o = cosign(dir.path(), &deposit, &["--yes"]);
+    assert!(err(&o).contains("this is a deposit, not a rotation") && !sigs.exists(), "{}", err(&o));
+    let o = cosign(dir.path(), &deposit, &["--yes", "--allow-transfer"]);
+    assert!(o.status.success() && sigs.exists(), "{}", err(&o));
+    std::fs::remove_file(&sigs).unwrap();
+
+    let release = burn(0, 2, 50_000_000, 0);
+    let attestation = bridge_codec::Attestation {
+        guardian_set_index: 0,
+        signatures: (1..=3u8).map(|i| key(i).sign(&release.digest).unwrap().indexed(i - 1)).collect(),
+        body: release.decoded(),
+    };
+    let path = dir.path().join("release.hex");
+    std::fs::write(&path, hex::encode(attestation.encode())).unwrap();
+    let o = cosign(dir.path(), &path, &["--yes", "--allow-transfer"]);
+    assert!(err(&o).contains("only a deposit to Rand is co-signed") && !sigs.exists(), "{}", err(&o));
 }

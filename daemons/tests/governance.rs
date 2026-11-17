@@ -341,3 +341,49 @@ fn verifying_refuses_a_set_above_the_solana_bound() {
     let err = sign_rotation(&body, 0, &current, &guardians).unwrap_err();
     assert!(err.to_string().contains("got 11"), "{err}");
 }
+
+// ---- audit v14, BR-1007 (survivor): the quorum rule of a rotation, pinned ------------
+
+/// `verify_rotation` applies the quorum rule through `bridge_codec::check_indices`, and no test
+/// in this repository's governance suites failed with that call taken out: every negative above
+/// is stopped by `sign_rotation`'s own count first, or by another rule. Here the attestation is
+/// assembled by hand, so only the verifier stands between four signatures and a set of six.
+#[test]
+fn four_signatures_of_a_set_of_six_are_refused() {
+    let guardians: Vec<GuardianKey> = (1..=6u8)
+        .map(|i| GuardianKey::from_hex(&format!("{i:064x}")).unwrap())
+        .collect();
+    let current: Vec<[u8; 20]> = guardians.iter().map(|k| k.address()).collect();
+    let body = rotation_body(0, &[[7u8; 20], [8u8; 20]], 1_800_000_000, 0, 1).unwrap();
+    let mu = bridge_daemons::crypto::digest(&body.encode());
+    let signed_by = |indices: &[usize]| {
+        Attestation {
+            guardian_set_index: 0,
+            signatures: indices
+                .iter()
+                .map(|&i| guardians[i].sign(&mu).unwrap().indexed(i as u8))
+                .collect(),
+            body: body.clone(),
+        }
+        .encode()
+    };
+
+    // Six guardians need 6 * 2 / 3 + 1 = 5. Four valid signatures, each from a guardian of the
+    // set, in order, are not a rotation — whichever four.
+    for four in [[0usize, 1, 2, 3], [2, 3, 4, 5], [0, 2, 3, 5]] {
+        let err = verify_rotation(&signed_by(&four), 0, &current).unwrap_err();
+        assert!(format!("{err:#}").contains("NoQuorum"), "{four:?}: {err:#}");
+    }
+    for fewer in [&[][..], &[0], &[0, 1, 2]] {
+        assert!(verify_rotation(&signed_by(fewer), 0, &current).is_err(), "{fewer:?}");
+    }
+    // Five are, and so are all six.
+    let checked = verify_rotation(&signed_by(&[0, 1, 2, 3, 4]), 0, &current).unwrap();
+    assert_eq!(checked.signer_indices, vec![0, 1, 2, 3, 4]);
+    verify_rotation(&signed_by(&[0, 1, 2, 3, 4, 5]), 0, &current).unwrap();
+    // The same four are a quorum of a set of five (5 * 2 / 3 + 1 = 4): it is the set's size
+    // that refused them above, nothing about the signatures.
+    verify_rotation(&signed_by(&[0, 1, 2, 3]), 0, &current[..5]).unwrap();
+    // And the tool's own cosign check refuses the four as well.
+    assert!(bridge_daemons::governance::verify_for_cosign(&signed_by(&[0, 1, 2, 3]), 0, &current).is_err());
+}

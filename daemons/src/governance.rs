@@ -161,6 +161,23 @@ pub fn verify_rotation(
     }
     check_new_keys(&upgrade.keys)?;
 
+    let digest = check_signatures(attestation, &decoded, current_set)?;
+    Ok(Rotation {
+        digest,
+        new_index: upgrade.new_index,
+        new_keys: upgrade.keys,
+        signer_indices: decoded.signatures.iter().map(|s| s.index).collect(),
+    })
+}
+
+/// The signature rules every verifier applies, on the bytes as given: a quorum of the set
+/// (`bridge_codec::check_indices`: indices in range, strictly ascending, at least
+/// `n * 2 / 3 + 1` of them), each recovering to the guardian at its index. Returns the digest.
+fn check_signatures(
+    attestation: &[u8],
+    decoded: &Attestation,
+    current_set: &[[u8; 20]],
+) -> Result<[u8; 32]> {
     bridge_codec::check_indices(&decoded.signatures, current_set.len())
         .map_err(|e| anyhow!("signatures: {e:?}"))?;
     let body_bytes = Attestation::body_bytes(attestation).map_err(|e| anyhow!("{e:?}"))?;
@@ -180,12 +197,113 @@ pub fn verify_rotation(
             );
         }
     }
-    Ok(Rotation {
-        digest,
-        new_index: upgrade.new_index,
-        new_keys: upgrade.keys,
-        signer_indices: decoded.signatures.iter().map(|s| s.index).collect(),
-    })
+    Ok(digest)
+}
+
+/// An attestation in words, for the person about to sign something over it (BR-1002): every
+/// field of the envelope and the body, and the payload decoded. Says so when it cannot decode.
+pub fn describe(attestation: &[u8]) -> Result<String> {
+    use std::fmt::Write;
+    let a = Attestation::decode(attestation).map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+    let body_bytes = Attestation::body_bytes(attestation).map_err(|e| anyhow!("{e:?}"))?;
+    let mut t = String::new();
+    let _ = writeln!(t, "attestation   {} bytes, digest 0x{}", attestation.len(), hex::encode(crypto::digest(body_bytes)));
+    let _ = writeln!(
+        t,
+        "signed by     guardian set {}, {} signature(s), indices {:?}",
+        a.guardian_set_index,
+        a.signatures.len(),
+        a.signatures.iter().map(|s| s.index).collect::<Vec<_>>()
+    );
+    let b = &a.body;
+    let _ = writeln!(t, "timestamp     {}", b.timestamp);
+    let _ = writeln!(t, "nonce         {}", b.nonce);
+    let _ = writeln!(t, "emitter       chain {} address 0x{}", b.emitter_chain, hex::encode(b.emitter_address));
+    let _ = writeln!(t, "sequence      {}", b.sequence);
+    let _ = writeln!(t, "consistency   {}", b.consistency_level);
+    match Payload::decode(&b.payload) {
+        Ok(Payload::GuardianSetUpgrade(u)) => {
+            let _ = writeln!(t, "payload       GUARDIAN-SET UPGRADE to set {} with {} key(s)", u.new_index, u.keys.len());
+            for (i, k) in u.keys.iter().enumerate() {
+                let _ = writeln!(t, "  new [{i}]     0x{}", hex::encode(k));
+            }
+        }
+        Ok(Payload::Transfer(x)) => {
+            let _ = writeln!(t, "payload       TRANSFER");
+            let amount = |v: Option<u128>| v.map(|n| n.to_string()).unwrap_or_else(|| "above u128".into());
+            let _ = writeln!(t, "  amount      {} (8-decimal units), fee {}", amount(x.amount_u128()), amount(x.fee_u128()));
+            let _ = writeln!(t, "  token       chain {} address 0x{}", x.token_chain, hex::encode(x.token_address));
+            let _ = writeln!(t, "  recipient   chain {} address 0x{}", x.to_chain, hex::encode(x.to));
+        }
+        Err(e) => {
+            let _ = writeln!(t, "payload       UNDECODABLE ({e:?}): 0x{}", hex::encode(&b.payload));
+        }
+    }
+    Ok(t)
+}
+
+/// What `verify_for_cosign` found the attestation to be.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cosignable {
+    Rotation(Rotation),
+    /// A deposit: a transfer from a source chain to Rand, carrying the current set's quorum.
+    Deposit { digest: [u8; 32], signer_indices: Vec<u8> },
+}
+
+impl Cosignable {
+    pub fn digest(&self) -> [u8; 32] {
+        match self {
+            Cosignable::Rotation(r) => r.digest,
+            Cosignable::Deposit { digest, .. } => *digest,
+        }
+    }
+}
+
+/// What must hold before a post-quantum key signs over an attestation by hand (BR-1002). A
+/// rotation passes every rule of [`verify_rotation`]. Anything else must be a canonical
+/// attestation of a transfer to Rand from another chain that already carries a quorum of the
+/// current set's signatures, each recovering to its guardian — what Rand itself would check of
+/// the classical half. An unsigned body, a body signed by another set, a release, a payload
+/// that does not decode: all refused.
+pub fn verify_for_cosign(
+    attestation: &[u8],
+    current_index: u32,
+    current_set: &[[u8; 20]],
+) -> Result<Cosignable> {
+    let decoded =
+        Attestation::decode(attestation).map_err(|e| anyhow!("undecodable attestation: {e:?}"))?;
+    match Payload::decode(&decoded.body.payload) {
+        Ok(Payload::GuardianSetUpgrade(_)) => {
+            verify_rotation(attestation, current_index, current_set).map(Cosignable::Rotation)
+        }
+        Ok(Payload::Transfer(transfer)) => {
+            if decoded.encode() != attestation {
+                bail!("attestation is not canonically encoded");
+            }
+            if decoded.guardian_set_index != current_index {
+                bail!(
+                    "signed by set {}, not the current set {current_index}",
+                    decoded.guardian_set_index
+                );
+            }
+            if decoded.body.emitter_chain == CHAIN_RAND || transfer.to_chain != CHAIN_RAND {
+                bail!(
+                    "a transfer from chain {} to chain {}: only a deposit to Rand is co-signed",
+                    decoded.body.emitter_chain,
+                    transfer.to_chain
+                );
+            }
+            if transfer.amount_u128() == Some(0) {
+                bail!("zero amount");
+            }
+            let digest = check_signatures(attestation, &decoded, current_set)?;
+            Ok(Cosignable::Deposit {
+                digest,
+                signer_indices: decoded.signatures.iter().map(|s| s.index).collect(),
+            })
+        }
+        Err(e) => bail!("the payload is neither a rotation nor a transfer: {e:?}"),
+    }
 }
 
 /// `submitGuardianSetUpgrade(bytes)` calldata for the EVM-family endpoints.

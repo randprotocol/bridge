@@ -251,7 +251,23 @@ enum Command {
     /// Dilithium2 co-signatures over an attestation, for its submission to Rand
     /// (`spec/PQ-COSIGNATURE.md`): a rotation needs them like any other BridgeAttest.
     /// Writes `[{"index", "signature"}]`, what `rand bridge-mint --pq @file` reads.
+    ///
+    /// The attestation is decoded and printed in full, then verified against the CURRENT
+    /// guardian set exactly as `verify` does (BR-1002); anything that fails is refused before
+    /// a seed is read. A rotation is what this is for; a deposit needs `--allow-transfer`.
+    /// Signing needs a confirmation: typed at the prompt, or `--yes` when there is no terminal.
     Cosign {
+        #[command(flatten)]
+        current: CurrentSet,
+        /// Co-sign a deposit (a transfer to Rand that carries the current set's quorum)
+        /// instead of a rotation. The guardian daemons co-sign deposits themselves; by hand
+        /// is for a deposit they signed without a PQ key.
+        #[arg(long)]
+        allow_transfer: bool,
+        /// Sign without asking: you have read the body this command prints. Required when
+        /// standard input is not a terminal.
+        #[arg(long)]
+        yes: bool,
         #[arg(long)]
         attestation_file: PathBuf,
         /// The Rand chain id the co-signatures name.
@@ -677,18 +693,61 @@ async fn main() -> Result<()> {
             }
         }
         Command::Cosign {
+            current,
+            allow_transfer,
+            yes,
             attestation_file,
             rand_chain_id,
             pq_guardians_file,
             seed_envs,
             out,
         } => {
+            use bridge_daemons::governance::{describe, verify_for_cosign, Cosignable};
             use bridge_daemons::pq;
+            use std::io::IsTerminal;
             let attestation = read_attestation(&attestation_file)?;
-            let mu = bridge_daemons::crypto::digest(
-                bridge_codec::Attestation::body_bytes(&attestation)
-                    .map_err(|e| anyhow!("{e:?}"))?,
-            );
+            // BR-1002: what is about to be signed, in words, before anything else — then the
+            // same verification `verify` runs. No seed is read until both are done.
+            println!("About to co-sign, for Rand chain {rand_chain_id}:\n");
+            print!("{}", describe(&attestation)?);
+            println!();
+            let checked = verify_for_cosign(
+                &attestation,
+                current.current_index,
+                &addresses(&current.current_guardians)?,
+            )
+            .context("REFUSED: this attestation does not verify against the current guardian set, so it is not co-signed")?;
+            match &checked {
+                Cosignable::Rotation(r) => println!(
+                    "verified: a rotation from set {} to set {}, signed by current guardians {:?}",
+                    current.current_index, r.new_index, r.signer_indices
+                ),
+                Cosignable::Deposit { signer_indices, .. } => {
+                    println!("verified: a deposit to Rand, signed by current guardians {signer_indices:?}");
+                    if !allow_transfer {
+                        bail!(
+                            "REFUSED: this is a deposit, not a rotation. The guardian daemons \
+                             co-sign deposits; pass --allow-transfer to do it by hand"
+                        );
+                    }
+                }
+            }
+            let mu = checked.digest();
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "REFUSED: not confirmed. Read the body above, then pass --yes \
+                         (standard input is not a terminal, so there is no prompt)"
+                    );
+                }
+                let short = &hex::encode(mu)[..8];
+                println!("To co-sign exactly this, type the first 8 hex digits of its digest ({short}…):");
+                let mut typed = String::new();
+                std::io::stdin().read_line(&mut typed)?;
+                if typed.trim().trim_start_matches("0x") != short {
+                    bail!("REFUSED: not confirmed");
+                }
+            }
             let file: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&pq_guardians_file)?)?;
             let pq_guardians: Vec<Vec<u8>> = file["pq_guardians"]
