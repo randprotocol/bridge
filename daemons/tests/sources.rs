@@ -732,6 +732,7 @@ fn rand_cfg(url: &str, start: u64) -> RandConfig {
         emitter: hex::encode(RAND_EMITTER),
         start_sequence: start,
         chain_id: Some(14),
+        genesis_hash: None,
     }
 }
 
@@ -747,7 +748,7 @@ fn rand_node(burn_sequence: u64, row: impl Fn(u64) -> Value + Send + Sync + 'sta
             "guardian_set_index": 1,
             "guardians": [CONTRACT, "0x2222222222222222222222222222222222222222"],
             "burn_sequence": burn_sequence,
-            "pq_guardians": ["0a0b", "zz", "0c"],
+            "pq_guardians": ["0a0b", "0c"],
         }))),
         "rand_getBridgeBurn" => Some(Ok(row(p[0].as_u64().unwrap()))),
         "rand_chainId" => Some(Ok(json!(14))),
@@ -770,7 +771,8 @@ async fn the_bridge_state_and_chain_id_are_read_from_the_node() {
     assert_eq!(
         state.pq_guardians,
         vec![vec![0x0a, 0x0b], vec![0x0c]],
-        "an undecodable key is dropped"
+        "index-aligned with the guardians; an undecodable one is an error (audit v14, BR-1006: \
+         this fake used to carry a \"zz\" entry and this test asserted it was dropped)"
     );
     assert_eq!(rand::chain_id(&client).await.unwrap(), 14);
     assert_eq!(
@@ -886,7 +888,12 @@ async fn a_poll_takes_at_most_a_batch_of_64() {
 
 #[tokio::test]
 async fn a_node_with_no_bridge_or_a_missing_burn_yields_nothing() {
-    let off = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
+    // (It answers rand_chainId: since audit v14, BR-1005, every poll confirms the chain first.)
+    let off = rpc(|m, _| match m {
+        "rand_getBridgeState" => Some(Ok(json!({ "enabled": false }))),
+        "rand_chainId" => Some(Ok(json!(14))),
+        _ => None,
+    });
     let source = RandSource::new(&rand_cfg(&off.url, 0));
     let (messages, next) = source
         .poll(&Cursor {
@@ -919,17 +926,17 @@ async fn a_cursor_ahead_of_the_chain_is_refused_at_startup_and_on_every_poll() {
         next_sequence: n,
     };
     // At or behind the chain: fine.
-    rand::check_startup(&client, Some(14), &at(3))
+    rand::check_startup(&client, Some(14), None, &at(3))
         .await
         .unwrap();
-    rand::check_startup(&client, Some(14), &at(0))
+    rand::check_startup(&client, Some(14), None, &at(0))
         .await
         .unwrap();
-    rand::check_startup(&client, None, &at(3)).await.unwrap();
+    rand::check_startup(&client, None, None, &at(3)).await.unwrap();
     // Ahead: refused, naming both numbers.
     let err = format!(
         "{:#}",
-        rand::check_startup(&client, Some(14), &at(4))
+        rand::check_startup(&client, Some(14), None, &at(4))
             .await
             .unwrap_err()
     );
@@ -950,7 +957,7 @@ async fn a_cursor_ahead_of_the_chain_is_refused_at_startup_and_on_every_poll() {
     // answer, stops the daemon rather than being skipped.
     let err = format!(
         "{:#}",
-        rand::check_startup(&client, Some(15), &at(0))
+        rand::check_startup(&client, Some(15), None, &at(0))
             .await
             .unwrap_err()
     );
@@ -961,7 +968,7 @@ async fn a_cursor_ahead_of_the_chain_is_refused_at_startup_and_on_every_poll() {
     let mute = rpc(|_, _| None);
     let err = format!(
         "{:#}",
-        rand::check_startup(&JsonRpc::new(&mute.url), Some(14), &at(0))
+        rand::check_startup(&JsonRpc::new(&mute.url), Some(14), None, &at(0))
             .await
             .unwrap_err()
     );
@@ -970,14 +977,14 @@ async fn a_cursor_ahead_of_the_chain_is_refused_at_startup_and_on_every_poll() {
     // answer so the cursor can be checked.
     let err = format!(
         "{:#}",
-        rand::check_startup(&JsonRpc::new(&mute.url), None, &at(0))
+        rand::check_startup(&JsonRpc::new(&mute.url), None, None, &at(0))
             .await
             .unwrap_err()
     );
     assert!(err.contains("rand_getBridgeState"), "{err}");
     // A chain without a bridge has no burn sequence to be ahead of.
     let off = rpc(|m, _| (m == "rand_getBridgeState").then(|| Ok(json!({ "enabled": false }))));
-    rand::check_startup(&JsonRpc::new(&off.url), None, &at(9))
+    rand::check_startup(&JsonRpc::new(&off.url), None, None, &at(9))
         .await
         .unwrap();
 }

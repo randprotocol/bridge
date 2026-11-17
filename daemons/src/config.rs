@@ -55,6 +55,44 @@ pub struct RandConfig {
     /// (`spec/PQ-COSIGNATURE.md`): it is part of what the co-signature is
     /// over, and the guardian must know it without trusting an RPC node.
     pub chain_id: Option<u64>,
+    /// The Rand chain's genesis hash (`rand_getGenesisHash`), 64 hex, from the chain's cut
+    /// record — never copied from the node it is meant to check. With `chain_id` it says
+    /// which Rand chain this daemon works for (BR-1005): every poll of a Rand node checks
+    /// both before a burn is read, so a node switched to another chain yields nothing to
+    /// sign. `rand-guardian` does not start without both.
+    #[serde(default)]
+    pub genesis_hash: Option<String>,
+}
+
+impl RandConfig {
+    /// The configured genesis hash, decoded.
+    pub fn genesis(&self) -> Result<Option<[u8; 32]>> {
+        self.genesis_hash
+            .as_deref()
+            .map(|g| {
+                hex32(g).with_context(|| {
+                    format!("rand.genesis_hash must be the chain's 32-byte genesis hash as 64 hex, got {g:?} (BR-1005)")
+                })
+            })
+            .transpose()
+    }
+
+    /// The Rand chain this configuration is for, by id and genesis hash — or the reason a
+    /// guardian must not start (BR-1005): a daemon that signs burns has to know which chain's
+    /// burns, from its own configuration, and fails closed without it.
+    pub fn chain_binding(&self) -> Result<(u64, [u8; 32])> {
+        let missing = |field: &str| {
+            anyhow!(
+                "{field} is not set. rand-guardian signs burns of one Rand chain only and does \
+                 not start without rand.chain_id and rand.genesis_hash under [rand] (BR-1005): \
+                 set both from the chain's cut record (genesis_hash is what rand_getGenesisHash \
+                 serves on that chain, 64 hex), not from the node this daemon reads"
+            )
+        };
+        let chain_id = self.chain_id.ok_or_else(|| missing("rand.chain_id"))?;
+        let genesis = self.genesis()?.ok_or_else(|| missing("rand.genesis_hash"))?;
+        Ok((chain_id, genesis))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -362,6 +400,7 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         hex32(&self.rand.emitter).context("rand.emitter")?;
+        self.rand.genesis()?;
         check_providers(
             "rand",
             &self.rand.rpc,

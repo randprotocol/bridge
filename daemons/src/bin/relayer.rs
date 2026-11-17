@@ -210,8 +210,19 @@ async fn main() -> Result<()> {
     // chain or polling a cursor the chain can never reach.
     {
         let cursor = store.cursor(rand.name())?.unwrap_or_else(|| rand.start());
-        bridge_daemons::sources::rand::check_startup(&rand_rpc, config.rand.chain_id, &cursor)
-            .await?;
+        if config.rand.chain_id.is_none() || config.rand.genesis_hash.is_none() {
+            tracing::warn!(
+                "rand.chain_id and rand.genesis_hash are not both set: this relayer cannot tell \
+                 a Rand node switched to another chain from its own (BR-1005)"
+            );
+        }
+        bridge_daemons::sources::rand::check_startup(
+            &rand_rpc,
+            config.rand.chain_id,
+            config.rand.genesis()?,
+            &cursor,
+        )
+        .await?;
     }
 
     loop {
