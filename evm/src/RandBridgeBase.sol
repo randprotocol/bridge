@@ -32,9 +32,12 @@ interface IERC20Metadata {
 /// digest is marked consumed and custody/window counters are updated
 /// *before* any token call, so a token with a callback in its transfer
 /// hook cannot re-enter into a second release of the same attestation.
-/// `lock` and `release` also share a reentrancy lock (`nonReentrant`), so
-/// a token call can re-enter neither; that holds even if a later change
-/// breaks the ordering or the balance-delta checks.
+/// `lock`, `release` and `withdrawFees` — the three functions that call a
+/// token to move it — also share a reentrancy lock (`nonReentrant`), so a
+/// token call made by any of them can re-enter none of them; that holds
+/// even if a later change breaks the ordering or the balance-delta checks.
+/// The lock covers nothing else: the admin and pauser functions and
+/// `submitGuardianSetUpgrade` move no tokens and are not guarded by it.
 abstract contract RandBridgeBase is IRandBridge {
     using SafeTransfer for address;
 
@@ -458,8 +461,8 @@ abstract contract RandBridgeBase is IRandBridge {
     // roles and configuration
     // ------------------------------------------------------------------
 
-    /// One `lock` or `release` at a time: a token whose transfer calls back
-    /// into the bridge is refused `ReentrantCall`.
+    /// One `lock`, `release` or `withdrawFees` at a time: a token whose
+    /// transfer calls back into any of the three is refused `ReentrantCall`.
     modifier nonReentrant() {
         if (_entered == 2) revert ReentrantCall();
         _entered = 2;
@@ -532,8 +535,10 @@ abstract contract RandBridgeBase is IRandBridge {
 
     /// Pays accrued protocol fees out to `to`. Bounded by `accruedFees`,
     /// so it can never reach custody; not gated by the pause, which
-    /// protects custody and has no bearing on fees already earned.
-    function withdrawFees(address token, address to, uint256 amount) external override onlyAdmin {
+    /// protects custody and has no bearing on fees already earned. Shares
+    /// the reentrancy lock with `lock` and `release`, since it calls the
+    /// token through the same `_push`.
+    function withdrawFees(address token, address to, uint256 amount) external override onlyAdmin nonReentrant {
         if (to == address(0) || to == address(this)) revert ZeroAddress();
         if (amount > accruedFees[token]) revert InsufficientFees();
         accruedFees[token] -= amount;

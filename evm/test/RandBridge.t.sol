@@ -616,6 +616,76 @@ contract RandBridgeTest is Test {
         assertEq(bridge.custody(address(evil)), 0, "custody drained by the release alone");
     }
 
+    // BR-1001: `withdrawFees` pays through the same `_push` as `release`,
+    // so it holds the same lock. Each test leaves 100 of accrued fees and
+    // 100_000 of custody in the hooked token, then withdraws 60.
+
+    /// A whitelisted hooked token with 100 of accrued protocol fees (10 bps
+    /// of a 100_000 release) and 100_000 still in custody.
+    function _reentrantTokenWithFees() internal returns (ReentrantERC20 evil) {
+        evil = _reentrantToken(200_000);
+        _feeOn();
+        bridge.release(_fromRand(_releasePayload(address(evil), 100_000, 0)));
+        assertEq(bridge.accruedFees(address(evil)), 100);
+        assertEq(bridge.custody(address(evil)), 100_000);
+    }
+
+    function _assertFeeWithdrawalAlone(ReentrantERC20 evil, address treasury) internal view {
+        assertEq(evil.balanceOf(treasury), 60, "the outer withdrawal paid once");
+        assertEq(bridge.accruedFees(address(evil)), 40, "accrued fees fell by the outer amount only");
+        assertEq(bridge.custody(address(evil)), 100_000, "custody untouched");
+    }
+
+    function test_withdrawFees_refuses_reentry_into_lock_from_the_token() public {
+        ReentrantERC20 evil = _reentrantTokenWithFees();
+        address treasury = address(0x7EA5);
+        evil.mint(address(evil), 1000);
+        evil.selfApprove(address(bridge));
+        evil.arm(address(bridge), abi.encodeCall(bridge.lock, (address(evil), 1000, keccak256("inner"), 0, 0)));
+
+        vm.prank(admin);
+        bridge.withdrawFees(address(evil), treasury, 60);
+
+        _assertReentryRefused(evil);
+        assertEq(bridge.sequence(), 1, "only the setup lock was published");
+        _assertFeeWithdrawalAlone(evil, treasury);
+    }
+
+    function test_withdrawFees_refuses_reentry_into_release_from_the_token() public {
+        ReentrantERC20 evil = _reentrantTokenWithFees();
+        address treasury = address(0x7EA5);
+        bytes memory inner = _fromRand(_releasePayload(address(evil), 1000, 0));
+        evil.arm(address(bridge), abi.encodeCall(bridge.release, (inner)));
+
+        vm.prank(admin);
+        bridge.withdrawFees(address(evil), treasury, 60);
+
+        _assertReentryRefused(evil);
+        assertFalse(bridge.consumed(_digestOf(inner)), "the inner burn stays releasable");
+        _assertFeeWithdrawalAlone(evil, treasury);
+    }
+
+    /// The nested withdrawal has to come from the admin to get past
+    /// `onlyAdmin`, so the admin here is a contract the token can call (on
+    /// mainnet the admin is a contract too: the timelock).
+    function test_withdrawFees_refuses_reentry_into_withdrawFees_from_the_token() public {
+        ReentrantERC20 evil = _reentrantTokenWithFees();
+        address treasury = address(0x7EA5);
+        ForwardingAdmin fwd = new ForwardingAdmin(address(bridge));
+        vm.prank(admin);
+        bridge.transferAdmin(address(fwd));
+        vm.prank(address(fwd));
+        bridge.acceptAdmin();
+        evil.arm(address(fwd), abi.encodeCall(bridge.withdrawFees, (address(evil), address(0xBAD), 40)));
+
+        vm.prank(address(fwd));
+        bridge.withdrawFees(address(evil), treasury, 60);
+
+        _assertReentryRefused(evil);
+        assertEq(evil.balanceOf(address(0xBAD)), 0, "the nested withdrawal paid nothing");
+        _assertFeeWithdrawalAlone(evil, treasury);
+    }
+
     // ------------------------------------------------------------------
     // protocol fee
     // ------------------------------------------------------------------
@@ -1067,5 +1137,25 @@ contract RandBridgeTest is Test {
         dup[1] = guardians[0];
         vm.expectRevert(IRandBridge.DuplicateGuardian.selector);
         new EthereumRandBridge(admin, pauser, randEmitter, dup);
+    }
+}
+
+/// A bridge admin that forwards any call it receives to the bridge and
+/// bubbles the bridge's revert data: the way a token's transfer hook could
+/// reach an admin-only function if the admin contract let it.
+contract ForwardingAdmin {
+    address internal immutable BRIDGE;
+
+    constructor(address bridge_) {
+        BRIDGE = bridge_;
+    }
+
+    fallback() external {
+        (bool ok, bytes memory ret) = BRIDGE.call(msg.data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
     }
 }
