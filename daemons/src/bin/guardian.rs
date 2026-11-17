@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use bridge_daemons::config::Config;
 use bridge_daemons::crypto::GuardianKey;
+use bridge_daemons::isolate::isolated;
 use bridge_daemons::sources::{self, Source};
 use bridge_daemons::store::Store;
 use bridge_daemons::{api, guardian};
@@ -253,23 +254,36 @@ async fn main() -> Result<()> {
             tracing::warn!("deferred transfers: {e:#}");
         }
         // A source that fails is retried on the next round; one chain's RPC
-        // being down must not stop the others from being signed. An
+        // being down must not stop the others from being signed — and neither
+        // must a panic on something it answered (BR-846: `isolated`). An
         // equivocation is the exception: it is fatal by design.
         for source in &evm {
             report(
                 source_name(source),
-                guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards).await,
+                isolated(
+                    source_name(source),
+                    guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards),
+                )
+                .await,
             )?;
         }
         if let Some(source) = &solana {
             report(
                 source_name(source),
-                guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards).await,
+                isolated(
+                    source_name(source),
+                    guardian::step_guarded(source, &store, &key, pq.as_ref(), &emitters, &guards),
+                )
+                .await,
             )?;
         }
         report(
             "rand",
-            guardian::step_guarded(&rand, &store, &key, pq.as_ref(), &emitters, &guards).await,
+            isolated(
+                "rand",
+                guardian::step_guarded(&rand, &store, &key, pq.as_ref(), &emitters, &guards),
+            )
+            .await,
         )?;
 
         tokio::select! {

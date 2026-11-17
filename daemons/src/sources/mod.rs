@@ -61,6 +61,41 @@ pub trait Source {
     }
 }
 
+/// A provider did not serve the logs of a block range (BR-1008, BR-761). Never a reading of
+/// the range: it is not "empty", it moves no cursor, and under a quorum the provider is simply
+/// not counted for that range.
+#[derive(Debug, Clone)]
+pub struct RangeNotServed {
+    pub source_name: String,
+    pub from: u64,
+    pub to: u64,
+    /// What the provider answered instead.
+    pub cause: String,
+    /// What the same provider says its endpoint's `sequence()` is: information for the
+    /// operator, never grounds to pass the range over.
+    pub claim: String,
+}
+
+impl std::fmt::Display for RangeNotServed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{name}: eth_getLogs for blocks [{from}, {to}] was not served ({cause}). A range that \
+             is not served is never passed over: the cursor stays at block {from}. Use an RPC \
+             that serves that range (an archive provider); or, only after checking on an \
+             independent node that no MessagePublished was emitted in the blocks to be passed \
+             over, stop the daemon and set next_block in cursors/{name}.json by hand. ({claim})",
+            name = self.source_name,
+            from = self.from,
+            to = self.to,
+            cause = self.cause,
+            claim = self.claim,
+        )
+    }
+}
+
+impl std::error::Error for RangeNotServed {}
+
 /// What a provider offers for a quorum read (BR-4).
 #[allow(async_fn_in_trait)]
 pub trait Confirm: Source {
@@ -175,7 +210,10 @@ impl<S: Confirm> Source for Quorum<S> {
 
     /// Every provider scans the same range — capped at the quorum's safe
     /// head — and only what a quorum of them report identically is read. A
-    /// provider that errors agrees with nothing. If a quorum agrees on the
+    /// provider that errors agrees with nothing, and one that refuses the
+    /// range (`RangeNotServed`) is an error like any other: the cursor moves
+    /// over a range only when a quorum positively served it with the same
+    /// contents, empty or not (BR-761). If a quorum agrees on the
     /// whole scan, the cursor moves to its end; otherwise to just past the
     /// longest prefix a quorum agrees on (the lowest block among them), or
     /// not at all.
@@ -194,10 +232,18 @@ impl<S: Confirm> Source for Quorum<S> {
         let cap = self.quorum_head().await?;
         let mut scans = Vec::new();
         let mut errors = Vec::new();
+        let mut not_served: Option<(u64, u64)> = None;
         for (i, m) in self.members.iter().enumerate() {
             match m.poll_capped(cursor, cap).await {
                 Ok(scan) => scans.push(scan),
-                Err(e) => errors.push(format!("provider {i}: {e:#}")),
+                // A provider that errors — a refused range among the errors — is not counted
+                // for this range: it agrees with nothing and advances nothing (BR-761).
+                Err(e) => {
+                    if let Some(r) = e.downcast_ref::<RangeNotServed>() {
+                        not_served = Some((r.from, r.to));
+                    }
+                    errors.push(format!("provider {i}: {e:#}"));
+                }
             }
         }
         let same = |a: &[Located], b: &[Located]| {
@@ -238,6 +284,23 @@ impl<S: Confirm> Source for Quorum<S> {
             }
         }
         if scans.len() < self.quorum {
+            if let Some((from, to)) = not_served {
+                // Short of a quorum that can serve the range: the chain halts here, loudly,
+                // until an operator gives it providers that serve it. It is never skipped.
+                let e = anyhow!(
+                    "{}: halted at block {from} — blocks [{from}, {to}] were served by {} of {} \
+                     providers, {} needed. A provider that refuses a range is not counted and \
+                     the range is not passed over (BR-761): configure enough providers that \
+                     serve it (archive access), then the daemon catches up on its own: {}",
+                    self.name(),
+                    scans.len(),
+                    self.members.len(),
+                    self.quorum,
+                    errors.join("; ")
+                );
+                tracing::error!("{e:#}");
+                return Err(e);
+            }
             return Err(anyhow!(
                 "{}: {} of {} providers answered, {} needed: {}",
                 self.name(),
