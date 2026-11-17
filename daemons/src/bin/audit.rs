@@ -516,11 +516,9 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
         Flavor::Evm => (SafeReads::not_asked("no code"), None),
         Flavor::Tron => (
             SafeReads::not_asked("not asked on Tron"),
-            if pauser_code.is_empty() {
-                tron_signers(&endpoint.rpc, &pauser20).await
-            } else {
-                None
-            },
+            // Read whether or not the address has code (BR-1009): code is no longer a pass,
+            // and the rule reports what the account's permissions are either way.
+            tron_signers(&endpoint.rpc, &pauser20).await,
         ),
     };
     let reads = EvmReads {

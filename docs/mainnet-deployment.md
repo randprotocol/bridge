@@ -137,6 +137,16 @@ The two multi-signature accounts are children of one xpub (`TRON_MSIG_XPUB` in `
 | pause multisig account (the bridge `pauser()`) | /1 | `TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58` |
 | signers 1–5 | /2–/6 | `TCCm5ui5kHeqxgYF69pmb7GF8RcdP5fccG`, `TWk2QEXwM42qAQ5TFKwWo66eg5G2m9v82P`, `TYbQ16vcbRY34gLN5AN25miEZJR29pCqme`, `TBqXBmWnUKeat3Fpgx8e8YKNEVSXXgWe6F`, `TW4M3My781kRpUFZwYBUQfkd1FqEMq3Xrn` |
 
+> **UNRECONCILED — needs on-chain check (audit v14, BR-1009).** This section records the Tron
+> account permissions as set on 2026-09-26 (below: admin owner 3/5 and active 3/5, pause owner 3/5
+> and active 2/5, with transaction ids; and step 2 of the list struck out as done).
+> `docs/governance.md` (its opening status paragraph) says of the same date that "the
+> multi-signature account permissions and the accept are still to do". Both cannot be right, and
+> nothing in this repository settles it. Until someone reads `wallet/getaccount` for
+> `TXbkkfTiCAJWsTZcBnyemQZsgfKJr2SRjp` and `TCimv6fBNmPNi16QvrGgUjJWQYTnmpLG58` on Tron mainnet
+> (or runs `rand-bridge-audit --governance`, whose Tron rules 10 and 13 read exactly that) and
+> corrects whichever document is wrong, treat neither statement as fact.
+
 Multi-signature since 2026-09-26 (funded 110 TRX each from the deployer, `2ff489dc…af20`,
 `f2bb477e…bc22`; each `AccountPermissionUpdate` signed by the account's own key and burning 100 TRX):
 admin `TXbkkf…Rjp` owner 3/5, active id 2 3/5 (TriggerSmartContract only), tx
@@ -146,6 +156,9 @@ owner 3/5, active id 2 2/5, tx `8675613036534d4903a86492716abf2af8417d76d69314e4
 
 **All of them share one seed**, so the Tron multisigs are nominal (one key in substance) until the
 signers move to separate people and devices (BR-4). Not done yet, in order:
+
+(Step 2 below is marked done here and "still to do" in `docs/governance.md`: **UNRECONCILED —
+needs on-chain check**, see the note above.)
 
 1. ~~Fund `/0` and `/1`~~ (done).
 2. ~~`node deploy/tron-ops.js multisig-permissions <account> --signers <the five> --owner-threshold 3

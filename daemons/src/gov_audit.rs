@@ -17,7 +17,8 @@
 //!   singleton, no module, `getThreshold() >= min_threshold`, at least that
 //!   many owners) on EVM, or a Tron account needing that many signatures.
 //! - EVM / Tron pauser: `!= admin`, `!=` the admin multisig; a Safe as above
-//!   (EVM) or a contract / multi-signature account (Tron).
+//!   (EVM) or, like the admin multisig, a Tron account needing that many
+//!   signatures — never merely an address with code (BR-1009).
 //!   `pendingAdmin()` is zero.
 //! - Solana: `Config::admin` is the configured Squads v4 vault; no
 //!   `pending_admin`; the multisig is autonomous (`config_authority` default),
@@ -1085,18 +1086,25 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
             flavor,
             policy,
         ),
-        Flavor::Tron => {
-            let name = "pauser is a contract or a multi-signature account".to_string();
-            if !reads.pauser_code.is_empty() {
-                rule(
-                    name,
-                    true,
-                    format!("contract ({} bytes)", reads.pauser_code.len()),
-                )
-            } else {
-                signers_rule(name, &shown(pauser), reads.tron_pauser_signers, policy)
-            }
-        }
+        // BR-1009: on Tron the pauser is held to the rule the admin multisig is — a native
+        // multi-signature account whose owner and active permissions each need at least
+        // `min_threshold` signatures (docs/governance.md). Having code is not that: there is
+        // no pinned multisig contract on Tron to compare a contract with, so a contract
+        // pauser — one byte of code used to be a PASS — fails, as it does for the admin
+        // multisig.
+        Flavor::Tron => multisig_rule(
+            format!(
+                "pauser is a multi-signature account needing >= {} signatures",
+                policy.min_threshold
+            ),
+            &format!("pauser {}", shown(pauser)),
+            pauser,
+            &reads.pauser_code,
+            &reads.pauser_safe,
+            reads.tron_pauser_signers,
+            flavor,
+            policy,
+        ),
     });
 
     // 14. No admin transfer in flight.
@@ -2178,6 +2186,9 @@ mod tests {
         r.admin_multisig_safe = SafeReads::not_asked("not asked on Tron");
         r.tron_admin_multisig_signers = Some(3);
         r.pauser_safe = SafeReads::not_asked("not asked on Tron");
+        // The pause account: no code, owner 3 of 5 and active 2 of 5 need two signatures.
+        r.pauser_code.clear();
+        r.tron_pauser_signers = Some(2);
         r
     }
 
@@ -2203,31 +2214,38 @@ mod tests {
         only_fails(&r, Flavor::Tron, NO_PROXY);
     }
 
+    /// Audit v14, BR-1009. This test was `tron_accepts_a_contract_or_a_multisignature_pauser`
+    /// and its first assertion was that any pauser with code passes. One byte of code with a
+    /// one-signature account permission was a PASS.
     #[test]
-    fn tron_accepts_a_contract_or_a_multisignature_pauser() {
+    fn tron_accepts_only_a_multisignature_account_as_pauser() {
         use Status::*;
         let p = policy();
+        let pauser = |code: &[u8], signers: Option<u32>| {
+            let mut r = tron_compliant();
+            r.pauser_code = code.to_vec();
+            r.tron_pauser_signers = signers;
+            evm_rules(&r, Flavor::Tron, &p)
+        };
+        assert_eq!(pauser(&[], Some(2))[PAUSER_MS].status, Pass, "a 2-of-n account");
+        assert_eq!(pauser(&[], Some(3))[PAUSER_MS].status, Pass, "a 3-of-n account");
+        assert!(pauser(&[], Some(2))[PAUSER_MS].name.contains("needing >= 2 signatures"));
+        // The auditor's weak cases.
+        let rules = pauser(&[0x00], Some(1));
+        assert_eq!(rules[PAUSER_MS].status, Fail, "one byte of code, one signature");
+        assert!(rules[PAUSER_MS].observed.contains("is a contract"), "{:?}", rules[PAUSER_MS]);
+        assert_eq!(failures(&rules), 1);
+        assert_eq!(pauser(&[0x00], None)[PAUSER_MS].status, Fail, "one byte of code, unread");
+        assert_eq!(pauser(&[0x60; 4000], Some(5))[PAUSER_MS].status, Fail, "any contract");
+        assert_eq!(pauser(&[], Some(1))[PAUSER_MS].status, Fail, "a single key");
+        assert_eq!(pauser(&[], Some(0))[PAUSER_MS].status, Fail);
+        // A threshold the policy raises is the pauser's too.
+        let mut strict = policy();
+        strict.min_threshold = 3;
         let mut r = tron_compliant();
-        assert_eq!(
-            statuses(&evm_rules(&r, Flavor::Tron, &p))[PAUSER_MS],
-            Pass,
-            "a contract"
-        );
-        r.pauser_code.clear();
         r.tron_pauser_signers = Some(2);
-        assert_eq!(
-            statuses(&evm_rules(&r, Flavor::Tron, &p))[PAUSER_MS],
-            Pass,
-            "2-of-n account"
-        );
-        r.tron_pauser_signers = Some(1);
-        assert_eq!(
-            statuses(&evm_rules(&r, Flavor::Tron, &p))[PAUSER_MS],
-            Fail,
-            "a single key"
-        );
-        r.tron_pauser_signers = None;
-        let rules = evm_rules(&r, Flavor::Tron, &p);
+        assert_eq!(evm_rules(&r, Flavor::Tron, &strict)[PAUSER_MS].status, Fail, "2 where 3 are asked");
+        let rules = pauser(&[], None);
         assert_eq!(
             rules[PAUSER_MS].status, Unknown,
             "the RPC does not serve wallet/getaccount"
