@@ -186,6 +186,7 @@ async fn peers_allow(
     if *down {
         limits::defer(
             store,
+            key,
             message,
             limits::now(),
             limits::DeferKind::Peers,
@@ -216,7 +217,7 @@ async fn peers_allow(
                 message.emitter_chain,
                 message.sequence
             );
-            limits::defer(store, message, limits::now(), limits::DeferKind::Peers, &reason)?;
+            limits::defer(store, key, message, limits::now(), limits::DeferKind::Peers, &reason)?;
             Ok(false)
         }
     }
@@ -290,6 +291,7 @@ pub async fn step_guarded<S: Source>(
                 // Its token already has a transfer waiting: keep sequence order.
                 limits::defer(
                     store,
+                    key,
                     &message,
                     limits::now(),
                     limits::DeferKind::Window,
@@ -324,7 +326,7 @@ pub async fn step_guarded<S: Source>(
             }
             Err(e) if e.downcast_ref::<Deferred>().is_some() => {
                 tracing::warn!("{}: {e:#}", source.name());
-                limits::defer(store, &message, limits::now(), limits::DeferKind::Window, &format!("{e:#}"))?;
+                limits::defer(store, key, &message, limits::now(), limits::DeferKind::Window, &format!("{e:#}"))?;
                 if let Some(w) = limits::window_of(&message) {
                     waiting.insert(w);
                 }
@@ -380,6 +382,25 @@ pub async fn retry_deferred(
         let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? else {
             continue;
         };
+        // BR-1004: the record is a file, and a file can be planted or edited. Nothing in it is
+        // taken on trust: the body is decoded again and the digest derived from it, the place
+        // it was found must be the (chain, sequence) the body names, and it must carry this
+        // guardian's own seal over exactly that — what `limits::defer` wrote when the daemon
+        // read the message from its sources. Anything else is refused, loudly, every round,
+        // and holds nothing else back. What passes goes through the same peer check, signing
+        // policy and caps as a message read this round.
+        let d = match checked_deferral(key, chain, sequence, d) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(
+                    "REFUSED, not signed: deferred/{chain}/{sequence:020}.json: {e:#}. If this \
+                     record is from before this build, review it and vouch for it with \
+                     rand-guardian --vouch-deferred {chain}:{sequence}; otherwise remove the \
+                     file and find out who wrote it (BR-1004)"
+                );
+                continue;
+            }
+        };
         let window = limits::window_of(&d.message);
         if window.as_ref().is_some_and(|w| blocked.contains(w)) {
             continue; // behind an earlier one of its token that still waits
@@ -411,6 +432,55 @@ pub async fn retry_deferred(
         }
     }
     Ok(signed)
+}
+
+/// A deferred record as far as it can be believed (BR-1004): its message re-derived from the
+/// body alone, found where that body says it belongs, and sealed by this guardian.
+fn checked_deferral(
+    key: &GuardianKey,
+    chain: u16,
+    sequence: u64,
+    d: limits::Deferral,
+) -> Result<limits::Deferral> {
+    let message = Observed::new(d.message.body.clone()).context("its body does not decode")?;
+    if message != d.message {
+        anyhow::bail!(
+            "its stored digest, chain or sequence is not what its body gives (the body hashes \
+             to {}, the record says {})",
+            hex::encode(message.digest),
+            hex::encode(d.message.digest)
+        );
+    }
+    if (message.emitter_chain, message.sequence) != (chain, sequence) {
+        anyhow::bail!(
+            "its body is chain {} sequence {}, not the one it is filed under",
+            message.emitter_chain,
+            message.sequence
+        );
+    }
+    match &d.seal {
+        Some(seal) if *seal == limits::deferral_seal(key, &message) => {}
+        Some(_) => anyhow::bail!("its seal is not this guardian's seal over this body"),
+        None => anyhow::bail!("it carries no seal: this daemon did not write it"),
+    }
+    Ok(limits::Deferral { message, ..d })
+}
+
+/// An operator's act, after review (BR-1004): seals the deferred record of `(chain,
+/// sequence)` so the next retry treats it as the daemon's own — for a record deferred by a
+/// build that did not seal. The body must still be the one the record's digest and place say.
+/// Returns the message vouched for.
+pub fn vouch_deferred(store: &Store, key: &GuardianKey, chain: u16, sequence: u64) -> Result<Observed> {
+    let d: limits::Deferral = store
+        .read_message(limits::DEFERRED, chain, sequence)?
+        .ok_or_else(|| anyhow::anyhow!("chain {chain} sequence {sequence} is not deferred"))?;
+    let sealed = limits::Deferral {
+        seal: Some(limits::deferral_seal(key, &Observed::new(d.message.body.clone())?)),
+        ..d
+    };
+    let d = checked_deferral(key, chain, sequence, sealed)?;
+    store.write_message(limits::DEFERRED, chain, sequence, &d)?;
+    Ok(d.message)
 }
 
 /// Whether this guardian has a signed record (readable or not) for

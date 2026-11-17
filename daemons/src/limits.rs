@@ -24,6 +24,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bridge_codec::{Payload, CHAIN_RAND, CHAIN_SOLANA};
 use serde::{Deserialize, Serialize};
 
+use crate::crypto::GuardianKey;
 use crate::message::Observed;
 use crate::store::Store;
 
@@ -133,6 +134,19 @@ pub struct Deferral {
     pub at: u64,
     pub kind: DeferKind,
     pub reason: String,
+    /// This guardian's seal over `(chain, sequence, digest)` (BR-1004): proof that the daemon
+    /// itself deferred this body after reading it from its sources. A record without a valid
+    /// one is never signed by a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<String>,
+}
+
+/// The seal a deferred record of `message` carries under `key`.
+pub fn deferral_seal(key: &GuardianKey, message: &Observed) -> String {
+    let mut data = message.emitter_chain.to_be_bytes().to_vec();
+    data.extend_from_slice(&message.sequence.to_be_bytes());
+    data.extend_from_slice(&message.digest);
+    hex::encode(key.seal(b"deferred", &data))
 }
 
 /// The window a transfer counts in: its direction and token, as one name.
@@ -169,8 +183,16 @@ pub fn listed(store: &Store, kind_dir: &str) -> Result<Vec<(u16, u64)>> {
     Ok(out)
 }
 
-/// Records `message` as deferred.
-pub fn defer(store: &Store, message: &Observed, now: u64, kind: DeferKind, reason: &str) -> Result<()> {
+/// Records `message` as deferred, sealed by `key`: only the daemon, after it read the message
+/// from its sources, calls this.
+pub fn defer(
+    store: &Store,
+    key: &GuardianKey,
+    message: &Observed,
+    now: u64,
+    kind: DeferKind,
+    reason: &str,
+) -> Result<()> {
     store.write_message(
         DEFERRED,
         message.emitter_chain,
@@ -180,6 +202,7 @@ pub fn defer(store: &Store, message: &Observed, now: u64, kind: DeferKind, reaso
             at: now,
             kind,
             reason: reason.to_string(),
+            seal: Some(deferral_seal(key, message)),
         },
     )
 }

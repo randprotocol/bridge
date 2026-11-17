@@ -272,7 +272,7 @@ async fn an_unreachable_peer_set_is_probed_once_per_round() {
         let mut t = transfer(5, 0, 2, 1, [9; 32]);
         t.token_address = word(&format!("0x{tok:040x}"));
         let m = Observed::new(transfer_body(2, word(ETH), seq, t)).unwrap();
-        limits::defer(&me, &m, 1, limits::DeferKind::Peers, "test").unwrap();
+        limits::defer(&me, &keys[1], &m, 1, limits::DeferKind::Peers, "test").unwrap();
     }
     let peers = [GuardianClient::new(&url)];
     let guards = Guards { peers: &peers, ..Default::default() };
