@@ -21,6 +21,14 @@
 //! autonomous Squads vault. It does not cover custody, which the guardian
 //! quorum authorises (BR-4). Read-only; exits non-zero when any rule is FAIL
 //! or UNKNOWN. The rules live in `bridge_daemons::gov_audit`.
+//!
+//! `--limits` instead reads the loss bounds that are in force on chain
+//! (BRG-1): each endpoint's per-transfer and daily release cap for each
+//! approved backing, and Rand's daily mint cap, in attested 8-decimal units,
+//! next to the config's `[guardian.limits]` when it has one. A cap of 0 on an
+//! endpoint means unlimited, so an enabled backing without both release caps,
+//! or a Rand side without a mint cap, is a FAIL. Read-only; exits non-zero on
+//! any FAIL or UNKNOWN.
 
 use std::path::PathBuf;
 
@@ -46,6 +54,11 @@ struct Cli {
     /// multisig and upgrade authority on every endpoint.
     #[arg(long)]
     governance: bool,
+    /// Check the loss bounds in force (BRG-1) instead of custody: every
+    /// enabled backing's release caps on its endpoint and Rand's daily mint
+    /// cap, next to this config's `[guardian.limits]`.
+    #[arg(long, conflicts_with = "governance")]
+    limits: bool,
     /// Check how many guardians are signing against the quorum (BR-402)
     /// instead of custody: asks each guardian API for `/v1/health` and the
     /// Rand node for the registered set. Read-only; exits non-zero when
@@ -279,6 +292,194 @@ fn attested(native: u128, decimals: u32) -> u128 {
     } else {
         native * 10u128.pow(8 - decimals)
     }
+}
+
+// ---- --limits ----------------------------------------------------------------
+
+/// The release caps an endpoint holds a backing to, in the token's native
+/// units; 0 is unlimited on every endpoint.
+struct CapRow {
+    chain: u16,
+    symbol: &'static str,
+    token_word: [u8; 32],
+    decimals: u32,
+    /// `None`: the endpoint could not be read.
+    caps: Option<(bool, u128, u128)>,
+}
+
+async fn evm_caps(config: &Config) -> Vec<CapRow> {
+    let mut rows = Vec::new();
+    for endpoint in &config.evm {
+        let url = match endpoint.kind {
+            EvmKind::Evm => endpoint.rpc.clone(),
+            EvmKind::Tron => format!("{}/jsonrpc", endpoint.rpc.trim_end_matches('/')),
+        };
+        let rpc = JsonRpc::new(&url);
+        for (chain, symbol, token, decimals) in EVM_TOKENS.iter().filter(|t| t.0 == endpoint.chain) {
+            let mut token_word = [0u8; 32];
+            // tokenConfig(address) -> (enabled, decimals, perTransferCap, dailyCap, windowStart, windowUsed)
+            let caps = async {
+                let bridge = address20(&endpoint.contract)?;
+                let token20 = address20(token)?;
+                token_word[12..].copy_from_slice(&token20);
+                let cfg = eth_call(&rpc, &bridge, call_with_address("tokenConfig(address)", &token20)).await?;
+                if cfg.len() < 128 {
+                    bail!("tokenConfig returned {} bytes, expected at least 128", cfg.len());
+                }
+                anyhow::Ok((cfg[31] == 1, word_u128(&cfg[64..96])?, word_u128(&cfg[96..128])?))
+            }
+            .await;
+            if let Err(e) = &caps {
+                eprintln!("{} {symbol}: {e:#}", endpoint.name);
+            }
+            rows.push(CapRow { chain: *chain, symbol, token_word, decimals: *decimals, caps: caps.ok() });
+        }
+    }
+    rows
+}
+
+async fn solana_caps(config: &Config) -> Vec<CapRow> {
+    let Some(sol) = &config.solana else {
+        return Vec::new();
+    };
+    let rpc = JsonRpc::new(&sol.rpc);
+    let mut rows = Vec::new();
+    for (symbol, mint, decimals) in SOLANA_TOKENS {
+        let mut token_word = [0u8; 32];
+        // TokenRegistry: tag, mint (32), enabled, decimals, per_transfer_cap u64, daily_cap u64, …
+        let caps = async {
+            let program = pubkey32(&sol.program)?;
+            token_word = pubkey32(mint)?;
+            let (registry_key, _) = find_program_address(&[b"token", &token_word], &program)?;
+            let le64 = |d: &[u8], at: usize| -> Result<u128> {
+                Ok(u128::from(u64::from_le_bytes(
+                    d.get(at..at + 8).ok_or_else(|| anyhow!("account too short"))?.try_into().expect("8"),
+                )))
+            };
+            anyhow::Ok(match solana_account(&rpc, &registry_key).await? {
+                Some(d) => (d.get(33) == Some(&1), le64(&d, 35)?, le64(&d, 43)?),
+                None => (false, 0, 0),
+            })
+        }
+        .await;
+        if let Err(e) = &caps {
+            eprintln!("solana {symbol}: {e:#}");
+        }
+        rows.push(CapRow { chain: 5, symbol, token_word, decimals: *decimals, caps: caps.ok() });
+    }
+    rows
+}
+
+/// `(chain, token word) -> (mint_cap_per_day, minted_today)` from `rand_getTokenSupply`.
+async fn rand_mint_caps(config: &Config, token: &str) -> Option<Vec<(u16, [u8; 32], Option<u128>, Option<u128>)>> {
+    let rpc = JsonRpc::new(&config.rand.rpc);
+    let param = token.parse::<u64>().map(|i| json!(i)).unwrap_or_else(|_| json!(token));
+    let v = rpc.call("rand_getTokenSupply", json!([param])).await.ok()?;
+    v["backings"]
+        .as_array()?
+        .iter()
+        .map(|a| {
+            let chain = a["chain"].as_u64()? as u16;
+            let word: [u8; 32] = hex::decode(a["token"].as_str()?).ok()?.try_into().ok()?;
+            Some((chain, word, amount(&a["mint_cap_per_day"]), amount(&a["minted_today"])))
+        })
+        .collect()
+}
+
+fn cap_text(v: u128) -> String {
+    if v == 0 {
+        "UNLIMITED".into()
+    } else {
+        v.to_string()
+    }
+}
+
+/// The `--limits` report. `Ok(false)` when a bound is missing or unreadable.
+async fn limits_report(config: &Config, token: &str, out: &mut impl std::io::Write) -> Result<bool> {
+    let mut rows = evm_caps(config).await;
+    rows.extend(solana_caps(config).await);
+    let rand = rand_mint_caps(config, token).await;
+    let mut ok = true;
+    writeln!(
+        out,
+        "{:<5} {:<5} {:<8} {:>22} {:>22} {:>22} {:>18}  verdict",
+        "chain", "coin", "enabled", "release cap/transfer", "release cap/day", "Rand mint cap/day", "minted today"
+    )?;
+    for r in &rows {
+        let mint = rand.as_ref().and_then(|m| m.iter().find(|(c, t, _, _)| *c == r.chain && *t == r.token_word));
+        let mint_cap = mint.and_then(|m| m.2);
+        let minted = mint.and_then(|m| m.3);
+        let (enabled, per_transfer, per_day, mut verdict) = match r.caps {
+            None => {
+                ok = false;
+                ("?".to_string(), "?".to_string(), "?".to_string(), vec!["UNKNOWN: the endpoint could not be read".to_string()])
+            }
+            Some((enabled, per_transfer, per_day)) => {
+                let mut v = Vec::new();
+                if enabled && per_transfer == 0 {
+                    v.push("FAIL: no per-transfer release cap".to_string());
+                }
+                if enabled && per_day == 0 {
+                    v.push("FAIL: no daily release cap".to_string());
+                }
+                (
+                    enabled.to_string(),
+                    cap_text(attested(per_transfer, r.decimals)),
+                    cap_text(attested(per_day, r.decimals)),
+                    v,
+                )
+            }
+        };
+        let is_enabled = matches!(r.caps, Some((true, _, _)));
+        if is_enabled {
+            match (&rand, mint_cap) {
+                (None, _) => verdict.push("UNKNOWN: the Rand node did not serve the mint caps".into()),
+                (Some(_), None | Some(0)) => verdict.push("FAIL: no daily mint cap on Rand".into()),
+                (Some(_), Some(_)) => {}
+            }
+        }
+        if verdict.is_empty() {
+            verdict.push(if is_enabled { "PASS".into() } else { "not enabled".into() });
+        } else {
+            ok = false;
+        }
+        writeln!(
+            out,
+            "{:<5} {:<5} {:<8} {:>22} {:>22} {:>22} {:>18}  {}",
+            r.chain,
+            r.symbol,
+            enabled,
+            per_transfer,
+            per_day,
+            mint_cap.map(cap_text).unwrap_or_else(|| "n/a".into()),
+            minted.map(|v| v.to_string()).unwrap_or_else(|| "n/a".into()),
+            verdict.join("; ")
+        )?;
+    }
+    writeln!(out, "Amounts are attested 8-decimal units. The endpoint caps bound releases; the Rand cap bounds mints, per backing and UTC day.")?;
+    match config.guardian.as_ref().and_then(|g| g.limits.as_ref()) {
+        Some(l) => {
+            writeln!(
+                out,
+                "[guardian.limits] in this config: {} per transfer, {} per {} s per token and direction, {} across all tokens, {}; {} token override(s).",
+                l.per_transfer,
+                l.per_window,
+                l.window_secs,
+                l.per_window_total.map_or_else(|| "no cap".to_string(), |t| t.to_string()),
+                match (l.delay_above, l.delay_secs) {
+                    (Some(a), Some(s)) => format!("transfers above {a} wait {s} s"),
+                    _ => "no delay".to_string(),
+                },
+                l.token.len()
+            )?;
+            writeln!(out, "That is what this file asks of one guardian. Whether a running guardian has it is in its own startup log (`caps:`), not here.")?;
+        }
+        None => writeln!(
+            out,
+            "This config has no [guardian.limits]: pass a guardian's config to print the caps it asks for next to the chains'."
+        )?,
+    }
+    Ok(ok)
 }
 
 // ---- --governance ------------------------------------------------------------
@@ -789,6 +990,12 @@ async fn main() -> Result<()> {
     if cli.governance {
         let result = governance(&config).await;
         return with_caveat(result, &mut std::io::stdout());
+    }
+    if cli.limits {
+        if !limits_report(&config, &cli.token, &mut std::io::stdout()).await? {
+            bail!("at least one loss bound is missing or could not be read (BRG-1)");
+        }
+        return Ok(());
     }
     if cli.headroom {
         if !headroom_report(&config, &cli.guardian_origins, i64::from(cli.min_spare), &mut std::io::stdout()).await? {

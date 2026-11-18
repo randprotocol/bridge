@@ -192,6 +192,9 @@ async fn a_window_deferred_transfer_is_peer_checked_before_it_signs() {
         per_transfer: 10 * UNIT as u64,
         per_window: 10 * UNIT as u64,
         window_secs: 3,
+        per_window_total: None,
+        delay_above: None,
+        delay_secs: None,
         token: vec![],
     })
     .unwrap();
