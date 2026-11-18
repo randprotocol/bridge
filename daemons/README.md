@@ -31,6 +31,14 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   prefix (the lowest block among the agreeing providers), else not at all. A provider that errors
   agrees with nothing. So one provider can neither get an invented or altered lock signed nor move
   the cursor past a real one. One `rpc` alone still works, with a startup warning.
+  **The providers must be different parties** (`src/providers.rs`): with an `rpc_quorum` of two or
+  more, a config in which one operator's URLs are enough to meet the quorum does not load. The
+  operator is read from the URL's host: a named host by its last two labels (two `publicnode.com`
+  endpoints count once), an IP address or `localhost` with its port. `rand-guardian --config <file>
+  --check-providers` asks every provider which chain it serves (`eth_chainId`, `getGenesisHash`,
+  `rand_chainId` + `rand_getGenesisHash`; read-only, no key) and exits 0 only when, on every
+  chain, a quorum of providers from different operators name the same chain, and for Rand the
+  configured one. Run it before a config goes live and after any provider change.
 - Rebuilds the body from the event plus the block timestamp, the emitter chain id and the
   emitter address (`spec/ATTESTATION.md` §3.2), checks it re-encodes canonically, and signs it
   only if the destination would accept it: registered emitter, `to_chain` / `token_chain` rules,

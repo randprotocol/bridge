@@ -19,6 +19,7 @@ pub mod limits;
 pub mod message;
 pub mod pq;
 pub mod pq_gov;
+pub mod providers;
 pub mod relayer;
 pub mod rpc;
 pub mod sources;

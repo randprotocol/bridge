@@ -485,6 +485,10 @@ fn check_providers(what: &str, rpc: &str, rpcs: &[String], quorum: Option<usize>
             list.len()
         );
     }
+    // BR-4: a quorum that one operator's URLs can meet alone is a quorum of one.
+    if let Some(gap) = crate::providers::independence_gap(what, &list, q) {
+        bail!("{gap}");
+    }
     Ok(())
 }
 
