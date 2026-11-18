@@ -79,6 +79,19 @@ that. Three independent bounds sit under the guardians on each source chain:
   can leave across midnight), on releases only. Locks are not capped:
   releases are the loss surface.
 
+A fourth bound sits in each guardian, before it signs, and needs no contract change (BRG-1,
+`daemons/README.md`, `[guardian.limits]`): a per-transfer cap (over it, the transfer is withheld
+for an operator), a rolling per-token window (over it, deferred), and, when configured, a window
+across all tokens (`per_window_total`) and a wait before a large transfer is signed
+(`delay_above`, `delay_secs`). These are bounds on honest guardians only: a quorum that colludes
+ignores them, and they are in force on a guardian only while its config has the section.
+`rand-bridge-audit --limits` reads the chain-side bounds (each endpoint's release caps, Rand's
+daily mint cap) and fails when an enabled backing has none.
+
+What the endpoints do not have, and cannot get without a new deployment because they are not
+upgradeable: a delay between an accepted release and its payout, a cap on locks, and a cap across
+tokens. The guardian-side delay and all-token window are the stand-ins until then.
+
 On Rand there is no custody to bound. A mint appends one deposit note of the bridged asset to
 the shielded pool (the asset is `(home chain, token)`, carried in the note as a dense registry
 index); the bound is that a burn back to the home chain can only release what that chain's

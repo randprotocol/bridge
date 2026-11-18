@@ -771,3 +771,89 @@ fn solana_governance_reports_what_is_missing_or_misowned() {
     let (_, out, _) = run_solana(&solana_node(wrong_pd), "");
     assert!(out.contains("ProgramData is owned by"), "{out}");
 }
+
+// ---- --limits (BRG-1) --------------------------------------------------------
+
+/// An Ethereum endpoint whose two coins carry these release caps (native 6-decimal units),
+/// and a Rand node serving `mint_cap` per backing (`None`: the method is not served).
+fn caps_node(per_transfer: u128, per_day: u128, enabled: bool, mint_cap: Option<&'static str>) -> Fake {
+    rpc(move |m, p| match m {
+        "eth_call" => {
+            let data = hex::decode(p[0]["data"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+            let sel: [u8; 4] = data[..4].try_into().unwrap();
+            if sel != selector("tokenConfig(address)") {
+                return Some(Err(json!({ "code": 3, "message": "reverted" })));
+            }
+            let words = [u128::from(enabled), 6, per_transfer, per_day, 0, 0];
+            Some(Ok(json!(format!("0x{}", words.iter().map(|w| format!("{w:064x}")).collect::<String>()))))
+        }
+        "rand_getTokenSupply" => mint_cap.map(|cap| {
+            let row = |token: &str| json!({ "chain": 2, "token": format!("{}{token}", "00".repeat(12)), "decimals": 6, "locked": "0", "mint_cap_per_day": cap, "minted_today": "5" });
+            Ok(json!({ "total_supply": "0", "backings": [row(USDT), row(USDC)] }))
+        }),
+        _ => None,
+    })
+}
+
+fn run_limits(node: &Fake, guardian: &str) -> Output {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), &node.url, &format!("{}{guardian}", evm_section("eth", 2, "evm", &node.url)));
+    audit().arg("--config").arg(&cfg).arg("--limits").output().unwrap()
+}
+
+#[test]
+fn the_limits_check_passes_when_every_bound_is_set_and_prints_them_in_one_unit() {
+    // 100 and 1,000 USDT at 6 decimals; Rand's cap is 100,000 at 8.
+    let node = caps_node(100_000_000, 1_000_000_000, true, Some("10000000000000"));
+    let o = run_limits(&node, "");
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "{err}\n{out}");
+    assert_eq!(out.matches("PASS").count(), 2, "{out}");
+    // Attested 8-decimal units: 100 -> 10_000_000_000, 1,000 -> 100_000_000_000.
+    assert!(out.contains("10000000000 ") && out.contains("100000000000 ") && out.contains("10000000000000"), "{out}");
+    assert!(out.contains("no [guardian.limits]"), "{out}");
+}
+
+#[test]
+fn an_unlimited_release_cap_or_a_missing_mint_cap_fails_the_limits_check() {
+    for (node, named) in [
+        (caps_node(0, 1_000_000_000, true, Some("10000000000000")), "FAIL: no per-transfer release cap"),
+        (caps_node(100_000_000, 0, true, Some("10000000000000")), "FAIL: no daily release cap"),
+        (caps_node(100_000_000, 1_000_000_000, true, Some("0")), "FAIL: no daily mint cap on Rand"),
+        (caps_node(100_000_000, 1_000_000_000, true, None), "UNKNOWN: the Rand node did not serve the mint caps"),
+    ] {
+        let o = run_limits(&node, "");
+        let (out, err) = text(&o);
+        assert!(!o.status.success(), "{named}: {out}");
+        assert!(out.contains(named), "{named}: {out}");
+        assert!(err.contains("BRG-1"), "{err}");
+    }
+    // A backing that is not enabled needs no cap: nothing can be released against it.
+    let o = run_limits(&caps_node(0, 0, false, None), "");
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "{err}\n{out}");
+    assert_eq!(out.matches("not enabled").count(), 2, "{out}");
+}
+
+#[test]
+fn an_endpoint_that_cannot_be_read_is_unknown_not_a_pass() {
+    let node = rpc(|_, _| None);
+    let o = run_limits(&node, "");
+    let (out, _) = text(&o);
+    assert!(!o.status.success());
+    assert_eq!(out.matches("UNKNOWN: the endpoint could not be read").count(), 2, "{out}");
+}
+
+#[test]
+fn the_limits_check_prints_the_guardian_caps_the_config_asks_for() {
+    let node = caps_node(100_000_000, 1_000_000_000, true, Some("10000000000000"));
+    let guardian = "[guardian]\nlisten = \"127.0.0.1:0\"\n[guardian.limits]\nper_transfer = 10000000000\nper_window = 100000000000\nper_window_total = 300000000000\ndelay_above = 5000000000\ndelay_secs = 3600\n";
+    let o = run_limits(&node, guardian);
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "{err}\n{out}");
+    assert!(out.contains("300000000000 across all tokens") && out.contains("transfers above 5000000000 wait 3600 s"), "{out}");
+    // --limits and --governance are two different reports.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), &node.url, &evm_section("eth", 2, "evm", &node.url));
+    assert!(!audit().arg("--config").arg(&cfg).args(["--limits", "--governance"]).output().unwrap().status.success());
+}
