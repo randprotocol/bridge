@@ -12,6 +12,9 @@ contracts; Solana upgrade authority". Design and rationale:
 > nothing in this repository settles it. Until someone reads `wallet/getaccount` for the two
 > accounts on Tron mainnet (or runs `rand-bridge-audit --governance`, whose Tron rules 10 and 13
 > read exactly that) and corrects whichever document is wrong, treat neither statement as fact.
+> Either way, 3 of 5 on the admin account is not the 5 of 6 the owner's rule now asks (§1): if
+> that is what the chain has, the audit's last Tron row fails until the account's permissions
+> are updated (`multisig-permissions`, signed under its current owner permission).
 
 **Tron steps 0–3 ran on mainnet on 2026-09-26** (timelock `TKmds8i5UPQDaV3YghCVJUMomHeQzJzV7k`, pauser and pending admin set; `docs/mainnet-deployment.md`); the multi-signature account permissions and the accept are still to do. **No other on-chain step below has been run.** They move control of live custody and are
 irreversible once a timelock or multisig accepts. Run them in the order given, one chain at a time,
@@ -41,28 +44,38 @@ Rules the audit enforces (`rand-bridge-audit --governance`, §5):
   threshold; on Tron a multi-signature account — and the pauser is neither the admin
   nor the admin multisig;
 - on Solana the admin and the upgrade authority are the vault of a Squads multisig with no
-  `config_authority`, a threshold of at least 2 and a time lock of at least 48 h.
+  `config_authority`, a threshold of at least 2 and a time lock of at least 48 h;
+- the admin multisig is 5 signers of 6 (the last row of every endpoint; a FAIL for any other
+  shape, UNKNOWN when unreadable).
 
 A PASS on every rule means **no single key can change an endpoint's configuration or code**. It
 does not mean no single party controls the funds: releases from custody are authorised by the
 guardian quorum, whose keys are not yet distributed (BR-4, §8). The audit prints that caveat on
 every run.
 
-Recommended thresholds: admin 3 of 5, pause 2 of 5, **each signer a different person on a
+**The admin multisig is 5 signers of 6** on every chain (the admin Safe, the Tron admin account on
+both its owner and its active permission, the Squads multisig). This is the owner's standing rule,
+not a recommendation, and the audit holds it: the last row of each endpoint, `admin multisig is 5
+of 6 (owner's rule)`, is a FAIL for any other shape it can read (3 of 5 and 2 of 3 included) and
+UNKNOWN when it cannot read the signers, so nothing else passes in silence. It is separate from
+the guardian quorum, which stays 6 of 8. The pause multisig is not held to it by the audit; this
+page still suggests 2 of 5 there, so that a pause is quick, and whether the rule should cover it
+too is the owner's call. **Each signer a different person on a
 different device**. That last clause is where BR-4 is closed for the endpoints: a multisig whose
 keys sit in one shell profile is still one key.
 
 ## 2. What the operator provides
 
-- the owners of the admin and pause multisigs on each chain (5 addresses each is the
-  recommendation), created beforehand: Safes on Ethereum and BSC at safe.global (v1.3.0 or v1.4.1,
+- the owners of the admin and pause multisigs on each chain (six for the admin multisig, of whom
+  five sign; five is the suggestion for the pause multisig), created beforehand: Safes on Ethereum and BSC at safe.global (v1.3.0 or v1.4.1,
   **no modules, no recovery or spending-limit add-ons**: the handover and the audit refuse a Safe
   with any module; a Safe of any other version, v1.5.0 included, is refused until its proxy code
   hash and singleton are added to both pins, `Governance.s.sol` `isSafeProxyCodehash` /
   `isCanonicalSafeSingleton` and `gov_audit.rs` `SAFE_PROXY_CODEHASHES` /
   `CANONICAL_SAFE_SINGLETONS`), native multi-signature accounts on Tron (active permission with the threshold,
   whose `operations` allow TriggerSmartContract), one Squads v4 multisig on Solana created
-  **without** a config authority and with a time lock of at least 172800 s;
+  **without** a config authority, with six members and a threshold of five, and with a time lock
+  of at least 172800 s;
 - **if the Safe web app offers only a newer version**, create the Safes at v1.4.1 explicitly with
   the Protocol Kit (`@safe-global/protocol-kit`): `Safe.init({ provider, signer, predictedSafe: {
   safeAccountConfig: { owners, threshold }, safeDeploymentConfig: { safeVersion: '1.4.1' } } })`,
@@ -132,7 +145,7 @@ OPS_PRIVATE_KEY=<current admin> node deploy/tron-ops.js set-pauser <pause multis
 OPS_PRIVATE_KEY=<current admin> node deploy/tron-ops.js transfer-admin <timelock> \
   --admin-multisig <admin multisig account> --yes
 # 3b. make the two accounts multi-signature (unsigned, signed by each account's own key; burns 100 TRX each)
-node deploy/tron-ops.js multisig-permissions <admin multisig account> --signers T1,...,T5 --owner-threshold 3 --active-threshold 3
+node deploy/tron-ops.js multisig-permissions <admin multisig account> --signers T1,...,T6 --owner-threshold 5 --active-threshold 5
 node deploy/tron-ops.js multisig-permissions <pause multisig account> --signers T1,...,T5 --owner-threshold 3 --active-threshold 2
 # 4. schedule the acceptance (unsigned, for the admin multisig)
 node deploy/tron-ops.js timelock-schedule-accept <timelock> --from <admin multisig account>

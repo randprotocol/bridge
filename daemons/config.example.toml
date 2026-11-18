@@ -150,6 +150,8 @@ listen = "127.0.0.1:7080"            # POST /v1/recipients {recipient_hash, addr
 # [governance]
 # min_delay_secs = 172800             # 48 h
 # min_threshold = 2
+# Not configurable: the admin multisig on every chain must be 5 signers of 6 (the owner's rule).
+# The last row of each endpoint reports any other shape as FAIL.
 # timelock_deploy_block = { 2 = 0, 3 = 0, 4 = 0 }   # per bridge chain: where the role logs start
 # admin_multisig = { 2 = "0x…", 3 = "0x…", 4 = "T…" } # per bridge chain: the timelock's only proposer/executor/canceller
 # solana_multisig = "<Squads v4 multisig account, base58>"

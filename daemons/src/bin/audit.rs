@@ -346,6 +346,11 @@ async fn safe_reads(rpc: &JsonRpc, safe: &[u8; 20]) -> SafeReads {
 /// Tron `wallet/getaccount`: how many signatures the account needs, or
 /// `None` when the API is not served (or the account does not exist).
 async fn tron_signers(api: &str, address: &[u8; 20]) -> Option<u32> {
+    gov_audit::tron_min_signers(&tron_account(api, address).await?)
+}
+
+/// `wallet/getaccount` for `address`, or `None` when the API does not serve it.
+async fn tron_account(api: &str, address: &[u8; 20]) -> Option<serde_json::Value> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -361,7 +366,7 @@ async fn tron_signers(api: &str, address: &[u8; 20]) -> Option<u32> {
         .json()
         .await
         .ok()?;
-    gov_audit::tron_min_signers(&account)
+    Some(account)
 }
 
 /// `[from, to]` in inclusive chunks of at most `max` blocks.
@@ -503,6 +508,7 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
         SafeReads::not_asked("no admin multisig configured"),
         None,
     );
+    let mut tron_admin_multisig_shapes = None;
     if let Some(ms) = &admin_multisig {
         admin_multisig_code = eth_get_code(&rpc, ms)
             .await
@@ -515,7 +521,9 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
             Flavor::Tron => {
                 admin_multisig_safe = SafeReads::not_asked("not asked on Tron");
                 if admin_multisig_code.is_empty() {
-                    tron_admin_multisig_signers = tron_signers(&endpoint.rpc, ms).await;
+                    let account = tron_account(&endpoint.rpc, ms).await;
+                    tron_admin_multisig_signers = account.as_ref().and_then(gov_audit::tron_min_signers);
+                    tron_admin_multisig_shapes = account.as_ref().and_then(gov_audit::tron_permission_shapes);
                 }
             }
         }
@@ -541,6 +549,7 @@ async fn evm_governance(endpoint: &EvmConfig, policy: &GovernanceConfig) -> Resu
         admin_multisig_code,
         admin_multisig_safe,
         tron_admin_multisig_signers,
+        tron_admin_multisig_shapes,
         pauser,
         pauser_code,
         pauser_safe,
