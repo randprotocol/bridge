@@ -95,6 +95,11 @@ pq_seed_env = "GUARDIAN_PQ_SEED"     # 32-byte Dilithium2 seed, generated ON thi
 # per_transfer = 10000000000         # 100 tokens
 # per_window = 100000000000          # 1,000 tokens per window
 # window_secs = 86400
+# per_window_total = 300000000000    # optional: all tokens together, per direction, per window.
+#                                    # Absent, the bound is per_window times the number of tokens.
+# delay_above = 5000000000           # optional, with delay_secs: a transfer above this amount is
+# delay_secs = 3600                  # signed only this long after the guardian first read it
+#                                    # (data_dir/delayed/, sealed). It holds back no other transfer.
 # [[guardian.limits.token]]          # optional per-token override
 # chain = 2
 # address = "0x…"                    # EVM 0x+40 hex, 0x+64 hex wire word, Tron T…, Solana mint

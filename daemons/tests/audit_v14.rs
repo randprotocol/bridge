@@ -438,6 +438,9 @@ mod br1004 {
             per_transfer: 1_000_000_000,
             per_window: 1_000_000_000,
             window_secs: 2,
+            per_window_total: None,
+            delay_above: None,
+            delay_secs: None,
             token: vec![],
         })
         .unwrap();
