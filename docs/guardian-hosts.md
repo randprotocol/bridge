@@ -160,6 +160,28 @@ Never take two droplets down at once while 7 and 8 are offline.
 Afterwards, record the roll (BR-602): date, host, binary sha256, config sha256, and the
 `--check-config` output. Then take a fleet snapshot.
 
+### Provider independence (BR-4)
+
+That the providers of a chain are different parties is checked. A config whose `rpc_quorum` (two or more) one operator's URLs can
+meet alone does not load; the operator is the URL's site (`publicnode.com`), or host and port for
+a local endpoint. Before a changed config goes live, on the host, with the provider variables but
+no key:
+
+```
+rand-guardian --config /etc/rand-guardian.toml.new --check-providers
+```
+
+It makes one read-only identity call per provider and prints, per chain, what each provider
+answered and PASS or FAIL. It exits 0 only when a quorum of providers from different operators
+name the same chain on every watched chain, and the Rand nodes name the configured chain id and
+genesis hash. A PASS at a quorum of 1 is marked as such: one provider can still get a message
+signed. The check cannot see who owns a provider behind its name, or whether two providers share
+an upstream node; choosing providers that do not is the operator's part.
+
+Key custody is the other half of BR-4 and is not code: each guardian's ECDSA key and Dilithium2
+seed on a host only that guardian's operator controls, and the Rand pause key apart from all of
+them. Keys move by rotation (`docs/pq-rotation.md`, `rand-bridge-gov rotate`), never by copying.
+
 ## Quorum headroom (BR-402)
 
 A set of `n` guardians needs `n * 2 / 3 + 1` signatures: 6 of 8 for set 1, and the same 6 of 8
