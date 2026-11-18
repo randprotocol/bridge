@@ -314,3 +314,117 @@ fn the_rotation_messages_match_the_vectors() {
         assert_eq!(hex::encode(built), v["message"].as_str().unwrap(), "{} {}", v["kind"], v["form"]);
     }
 }
+
+// ---- pq-rotate-status ---------------------------------------------------------
+
+#[test]
+fn a_rotation_is_in_effect_pending_or_absent() {
+    use pq_gov::{rotation_outcome, RotationOutcome};
+    let (old, new) = (vec![pk(1), pk(2)], vec![pk(3), pk(4)]);
+    assert_eq!(rotation_outcome(&new, None, &new), RotationOutcome::InEffect);
+    assert_eq!(
+        rotation_outcome(&old, Some((&new, 99)), &new),
+        RotationOutcome::Pending { effective_at_secs: 99 }
+    );
+    assert_eq!(rotation_outcome(&old, None, &new), RotationOutcome::NotRotated);
+    // Another pending set is not the expected one, and order is part of the set.
+    assert_eq!(rotation_outcome(&old, Some((&old, 99)), &new), RotationOutcome::NotRotated);
+    let swapped = vec![pk(4), pk(3)];
+    assert_eq!(rotation_outcome(&swapped, None, &new), RotationOutcome::NotRotated);
+    assert_eq!(pq_gov::fingerprint(&pk(1)).len(), 8);
+}
+
+/// A node serving `current` as the set in force with pause key `pause`, and `pending`.
+fn status_node(current: &[u8], pause: u8, pending: serde_json::Value) -> Fake {
+    let pq: Vec<String> = current.iter().map(|i| hex::encode(pk(*i))).collect();
+    let guardians: Vec<String> = current.iter().map(|i| format!("0x{:040x}", i)).collect();
+    rpc(move |m, _| match m {
+        "rand_chainId" => Some(Ok(json!(21))),
+        "rand_getGenesisHash" => Some(Ok(json!(CHAIN21_GENESIS))),
+        "rand_getBridgeState" => Some(Ok(json!({
+            "enabled": true, "guardian_set_index": 1, "guardians": guardians, "burn_sequence": 0,
+            "pq_guardians": pq, "pause_key": hex::encode(pk(pause)), "rotation_nonce": 4,
+            "rules_v2": { "cap_window_secs": 86400 },
+            "rotation_rules": { "delay_secs": 86400, "needs_possession": true },
+            "pending_rotations": pending,
+        }))),
+        _ => None,
+    })
+}
+
+fn status(node: &Fake, args: &[&str], env: &[(&str, String)]) -> Output {
+    let mut c = gov();
+    c.args(["pq-rotate-status", "--rand-rpc", &node.url]).args(args);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn the_status_passes_only_when_the_new_keys_are_in_force_and_the_old_ones_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = set_file(dir.path(), "old.json", &[1, 2, 3]);
+    let new = set_file(dir.path(), "new.json", &[11, 12, 13]);
+    let (old, new) = (old.to_str().unwrap(), new.to_str().unwrap());
+    let (old_pause, new_pause) = (hex::encode(pk(50)), hex::encode(pk(60)));
+
+    // Before: nothing rotated.
+    let before = status_node(&[1, 2, 3], 50, json!([]));
+    let o = status(&before, &["--expect-pq-guardians-file", new, "--expect-pause-key", &new_pause], &[]);
+    assert!(!o.status.success());
+    assert_eq!(out(&o).matches("FAIL: the expected").count(), 2, "{}", out(&o));
+    assert!(out(&o).contains("rotation_nonce 4") && out(&o).contains("no rotation is pending"), "{}", out(&o));
+
+    // Accepted, waiting out the delay: not a pass, and the time is printed.
+    let pending = status_node(
+        &[1, 2, 3],
+        50,
+        json!([{ "kind": "pq_guardians", "new_pq_guardians": [hex::encode(pk(11)), hex::encode(pk(12)), hex::encode(pk(13))], "effective_at_secs": 1_800_000_000u64 },
+               { "kind": "pause_key", "new_pause_key": new_pause, "effective_at_secs": 1_800_000_001u64 }]),
+    );
+    let o = status(&pending, &["--expect-pq-guardians-file", new, "--expect-pause-key", &new_pause], &[]);
+    assert!(!o.status.success());
+    assert!(out(&o).contains("WAIT: the expected PQ guardian set is pending, in force from unix time 1800000000"), "{}", out(&o));
+    assert!(out(&o).contains("WAIT: the expected pause key is pending, in force from unix time 1800000001"), "{}", out(&o));
+
+    // After: in force, nothing retired remains, and a guardian's own seed is at its index.
+    let after = status_node(&[11, 12, 13], 60, json!([]));
+    let o = status(
+        &after,
+        &["--expect-pq-guardians-file", new, "--expect-pause-key", &new_pause, "--retired-pq-guardians-file", old,
+          "--retired-pause-key", &old_pause, "--seed-envs", "G12,PAUSE"],
+        &[("G12", seed(12)), ("PAUSE", seed(60))],
+    );
+    assert!(o.status.success(), "{}\n{}", out(&o), err(&o));
+    let text = out(&o);
+    assert_eq!(text.matches("PASS").count(), 5, "{text}");
+    assert!(text.contains("G12 derives") && text.contains("guardian index 1") && text.contains("the pause key in force"), "{text}");
+    assert!(!text.contains(&seed(12)) && !err(&o).contains(&seed(12)), "a seed is never printed");
+    // Reads only.
+    for m in after.rpc_methods() {
+        assert!(m.starts_with("rand_get") || m == "rand_chainId", "{m}");
+    }
+}
+
+#[test]
+fn the_status_fails_on_a_retired_key_left_in_force_or_a_seed_the_chain_does_not_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = set_file(dir.path(), "old.json", &[1, 2, 3]);
+    // Key 2 survived the rotation, and the old pause key is still the pause key.
+    let node = status_node(&[11, 2, 13], 50, json!([]));
+    let o = status(
+        &node,
+        &["--retired-pq-guardians-file", old.to_str().unwrap(), "--retired-pause-key", &hex::encode(pk(50)), "--seed-envs", "STALE"],
+        &[("STALE", seed(1))],
+    );
+    assert!(!o.status.success());
+    let text = out(&o);
+    assert!(text.contains("FAIL: retired keys still in force") && text.contains("(guardian index 1)") && text.contains("(the pause key)"), "{text}");
+    assert!(text.contains("FAIL: STALE derives") && text.contains("do not count"), "{text}");
+    assert!(err(&o).contains("2 retired key(s) still in force") && err(&o).contains("STALE is not a key in force"), "{}", err(&o));
+    // With no expectation it reports and exits 0.
+    let o = status(&node, &[], &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("PQ guardian set in force: 3 keys, quorum 3"), "{}", out(&o));
+}

@@ -384,6 +384,31 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Rand-only (BRG-14): read what the chain serves and say whether a rotation is in
+    /// effect, pending or absent. Read-only; signs and sends nothing. Exits 0 only when
+    /// every expectation given holds.
+    PqRotateStatus {
+        #[arg(long)]
+        rand_rpc: String,
+        /// The set the rotation was to install, `{"pq_guardians": [...]}`: must be in force.
+        #[arg(long)]
+        expect_pq_guardians_file: Option<PathBuf>,
+        /// The pause key the rotation was to install, hex or `@file`: must be in force.
+        #[arg(long)]
+        expect_pause_key: Option<String>,
+        /// The set from before the rotation: none of its keys may remain in force, as a
+        /// guardian key or as the pause key.
+        #[arg(long)]
+        retired_pq_guardians_file: Option<PathBuf>,
+        /// The pause key from before the rotation: it must no longer be in force.
+        #[arg(long)]
+        retired_pause_key: Option<String>,
+        /// Environment variables holding Dilithium2 seeds (comma-separated): each must
+        /// derive a key in force, and its index is printed. For a guardian to check, on its
+        /// own host, that the seed it runs is the one the chain counts.
+        #[arg(long, value_delimiter = ',')]
+        seed_envs: Vec<String>,
+    },
     /// Print the Dilithium2 public key a seed derives (and its sha256 prefix), never the seed.
     PqPublicKey {
         #[arg(long)]
@@ -990,6 +1015,132 @@ async fn main() -> Result<()> {
             let status = cmd.status().with_context(|| format!("running {}", rand_node.display()))?;
             if !status.success() {
                 bail!("{} exited with {status}", rand_node.display());
+            }
+        }
+        Command::PqRotateStatus {
+            rand_rpc,
+            expect_pq_guardians_file,
+            expect_pause_key,
+            retired_pq_guardians_file,
+            retired_pause_key,
+            seed_envs,
+        } => {
+            use bridge_daemons::pq_gov::{fingerprint, rotation_outcome, RotationOutcome};
+            let view = rotation_view(&rand_rpc).await?;
+            let state = bridge_daemons::rpc::JsonRpc::new(&rand_rpc)
+                .call("rand_getBridgeState", serde_json::json!([]))
+                .await?;
+            let key_list = |v: &serde_json::Value| -> Result<Vec<Vec<u8>>> {
+                v.as_array()
+                    .ok_or_else(|| anyhow!("not an array"))?
+                    .iter()
+                    .map(|k| hex::decode(k.as_str().unwrap_or_default()).context("not hex"))
+                    .collect()
+            };
+            let mut pending_pq: Option<(Vec<Vec<u8>>, u64)> = None;
+            let mut pending_pause: Option<(Vec<Vec<u8>>, u64)> = None;
+            for p in state["pending_rotations"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                let at = p["effective_at_secs"].as_u64().ok_or_else(|| anyhow!("a pending rotation without effective_at_secs"))?;
+                match p["kind"].as_str() {
+                    Some("pq_guardians") => pending_pq = Some((key_list(&p["new_pq_guardians"]).context("new_pq_guardians")?, at)),
+                    Some("pause_key") => {
+                        let k = hex::decode(p["new_pause_key"].as_str().unwrap_or_default()).context("new_pause_key")?;
+                        pending_pause = Some((vec![k], at));
+                    }
+                    other => bail!("a pending rotation of unknown kind {other:?}"),
+                }
+            }
+            let quorum = view.pq_guardians.len() * 2 / 3 + 1;
+            println!("Rand chain {} ({}), rotation_nonce {}", view.chain_id, view.binding.describe(), view.nonce);
+            println!(
+                "rotation rules: delay {} s, possession {}",
+                state["rotation_rules"]["delay_secs"].as_u64().map_or_else(|| "?".into(), |d| d.to_string()),
+                if view.needs_possession { "required" } else { "not required" }
+            );
+            println!("PQ guardian set in force: {} keys, quorum {quorum}", view.pq_guardians.len());
+            for (i, k) in view.pq_guardians.iter().enumerate() {
+                println!("  [{i}] {}", fingerprint(k));
+            }
+            match &view.pause_key {
+                Some(k) => println!("pause key in force: {}", fingerprint(k)),
+                None => println!("pause key in force: none"),
+            }
+            if let Some((keys, at)) = &pending_pq {
+                let prints: Vec<String> = keys.iter().map(|k| fingerprint(k)).collect();
+                println!("PENDING PQ set rotation, in force from unix time {at}: {}", prints.join(" "));
+            }
+            if let Some((keys, at)) = &pending_pause {
+                println!("PENDING pause key rotation, in force from unix time {at}: {}", fingerprint(&keys[0]));
+            }
+            if pending_pq.is_none() && pending_pause.is_none() {
+                println!("no rotation is pending");
+            }
+
+            let mut failed = Vec::new();
+            let mut judge = |what: &str, outcome: RotationOutcome| match outcome {
+                RotationOutcome::InEffect => println!("PASS: the expected {what} is in force"),
+                RotationOutcome::Pending { effective_at_secs } => {
+                    println!(
+                        "WAIT: the expected {what} is pending, in force from unix time {effective_at_secs} \
+                         unless the current pause key cancels it first"
+                    );
+                    failed.push(format!("the expected {what} is pending, not yet in force"));
+                }
+                RotationOutcome::NotRotated => {
+                    println!("FAIL: the expected {what} is neither in force nor pending");
+                    failed.push(format!("the expected {what} is not on the chain"));
+                }
+            };
+            if let Some(path) = &expect_pq_guardians_file {
+                let expected = pq_guardians(path)?;
+                let pending = pending_pq.as_ref().map(|(k, at)| (k.as_slice(), *at));
+                judge("PQ guardian set", rotation_outcome(&view.pq_guardians, pending, &expected));
+            }
+            if let Some(arg) = &expect_pause_key {
+                let expected = vec![pq_key_arg(arg)?];
+                let in_force: Vec<Vec<u8>> = view.pause_key.clone().into_iter().collect();
+                let pending = pending_pause.as_ref().map(|(k, at)| (k.as_slice(), *at));
+                judge("pause key", rotation_outcome(&in_force, pending, &expected));
+            }
+            let mut retired = match &retired_pq_guardians_file {
+                Some(path) => pq_guardians(path)?,
+                None => Vec::new(),
+            };
+            let had_retired = !retired.is_empty() || retired_pause_key.is_some();
+            if let Some(arg) = &retired_pause_key {
+                retired.push(pq_key_arg(arg)?);
+            }
+            let mut still = Vec::new();
+            for k in &retired {
+                if let Some(i) = view.pq_guardians.iter().position(|g| g == k) {
+                    still.push(format!("{} (guardian index {i})", fingerprint(k)));
+                }
+                if view.pause_key.as_ref() == Some(k) {
+                    still.push(format!("{} (the pause key)", fingerprint(k)));
+                }
+            }
+            if had_retired {
+                if still.is_empty() {
+                    println!("PASS: no retired key is in force");
+                } else {
+                    println!("FAIL: retired keys still in force: {}", still.join(", "));
+                    failed.push(format!("{} retired key(s) still in force", still.len()));
+                }
+            }
+            for name in &seed_envs {
+                let key = bridge_daemons::pq::PqKey::from_seed_hex(&take_env(name)?)?.public_key();
+                let print = fingerprint(&key);
+                if let Some(i) = view.pq_guardians.iter().position(|g| *g == key) {
+                    println!("PASS: {name} derives {print}, in force at guardian index {i}");
+                } else if view.pause_key.as_ref() == Some(&key) {
+                    println!("PASS: {name} derives {print}, the pause key in force");
+                } else {
+                    println!("FAIL: {name} derives {print}, which is not in force: co-signatures from this seed do not count");
+                    failed.push(format!("{name} is not a key in force"));
+                }
+            }
+            if !failed.is_empty() {
+                bail!("{}", failed.join("; "));
             }
         }
         Command::PqPublicKey { seed_env } => {

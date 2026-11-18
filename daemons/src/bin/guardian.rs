@@ -272,7 +272,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", section.listen))?;
     tracing::info!("signature API on {}", section.listen);
-    let router = api::router(store.clone(), key.address());
+    let pq_public = pq.as_ref().map(|p| p.key.public_key());
+    let router = api::router_with_pq(store.clone(), key.address(), pq_public.as_deref());
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             tracing::error!("signature API stopped: {e}");

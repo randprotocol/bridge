@@ -1,0 +1,12 @@
+# Quorum headroom check (BR-402), for the relayer host: fails when fewer than one guardian could
+# stop before signing stops. Pair it with rand-bridge-headroom.timer. OnFailure names the unit
+# that tells someone; rand-bridge-alert@.service is an example to replace with your own
+# (mail, a webhook) — this repository ships no notifier.
+[Unit]
+Description=Rand bridge guardian quorum headroom (BR-402)
+OnFailure=rand-bridge-alert@%n.service
+
+[Service]
+Type=oneshot
+User=rand-relayer
+ExecStart=/usr/local/bin/rand-bridge-audit --config /etc/rand-relayer.toml --headroom --min-spare 1
