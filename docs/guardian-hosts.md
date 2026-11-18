@@ -142,7 +142,10 @@ Never take two droplets down at once while 7 and 8 are offline.
    same for `/usr/local/bin/rand-guardian` and `/etc/rand-guardian/env`.
 2. Write `/etc/rand-guardian.toml.new` as the host's current file (keep its `data_dir`, `key_env`,
    `pq_seed_env`, `listen` and start blocks) plus the `rpcs`/`rpc_quorum` lines, `peers` and
-   `[guardian.limits]` from `daemons/mainnet/guardian-<i>.toml`.
+   `[guardian.limits]` from `daemons/mainnet/guardian-<i>.toml`. The binary this guard ships in
+   also refuses a `[rand]` section without `genesis_hash` next to `chain_id` (BR-1005,
+   `daemons/README.md`): the 22 Oct host files predate that line, so copy it from the repository
+   config too.
 3. Check it with the new binary, passing only the provider variables:
    `env $(grep '^GUARDIAN_RPC_' /etc/rand-guardian/env | xargs) /usr/local/bin/rand-guardian.new --config /etc/rand-guardian.toml.new --check-config`.
    It must print `config OK for Rand chain 21`. Stop here if it does not.

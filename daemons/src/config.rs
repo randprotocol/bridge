@@ -487,7 +487,7 @@ impl Config {
             let n = urls.iter().filter(|u| !has_placeholder(u)).count();
             if n < 2 || quorum < 2 {
                 gaps.push(format!(
-                    "{what}: {n} provider(s) at rpc_quorum {quorum}; a public chain needs at least                      2 independent providers (rpcs) at an rpc_quorum of at least 2 (BR-4)"
+                    "{what}: {n} provider(s) at rpc_quorum {quorum}; a public chain needs at least 2 independent providers (rpcs) at an rpc_quorum of at least 2 (BR-4)"
                 ));
             }
         };
@@ -503,13 +503,13 @@ impl Config {
             Some(g) => {
                 if !g.peers.iter().any(|p| !p.trim().is_empty() && !has_placeholder(p)) {
                     gaps.push(
-                        "guardian.peers is empty: a first signature is checked against this                          guardian's own store only (BR-502)"
+                        "guardian.peers is empty: a first signature is checked against this guardian's own store only (BR-502)"
                             .into(),
                     );
                 }
                 if g.limits.is_none() {
                     gaps.push(
-                        "no [guardian.limits]: signing would be uncapped per transfer and per                          window (BRG-1)"
+                        "no [guardian.limits]: signing would be uncapped per transfer and per window (BRG-1)"
                             .into(),
                     );
                 }

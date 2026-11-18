@@ -456,6 +456,12 @@ fn guard_config(dir: &Path, chain_id: &str, drop: &[&str]) -> std::path::PathBuf
     } else {
         "[guardian.limits]\nper_transfer = 10000000000\nper_window = 100000000000\n"
     };
+    // BR-1005: a guardian that names its chain names its genesis hash too.
+    let chain_id = if chain_id.is_empty() {
+        String::new()
+    } else {
+        format!("{chain_id}\ngenesis_hash = \"{}\"", "ca".repeat(32))
+    };
     write_config(
         dir,
         &format!(
