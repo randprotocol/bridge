@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use bridge_daemons::config::{address20, pubkey32, Config, EvmConfig, EvmKind, GovernanceConfig};
+use bridge_daemons::handover;
 use bridge_daemons::gov_audit::{self, EvmReads, Flavor, Rule, SafeReads, SolanaReads, Status};
 use bridge_daemons::rpc::{hex_data, quantity, JsonRpc};
 use bridge_daemons::sources::solana::find_program_address;
@@ -46,6 +47,15 @@ struct Cli {
     /// multisig and upgrade authority on every endpoint.
     #[arg(long)]
     governance: bool,
+    /// Print where each endpoint stands in the governance handover (BR-3)
+    /// and the next step, instead of custody: admin, pendingAdmin, and the
+    /// timelock's `acceptAdmin()` operation. Read-only; exits non-zero until
+    /// the admin has moved on every endpoint. `--governance` judges the end state.
+    #[arg(long, conflicts_with = "governance")]
+    handover: bool,
+    /// The salt the `acceptAdmin()` operation was scheduled with (`--handover`).
+    #[arg(long, default_value = "0x0000000000000000000000000000000000000000000000000000000000000000")]
+    salt: String,
 }
 
 /// The approved backings: (bridge chain, symbol, token, decimals).
@@ -640,6 +650,145 @@ async fn solana_governance(
 /// can change the endpoints, not who can move custody.
 const GOVERNANCE_CAVEAT: &str = "caveat: custody is still authorised by the guardian quorum, whose keys are not yet distributed (BR-4)";
 
+// ---- --handover --------------------------------------------------------------
+
+async fn evm_handover(endpoint: &EvmConfig, salt: &[u8; 32]) -> Result<(handover::EvmHandover, String)> {
+    let url = match endpoint.kind {
+        EvmKind::Evm => endpoint.rpc.clone(),
+        EvmKind::Tron => format!("{}/jsonrpc", endpoint.rpc.trim_end_matches('/')),
+    };
+    let rpc = JsonRpc::new(&url);
+    let bridge = address20(&endpoint.contract)?;
+    let read = |sig: &'static str| {
+        let rpc = rpc.clone();
+        async move {
+            let w = eth_call(&rpc, &bridge, selector(sig).to_vec()).await.context(sig)?;
+            word_to_address(&w).ok_or_else(|| anyhow!("{sig}: not an address"))
+        }
+    };
+    let admin = read("admin()").await?;
+    let pending_admin = read("pendingAdmin()").await?;
+    let pauser = read("pauser()").await?;
+    let admin_has_code = !eth_get_code(&rpc, &admin).await.context("eth_getCode(admin)")?.is_empty();
+    let pending = pending_admin != [0u8; 20];
+    let pending_has_code =
+        pending && !eth_get_code(&rpc, &pending_admin).await.context("eth_getCode(pendingAdmin)")?.is_empty();
+    let id = handover::operation_id(&bridge, &handover::ACCEPT_ADMIN, salt);
+    let mut detail = String::new();
+    let accept = if pending_has_code {
+        let mut call = selector("getTimestamp(bytes32)").to_vec();
+        call.extend_from_slice(&id);
+        let ts = eth_call(&rpc, &pending_admin, call).await.ok().and_then(|w| word_u128(&w).ok());
+        let block = rpc.call("eth_getBlockByNumber", json!(["latest", false])).await.context("the latest block")?;
+        let now = quantity(&block["timestamp"]).context("the latest block's timestamp")?;
+        let delay = try_call(&rpc, &pending_admin, "getMinDelay()").await.ok().and_then(|w| word_u128(&w).ok());
+        detail = format!(
+            "  acceptAdmin() operation 0x{} on pendingAdmin; chain time {now}; timelock delay {}\n",
+            hex::encode(id),
+            delay.map_or_else(|| "not answered".to_string(), |d| format!("{d} s"))
+        );
+        ts.map(|t| handover::operation(t, now))
+    } else {
+        None
+    };
+    let show = |a: &[u8; 20]| match endpoint.kind {
+        EvmKind::Evm => format!("0x{}", hex::encode(a)),
+        EvmKind::Tron => gov_audit::tron_base58(a),
+    };
+    let text = format!(
+        "  admin        {} ({})\n  pendingAdmin {}\n  pauser       {}\n{detail}",
+        show(&admin),
+        if admin_has_code { "a contract" } else { "no code: a key or a native account" },
+        if pending { show(&pending_admin) } else { "none".into() },
+        show(&pauser),
+    );
+    Ok((handover::EvmHandover { admin, admin_has_code, pending_admin, pending_has_code, accept }, text))
+}
+
+async fn solana_handover(
+    sol: &bridge_daemons::config::SolanaConfig,
+    policy: &GovernanceConfig,
+) -> Result<(handover::SolanaHandover, String)> {
+    let rpc = JsonRpc::new(&sol.rpc);
+    let program = pubkey32(&sol.program)?;
+    let (config_key, _) = find_program_address(&[b"config"], &program)?;
+    let (owner, data) = solana_account_owned(&rpc, &config_key, Some(97))
+        .await?
+        .ok_or_else(|| anyhow!("config PDA {} not found", bs58::encode(config_key).into_string()))?;
+    if owner != sol.program {
+        bail!("config PDA is owned by {owner}, not the bridge program");
+    }
+    let keys = gov_audit::decode_bridge_config(&data)?;
+    let loader = gov_audit::BPF_LOADER_UPGRADEABLE;
+    let (owner, data) = solana_account_owned(&rpc, &program, Some(36))
+        .await?
+        .ok_or_else(|| anyhow!("program account not found"))?;
+    let upgrade_authority = if owner != loader {
+        None
+    } else {
+        let programdata = gov_audit::decode_program_account(&data)?;
+        let (_, data) = solana_account_owned(&rpc, &programdata, Some(45))
+            .await?
+            .ok_or_else(|| anyhow!("ProgramData account not found"))?;
+        gov_audit::decode_programdata_authority(&data)?
+    };
+    let vault = policy
+        .solana_multisig
+        .as_deref()
+        .map(pubkey32)
+        .transpose()?
+        .map(|ms| gov_audit::squads_vault(&ms, policy.solana_vault_index))
+        .transpose()?;
+    let b58 = |k: &[u8; 32]| bs58::encode(k).into_string();
+    let text = format!(
+        "  admin             {}\n  pending_admin     {}\n  upgrade authority {}\n  configured vault  {}\n",
+        b58(&keys.admin),
+        if keys.pending_admin == [0u8; 32] { "none".into() } else { b58(&keys.pending_admin) },
+        upgrade_authority.as_ref().map_or_else(|| "none (not upgradeable)".into(), b58),
+        vault.as_ref().map_or_else(|| "(no [governance].solana_multisig)".into(), b58),
+    );
+    Ok((handover::SolanaHandover { admin: keys.admin, pending_admin: keys.pending_admin, upgrade_authority, vault }, text))
+}
+
+/// The `--handover` report. `Ok(false)` until the admin has moved on every endpoint.
+async fn handover_report(config: &Config, salt: &[u8; 32], out: &mut impl std::io::Write) -> Result<bool> {
+    let mut complete = true;
+    let mut section = |out: &mut dyn std::io::Write, title: String, r: Result<(handover::Stage, String, String)>| {
+        let _ = writeln!(out, "== {title} ==");
+        match r {
+            Ok((stage, reads, next)) => {
+                complete &= stage == handover::Stage::Complete;
+                let _ = write!(out, "{reads}");
+                let _ = writeln!(out, "  stage: {}\n  {next}\n", stage.label());
+            }
+            Err(e) => {
+                complete = false;
+                let _ = writeln!(out, "  stage: UNKNOWN\n  the endpoint could not be read: {e:#}\n");
+            }
+        }
+    };
+    for endpoint in &config.evm {
+        let tron = matches!(endpoint.kind, EvmKind::Tron);
+        let r = evm_handover(endpoint, salt).await.map(|(h, reads)| {
+            let (stage, next) = handover::evm_stage(&h, tron);
+            (stage, reads, next)
+        });
+        section(out, format!("{} (chain {})", endpoint.name, endpoint.chain), r);
+    }
+    if let Some(sol) = &config.solana {
+        let r = solana_handover(sol, &config.governance_policy()).await.map(|(h, reads)| {
+            let (stage, next) = handover::solana_stage(&h);
+            (stage, reads, next)
+        });
+        section(out, format!("{} (chain 5)", sol.name), r);
+    }
+    writeln!(
+        out,
+        "Read-only: nothing was signed or sent. ADMIN MOVED means the admin is no longer a single key here;          whether what holds it is sound is `--governance`."
+    )?;
+    Ok(complete)
+}
+
 /// Writes the BR-4 caveat after a `--governance` run, however it ended (an
 /// early error included), and hands the verdict back unchanged.
 fn with_caveat<T>(result: Result<T>, out: &mut dyn std::io::Write) -> Result<T> {
@@ -735,6 +884,13 @@ async fn main() -> Result<()> {
     if cli.governance {
         let result = governance(&config).await;
         return with_caveat(result, &mut std::io::stdout());
+    }
+    if cli.handover {
+        let salt = bridge_daemons::config::hex32(&cli.salt).context("--salt")?;
+        if !handover_report(&config, &salt, &mut std::io::stdout()).await? {
+            bail!("the governance handover is not complete on every endpoint (BR-3)");
+        }
+        return Ok(());
     }
     let mut rows = evm_rows(&config).await?;
     rows.extend(solana_rows(&config).await?);

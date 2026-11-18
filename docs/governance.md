@@ -189,6 +189,45 @@ correct reading of the current state. The role check reads `RoleGranted`/`RoleRe
 timelock's deployment block, so on BSC it needs an RPC that serves logs that old (a keyed one); a
 deploy block after the real one fails the "role history starts at the timelock constructor" rule.
 
+## 5a. Where the handover stands: `--handover`
+
+`--governance` fails on every rule until a chain is finished, which does not say how far along it
+is. For that:
+
+```bash
+rand-bridge-audit --config daemons/mainnet/relayer.toml --handover        # [--salt 0x<32 bytes>]
+```
+
+It reads, per endpoint, `admin()`, `pendingAdmin()`, `pauser()`, whether each has code, and on the
+pending admin the timelock's `getTimestamp` of the `acceptAdmin()` operation (id computed as the
+timelock's `hashOperation(bridge, 0, acceptAdmin(), 0, salt)`) against the chain's latest block
+time; on Solana the bridge `Config`'s admin and pending admin, the program's upgrade authority and
+the configured Squads vault. It prints one stage per endpoint and the next command of §4:
+
+| stage | meaning | who is admin now |
+|---|---|---|
+| `NOT STARTED` | no transfer under way | the single key |
+| `TRANSFERRED, ACCEPT NOT SCHEDULED` | the timelock is `pendingAdmin`; step 4 not done under this salt (Solana: the admin is the vault, the upgrade authority is not) | the single key (Solana: the vault) |
+| `ACCEPT SCHEDULED, WAITING` | step 4 done; prints the unix time it becomes executable (Solana: the vault is `pending_admin`) | the single key |
+| `ACCEPT EXECUTABLE NOW` | the delay has passed and step 5 has not run | **the single key, until step 5** |
+| `ADMIN MOVED` | the admin is a contract (Solana: the vault, with the upgrade authority) and nothing is pending | not a single key |
+| `UNEXPECTED` | a state the handover does not pass through; the text says which | read the text |
+| `UNKNOWN` | the endpoint could not be read | |
+
+It sends nothing and needs no key. It exits non-zero until every endpoint is at `ADMIN MOVED`, so
+it can sit in a daily job next to `--governance`. `ADMIN MOVED` is not a governance PASS: it says
+the admin left the single key, and `--governance` judges what holds it now.
+
+**Order of work, per chain, each step checked before the next:**
+
+1. `--handover` → `NOT STARTED`. Do §4 steps 1–3. `--handover` → `TRANSFERRED`.
+2. The admin multisig signs the schedule. `--handover` → `ACCEPT SCHEDULED`, with the time.
+3. After that time `--handover` → `ACCEPT EXECUTABLE NOW`. The multisig signs the execute. Do not
+   leave an endpoint in this stage: the delay has been served and the single key still rules.
+4. `--handover` → `ADMIN MOVED`; then that chain's section of `--governance` must be all PASS.
+5. Record the transaction ids and both outputs in `docs/mainnet-deployment.md`, and only then
+   retire the old admin key.
+
 ## 6. After the handover: operating through the delay
 
 Every admin action now takes a proposal, 48 h, and an execution:
