@@ -40,9 +40,190 @@ To update the guardian binary on a host: build it (`cargo build --release --lock
 `install -m 755` it to `/usr/local/bin/` and `systemctl restart rand-guardian`. Do one host at a
 time, because the quorum tolerates two down.
 
-Configure each guardian with more than one independent RPC per chain (`rpcs`, `rpc_quorum`; BR-4)
-and with its peers (`guardian.peers`; BR-502). The repository's configs carry one RPC per chain and
-no peers; the hosts' configs are where these are set.
+## The mainnet guard (BR-601)
+
+On a public Rand chain (`rand.chain_id` 14 or higher, or none configured) `rand-guardian` refuses to
+start unless its config has all three controls:
+
+- every watched chain (Rand, each `[[evm]]`, `[solana]`) read through **at least two distinct
+  providers** (`rpc` + `rpcs`) at an **`rpc_quorum` of at least 2** (BR-4);
+- a non-empty **`guardian.peers`** (BR-502);
+- a **`[guardian.limits]`** section (BRG-1).
+
+The error lists every missing control. `rand-guardian --config <file> --check-config` runs the same
+check and exits (0 when the guardian would start); it needs no key. `--unsafe-skip-mainnet-guards`
+(or `RAND_GUARDIAN_UNSAFE_SKIP_MAINNET_GUARDS=1`) starts the guardian anyway, logging every missing
+control at error level on each start. It is for an emergency or a dev run only, never a standing
+setting. `--pause-signing`, `--resume-signing` and `--list-held` work without the check.
+
+### Providers
+
+`daemons/mainnet/guardian-<i>.toml` lists the keyless providers verified on 2026-11-04 (each answered
+`eth_getLogs` over 1,000 blocks on the endpoint contract, or `getAccountInfo` on the program), plus
+one `${NAME}` placeholder per chain for a provider whose URL carries an API key. The placeholders are
+filled from the guardian's environment when the config is loaded (`Config::load_with`). An unset or
+empty one stays as written and counts as a missing control. RPC errors name the host only, never the
+URL, so a key in a path does not reach the log.
+
+| chain | providers in the repo config | from the environment | quorum |
+|---|---|---|---|
+| Rand | `127.0.0.1:8545` (this host's node) | `GUARDIAN_RPC_RAND`: a Rand node on another host | 2 of 2 |
+| Ethereum | publicnode, `rpc.mevblocker.io` | `GUARDIAN_RPC_ETHEREUM` | 2 of 3 |
+| BSC | publicnode | `GUARDIAN_RPC_BSC` | 2 of 2 |
+| Tron | publicnode, `api.trongrid.io` | `GUARDIAN_RPC_TRON` (origin; `/jsonrpc` is appended) | 2 of 3 |
+| Solana | `api.mainnet-beta.solana.com`, publicnode | `GUARDIAN_RPC_SOLANA` | 2 of 3 |
+
+Choose providers run by different companies from the keyless ones above. With 2 of 2 (Rand, BSC),
+one provider being down defers signing on that chain until it is back. Nothing is skipped, but on
+this set every deferral stops transfers (BR-402). A third BSC provider removes that: add it to
+`rpcs`. On a droplet the values go in `/etc/rand-guardian/env` (mode 600, read by systemd) next to
+the keys. On the laptop, `run-guardians-set1.sh` reads `GUARDIAN_RPC_*` lines from
+`~/.rand-bridge/mainnet-set1/rpc.env`.
+
+`GUARDIAN_RPC_RAND` must reach a Rand node that does not share this host. The public RPC
+(`randscan.org/rpc`) refuses the bridge methods. Options: another guardian host's node, through an
+SSH forward like the peers' below (its `tunnel` entry then also needs
+`permitopen="127.0.0.1:8545"`), or a validator run by another operator.
+
+### Peers
+
+The droplet guardian APIs listen on loopback only. Guardian i's config names the other droplets as
+`http://127.0.0.1:717<j>`, so each droplet needs one SSH local forward per peer, the same way the
+relayer host has them: `127.0.0.1:717<j>` goes to guardian j's `127.0.0.1:7071`, as guardian j's
+`tunnel` user. Give each host its own forwarding key. Its entry in every other host's
+`~tunnel/.ssh/authorized_keys` reads `restrict,port-forwarding,permitopen="127.0.0.1:7071" <key>`, so
+a compromised host can only read the others' signature APIs. Run the forwards as a systemd template
+unit (`rand-guardian-peer@<j>.service`, restarting on drop). Host addresses stay in operator-local
+files, as for `guardian-tunnels.sh`. Guardians 7 and 8 name the droplets through
+`guardian-tunnels.sh` (7171-7176) and each other.
+
+A peer answers with its **own** signature only. The peer check catches this guardian's forgotten
+signature only when some peer keeps a copy of it (`daemons/README.md`, Guardian), and no API serves
+such a copy today. Pointing the peers at the other guardians satisfies the guard and adds the
+liveness check (no peer answering defers the transfer), but it is not yet the restored-store
+protection that BR-502 describes.
+
+### Rolling the guarded config to the live guardians
+
+The config needs the binary that has this guard, because an older binary would treat `${NAME}` as a
+URL. That breaks Rand and BSC, whose quorum is 2 of 2. Roll the binary and the config together, one
+host at a time.
+
+**Quorum during the roll (BR-402).** Set 1 needs 6 of 8 ECDSA signatures, and chain 21 needs 6 of 8
+Dilithium2 co-signatures on every mint. Guardians 7 and 8 are offline, so all six droplets must sign.
+While any one droplet restarts, nothing is signed: no mint and no release. Nothing is lost. Locks and
+burns stay on their chains, and each guardian signs from its cursor once it is back. Two ways to
+roll:
+
+1. **Preferred: bring guardians 7 and 8 up first** (`run-guardians-set1.sh` with `rpc.env`,
+   `guardian-tunnels.sh`, `guardian-reverse-tunnel.sh`), on the new binary and config, and confirm
+   that the relayer reaches 7077 and 7078. Then seven of eight sign while each droplet restarts, and
+   releases keep flowing. Mints keep flowing only if 7 and 8 also hold their chain-21 Dilithium2
+   seeds (`GUARDIAN7_PQ_SEED`, `GUARDIAN8_PQ_SEED`). Without the seeds, the PQ quorum still needs all
+   six droplets.
+2. **Otherwise: one host at a time inside an announced window** with no transfer in flight (on the relayer host,
+   every entry under `data/observed/` has its match under `data/done/`). Each restart is a
+   short bridge-wide stop. The order among the six does not matter for quorum. Start with the host
+   whose provider and peer forwards were checked first.
+
+Never take two droplets down at once while 7 and 8 are offline.
+
+**Before the first host:**
+
+1. Build and checksum the binary (above). The owner fills the values below into each host's
+   `/etc/rand-guardian/env`; they are not in this repository.
+2. On every droplet, install the peer forwards and the `tunnel` entries. Check that
+   `curl -s http://127.0.0.1:717<j>/v1/health` answers for every j ≠ i. This touches no running
+   guardian.
+
+**Per host (i = 1..6), one at a time:**
+
+1. Back up: `cp -a /etc/rand-guardian.toml /etc/rand-guardian.toml.pre-br601-$(date +%F)`, and the
+   same for `/usr/local/bin/rand-guardian` and `/etc/rand-guardian/env`.
+2. Write `/etc/rand-guardian.toml.new` as the host's current file (keep its `data_dir`, `key_env`,
+   `pq_seed_env`, `listen` and start blocks) plus the `rpcs`/`rpc_quorum` lines, `peers` and
+   `[guardian.limits]` from `daemons/mainnet/guardian-<i>.toml`. The binary this guard ships in
+   also refuses a `[rand]` section without `genesis_hash` next to `chain_id` (BR-1005,
+   `daemons/README.md`): the 22 Oct host files predate that line, so copy it from the repository
+   config too.
+3. Check it with the new binary, passing only the provider variables:
+   `env $(grep '^GUARDIAN_RPC_' /etc/rand-guardian/env | xargs) /usr/local/bin/rand-guardian.new --config /etc/rand-guardian.toml.new --check-config`.
+   It must print `config OK for Rand chain 21`. Stop here if it does not.
+4. Swap: `install -m 755 rand-guardian.new /usr/local/bin/rand-guardian`,
+   `mv /etc/rand-guardian.toml.new /etc/rand-guardian.toml`, `systemctl restart rand-guardian`.
+5. Verify within a minute in `journalctl -u rand-guardian`: no `refusing to start` and no `UNSAFE`;
+   `<chain>: 2 of <n> RPCs must agree before signing` for every chain; `<n> of 5 peers answer` with n ≥ 1; a `caps:` line; and
+   the signature API answering through the relayer's forward. Then wait for this guardian's signature
+   on the next transfer, or for its cursors to reach the chain heads, before the next host.
+6. Rollback if any check fails: restore the three backups and `systemctl restart rand-guardian`.
+
+Afterwards, record the roll (BR-602): date, host, binary sha256, config sha256, and the
+`--check-config` output. Then take a fleet snapshot.
+
+## Quorum headroom (BR-402)
+
+A set of `n` guardians needs `n * 2 / 3 + 1` signatures: 6 of 8 for set 1, and the same 6 of 8
+Dilithium2 co-signatures for a mint. With exactly six running there is no spare: one host down,
+one guardian paused, or one deferral stops every transfer until it clears.
+
+```sh
+rand-bridge-audit --config /etc/rand-relayer.toml --headroom              # [--min-spare 1] [--guardian-origins a,b]
+```
+
+Run where the guardian APIs are reachable (the relayer host, through its forwards). It reads the
+registered set from the Rand node and `/v1/health` from every origin in `[relayer].guardians`, and
+prints one line per origin, then:
+
+```
+releases: 6 of 6 required are signing; NO SPARE: any one guardian stopping stops it
+mints: 6 of 6 required PQ co-signers are signing; NO SPARE: any one guardian stopping stops it
+ALERT: at least 1 spare is asked for (BR-402)
+```
+
+A guardian counts when it answers, the address it answers with is in the registered set, and it is
+not paused; two origins answering as one guardian count once. For mints it counts only when its
+health names a PQ key (`pq_key_sha256`) that is the registered one at its own index. A guardian on
+a build that does not report the key is listed as unknown and not counted, so until the guardians
+run a build with this change the mints line under-counts: read it as a floor. The command is
+read-only and exits non-zero under `--min-spare` (default 1), so today it fails, which is the
+correct reading.
+
+**Alert.** `daemons/mainnet/systemd/rand-bridge-headroom.{service,timer}` run it every five minutes
+on the relayer host; the service's `OnFailure=` names the unit that tells someone, which you
+supply (the repository ships no notifier). Install both under `/etc/systemd/system/`, set the
+config path and the notifier, then `systemctl enable --now rand-bridge-headroom.timer`.
+
+### Bringing a guardian up on its own host
+
+Guardians 7 and 8 are registered and not running. Each goes on its own host, ideally under a
+different hosting account from the six. On the new host, as root, after it runs a synced
+`rand-node` (above):
+
+```sh
+daemons/mainnet/provision-guardian.sh --index 7 --binary ./rand-guardian --sha256 <recorded checksum> \
+    --config ./guardian-7.toml          # --dry-run prints what it would write; --root <dir> rehearses
+```
+
+It checks the binary against the checksum, checks that the config is this guardian's (its
+`key_env` carries the number, its API is on loopback, no key in it), and writes the binary, the
+config, `rand-guardian.service`, an empty `/etc/rand-guardian/env` (mode 600, variable names only)
+and the data directory. It reads and writes no key, overwrites nothing that differs, contacts
+nothing, and does not start the service. Then:
+
+1. The key holder fills `GUARDIAN<i>_PRIV_KEY` and `GUARDIAN<i>_PQ_SEED` in `/etc/rand-guardian/env`
+   on that host. The key must be the one registered at that index: a guardian that was never run
+   from this key material is brought in by rotation (`rand-bridge-gov rotate`,
+   `docs/pq-rotation.md`), not by copying a key onto a new host.
+2. Set the config's start blocks to recent ones the providers still serve (the "Public RPC trap"
+   below), so the guardian does not stall on old log ranges.
+3. `systemctl enable --now rand-guardian`; its log must show the guardian's address, the PQ key
+   prefix, and cursors moving.
+4. Give the relayer a path to its API (a forward like the others: `guardian-tunnels.sh` reads
+   `hosts.txt`), and list the origin in `[relayer].guardians`.
+5. `rand-bridge-audit --headroom` must now count it. With both up: `2 spare`, and `OK`.
+
+If 7 and 8 are not coming back, the alternative is to rotate the ECDSA and the PQ set together to
+the guardians that run plus new ones, so that the registered set again has spares.
 
 **Public RPC trap.** `bsc-rpc.publicnode.com` only serves logs from about the last hour (8,000 BSC
 blocks), and Ethereum's window is about a day. A guardian stopped for longer than that stalls on 403

@@ -37,8 +37,12 @@ impl JsonRpc {
             .json(&request)
             .send()
             .await
+            // The URL may carry a provider's API key (a `${NAME}` placeholder,
+            // filled at load): errors name the host only.
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("{method} to {}", self.shown()))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("{method} to {}", self.shown()))?
             .json()
             .await

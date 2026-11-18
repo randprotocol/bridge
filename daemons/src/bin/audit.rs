@@ -56,6 +56,19 @@ struct Cli {
     /// The salt the `acceptAdmin()` operation was scheduled with (`--handover`).
     #[arg(long, default_value = "0x0000000000000000000000000000000000000000000000000000000000000000")]
     salt: String,
+    /// Check how many guardians are signing against the quorum (BR-402)
+    /// instead of custody: asks each guardian API for `/v1/health` and the
+    /// Rand node for the registered set. Read-only; exits non-zero when
+    /// fewer than `--min-spare` guardians could stop before signing stops.
+    #[arg(long, conflicts_with = "governance")]
+    headroom: bool,
+    /// The spare `--headroom` asks for, for releases and for mints.
+    #[arg(long, default_value_t = 1)]
+    min_spare: u32,
+    /// The guardian API origins `--headroom` asks, comma-separated; default
+    /// `[relayer].guardians` of the config.
+    #[arg(long, value_delimiter = ',')]
+    guardian_origins: Vec<String>,
 }
 
 /// The approved backings: (bridge chain, symbol, token, decimals).
@@ -798,6 +811,47 @@ async fn handover_report(config: &Config, salt: &[u8; 32], out: &mut impl std::i
     Ok(complete)
 }
 
+// ---- --headroom --------------------------------------------------------------
+
+/// The `--headroom` report. `Ok(false)` when the spare is under `min_spare`.
+async fn headroom_report(config: &Config, origins: &[String], min_spare: i64, out: &mut impl std::io::Write) -> Result<bool> {
+    use bridge_daemons::headroom;
+    let origins: Vec<String> = if origins.is_empty() {
+        config.relayer.as_ref().map(|r| r.guardians.clone()).unwrap_or_default()
+    } else {
+        origins.to_vec()
+    };
+    if origins.is_empty() {
+        bail!("no guardian origins: pass --guardian-origins, or a config with [relayer].guardians");
+    }
+    let state = bridge_daemons::sources::rand::bridge_state(&JsonRpc::new(&config.rand.rpc))
+        .await
+        .context("reading the registered guardian set from the Rand node")?
+        .ok_or_else(|| anyhow!("the Rand node serves no bridge"))?;
+    let mut asks = tokio::task::JoinSet::new();
+    for (i, origin) in origins.iter().enumerate() {
+        let client = bridge_daemons::api::GuardianClient::new(origin);
+        asks.spawn(async move { (i, client.health().await.map_err(|e| format!("{e:#}"))) });
+    }
+    let mut answers: Vec<Option<Result<bridge_daemons::api::Health, String>>> = vec![None; origins.len()];
+    while let Some(joined) = asks.join_next().await {
+        let (i, health) = joined?;
+        answers[i] = Some(health);
+    }
+    let probes: Vec<headroom::Probe> = origins
+        .iter()
+        .zip(answers)
+        .map(|(origin, health)| headroom::Probe {
+            origin: JsonRpc::new(origin).shown(),
+            health: health.unwrap_or_else(|| Err("not asked".into())),
+        })
+        .collect();
+    let report = headroom::report(&state.guardians, &state.pq_guardians, &probes);
+    writeln!(out, "guardian set {} on the Rand node", state.guardian_set_index)?;
+    write!(out, "{}", headroom::render(&report, min_spare))?;
+    Ok(report.ok(min_spare))
+}
+
 /// Writes the BR-4 caveat after a `--governance` run, however it ended (an
 /// early error included), and hands the verdict back unchanged.
 fn with_caveat<T>(result: Result<T>, out: &mut dyn std::io::Write) -> Result<T> {
@@ -898,6 +952,12 @@ async fn main() -> Result<()> {
         let salt = bridge_daemons::config::hex32(&cli.salt).context("--salt")?;
         if !handover_report(&config, &salt, &mut std::io::stdout()).await? {
             bail!("the governance handover is not complete on every endpoint (BR-3)");
+        }
+        return Ok(());
+    }
+    if cli.headroom {
+        if !headroom_report(&config, &cli.guardian_origins, i64::from(cli.min_spare), &mut std::io::stdout()).await? {
+            bail!("guardian quorum headroom is under {} spare (BR-402)", cli.min_spare);
         }
         return Ok(());
     }

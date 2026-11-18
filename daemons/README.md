@@ -30,7 +30,12 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   the cursor moves to the range's end only on full agreement, else just past the longest agreed
   prefix (the lowest block among the agreeing providers), else not at all. A provider that errors
   agrees with nothing. So one provider can neither get an invented or altered lock signed nor move
-  the cursor past a real one. One `rpc` alone still works, with a startup warning.
+  the cursor past a real one. One `rpc` alone still works on a devnet, with a startup warning.
+  On a public Rand chain (id 14 and up, or none configured) the guardian **refuses to start**
+  without at least two providers at a quorum of at least two on every watched chain, a non-empty
+  `guardian.peers` and `[guardian.limits]` (BR-601; `--check-config`, and the emergency-only
+  `--unsafe-skip-mainnet-guards`: `docs/guardian-hosts.md`, "The mainnet guard"). A provider URL
+  that carries an API key is written as a `${NAME}` placeholder and filled from the environment.
 - Rebuilds the body from the event plus the block timestamp, the emitter chain id and the
   emitter address (`spec/ATTESTATION.md` §3.2), checks it re-encodes canonically, and signs it
   only if the destination would accept it: registered emitter, `to_chain` / `token_chain` rules,
@@ -49,7 +54,7 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   signed on its own once its window has room, in sequence order per token; later transfers of the
   same token wait behind it, and the source's cursor moves on for everything else. Nothing pauses signing automatically; `--pause-signing <reason>` and
   `--resume-signing` are the operator's global brake. This bounds loss without any contract change;
-  a guardian without the section warns at startup.
+  a guardian without the section warns at startup on a devnet, and does not start on a public chain (BR-601).
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
 - **Asks its peers before a first signature** (BR-502, `guardian.peers`): replay protection on
@@ -62,7 +67,7 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   ignored, so no other guardian can block a transfer. If no peer answers, the transfer is deferred
   (`deferred/`) and retried every round — never skipped. List among the peers any API that keeps
   this guardian's past signatures (another guardian that mirrors them, or a copy of this one's
-  `signed/`). At startup it reports how many peers answer, or warns that none are configured.
+  `signed/`). At startup it reports how many peers answer, or warns that none are configured (on a public chain it refuses to start, BR-601).
 - Every record under `data_dir` is written durably (BR-951): a temp file, fsynced, renamed over
   the record, then the directory fsynced. A record that is still unreadable (zero-length,
   truncated, not JSON) fails that `(emitter chain, sequence)` alone: the guardian signs nothing
@@ -201,9 +206,16 @@ requires it, each new key's proof of possession (`--possession-seed-envs`), as `
 lines that signers on separate machines append to. `pq-rotate-submit` re-reads the chain, checks
 the quorum and the possession lines under the ledger's rules and sends the rotation through
 `rand-node bridge-gov rotate-pq|rotate-pause submit`; `pq-cancel-rotation` is the pause key's
-cancel of a pending one. Runbook: `docs/pq-rotation.md`.
+cancel of a pending one. `pq-rotate-status` reads the chain and says whether the expected keys are
+in force, pending or absent, whether any retired key remains, and whether a seed on this host is
+one the chain counts (read-only). Runbook: `docs/pq-rotation.md`.
 
 ## Audit
+
+`rand-bridge-audit --config <relayer config> --headroom` counts the guardians that are signing
+against the quorum, for releases and for mints, and exits non-zero without a spare (BR-402;
+`docs/guardian-hosts.md`, "Quorum headroom"). A guardian's `/v1/health` names the sha256 of the
+PQ key it co-signs with (`pq_key_sha256`) for that count.
 
 `rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved
 backings it reads the endpoint's `custody`, its accrued protocol fees and the token balance it really

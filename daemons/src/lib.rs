@@ -15,6 +15,7 @@ pub mod gov_audit;
 pub mod governance;
 pub mod guardian;
 pub mod handover;
+pub mod headroom;
 pub mod isolate;
 pub mod limits;
 pub mod message;
