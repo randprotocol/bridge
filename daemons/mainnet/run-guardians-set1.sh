@@ -8,6 +8,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 bin=target/release/rand-guardian
 [[ -x "$bin" ]] || cargo build --release --bin rand-guardian
 mkdir -p data/mainnet/logs
+# BR-601: the configs name their second providers as ${GUARDIAN_RPC_*} placeholders (provider API
+# keys stay out of this repository). They come from ~/.rand-bridge/mainnet-set1/rpc.env (mode 600,
+# lines NAME=VALUE); a guardian on chain 21 refuses to start while one is unset.
+rpcenv="$HOME/.rand-bridge/mainnet-set1/rpc.env"
+rpc=()
+if [[ -s "$rpcenv" ]]; then
+  while IFS= read -r line; do
+    [[ "$line" =~ ^GUARDIAN_RPC_[A-Z0-9_]+= ]] && rpc+=("$line")
+  done <"$rpcenv"
+fi
 for i in 7 8; do
   keyfile="$HOME/.rand-bridge/mainnet-set1/guardian-$i.key"
   [[ -s "$keyfile" ]] || { echo "error: $keyfile is missing" >&2; exit 1; }
@@ -17,7 +27,7 @@ for i in 7 8; do
   if [[ "${GUARDIAN_PQ_FROM_NEXT:-0}" == 1 ]]; then
     pq=("GUARDIAN${i}_PQ_SEED=$(tr -d '\n ' < "$HOME/.rand-bridge/mainnet-set1/pq-next-$i.seed")")
   fi
-  env -i PATH="$PATH" HOME="$HOME" "GUARDIAN${i}_PRIV_KEY=$(<"$keyfile")" "${pq[@]}" \
+  env -i PATH="$PATH" HOME="$HOME" "GUARDIAN${i}_PRIV_KEY=$(<"$keyfile")" "${pq[@]}" "${rpc[@]}" \
     nohup "$bin" --config "mainnet/guardian-$i.toml" >>"data/mainnet/logs/guardian-$i.log" 2>&1 &
   echo "guardian $i: pid $! (log data/mainnet/logs/guardian-$i.log)"
 done
