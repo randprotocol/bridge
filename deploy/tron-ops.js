@@ -24,7 +24,9 @@
 //                       node deploy/tron-ops.js timelock-execute <timelock> --from <adminMultisig> --call ... [--args ...]
 //   making the multi-signature accounts themselves (unsigned, for the account's current key):
 //                       node deploy/tron-ops.js multisig-permissions <account> --signers T1,T2,... \
-//                           [--owner-threshold 3] [--active-threshold 3]
+//                           [--owner-threshold 5] [--active-threshold 5]
+//       (an admin multisig is 5 signers of 6, the owner's rule: give six --signers; the audit
+//        reports any other shape)
 //       (the multisig commands also take [--bridge T...] [--salt 0x<32 bytes>] [--permission-id 2]
 //        [--expire-hours 23] [--out-dir deploy/governance]; execute refuses unless the operation is
 //        pending, and prints whether it is ready and from when)
@@ -419,7 +421,7 @@ async function governance(tronWeb, command, argv, key) {
     const account = requireAddress(tronWeb, 'account', args[0]);
     const signers = String(flags.signers || '').split(',').filter(Boolean);
     const { owner, actives } = multisigPermissions(tronWeb, account, signers,
-      Number(flags['owner-threshold'] || 3), Number(flags['active-threshold'] || 3));
+      Number(flags['owner-threshold'] || 5), Number(flags['active-threshold'] || 5));
     const m = multisigFlags(flags);
     const acct = await tronWeb.trx.getAccount(account);
     if (!acct || !acct.address) throw new Error(`${account} is not activated: send it TRX first (>= 101 TRX)`);

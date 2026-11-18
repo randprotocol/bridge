@@ -616,6 +616,9 @@ pub struct EvmReads {
     pub admin_multisig_safe: SafeReads,
     /// Tron: signatures the admin multisig account needs; `None` unknown.
     pub tron_admin_multisig_signers: Option<u32>,
+    /// Tron: the admin multisig account's permissions as `(signatures needed, keys)`
+    /// ([`tron_permission_shapes`]); `None` unknown.
+    pub tron_admin_multisig_shapes: Option<Vec<(u32, u32)>>,
     pub pauser: Vec<u8>,
     pub pauser_code: Vec<u8>,
     /// The pauser's Safe reads (EVM only).
@@ -1117,7 +1120,92 @@ pub fn evm_rules(reads: &EvmReads, flavor: Flavor, policy: &GovernanceConfig) ->
         ),
         None => rule("no pendingAdmin", false, "pendingAdmin(): unreadable"),
     });
+
+    // 15. The admin multisig is 5 of 6 (the owner's rule), reported whatever it is.
+    rules.push(match (ms, flavor) {
+        (None, _) => rule(
+            admin_shape_rule_name(),
+            false,
+            "no [governance].admin_multisig configured for this chain",
+        ),
+        (Some(ms), Flavor::Evm) => {
+            let safe = &reads.admin_multisig_safe;
+            let shape = safe
+                .threshold
+                .as_ref()
+                .ok()
+                .and_then(|w| word_uint(w))
+                .zip(safe.owners.as_ref().ok().and_then(|r| decode_owners(r)))
+                .map(|(t, owners)| vec![(u32::try_from(t).unwrap_or(u32::MAX), owners.len() as u32)]);
+            admin_shape_rule(shape, &format!("admin multisig {}", show(&ms, flavor)))
+        }
+        (Some(ms), Flavor::Tron) => admin_shape_rule(
+            reads.tron_admin_multisig_shapes.clone(),
+            &format!("admin multisig {} (owner, then active permissions)", show(&ms, flavor)),
+        ),
+    });
     rules
+}
+
+/// The owner's standing rule for an admin (governance) multisig: 5 signers of 6. A multisig
+/// of any other shape is reported as a FAIL by the last rule of each endpoint, never passed
+/// in silence. This is not the guardian quorum, which is 6 of 8 and is not judged here.
+pub const ADMIN_MULTISIG_SIGNERS: u32 = 5;
+pub const ADMIN_MULTISIG_OF: u32 = 6;
+
+/// The name of that rule.
+pub fn admin_shape_rule_name() -> String {
+    format!("admin multisig is {ADMIN_MULTISIG_SIGNERS} of {ADMIN_MULTISIG_OF} (owner's rule)")
+}
+
+fn admin_shape_rule(observed: Option<Vec<(u32, u32)>>, what: &str) -> Rule {
+    let name = admin_shape_rule_name();
+    match observed {
+        None => Rule { name, status: Status::Unknown, observed: format!("{what}: its signers could not be read") },
+        Some(shapes) => {
+            let shown: Vec<String> = shapes.iter().map(|(t, n)| format!("{t} of {n}")).collect();
+            rule(
+                name,
+                !shapes.is_empty() && shapes.iter().all(|s| *s == (ADMIN_MULTISIG_SIGNERS, ADMIN_MULTISIG_OF)),
+                format!("{what}: {}", shown.join(", ")),
+            )
+        }
+    }
+}
+
+/// Each permission of a Tron account (owner, then every active one) as `(fewest signatures
+/// that satisfy it, number of keys)`, from `wallet/getaccount`. `None` under the same
+/// conditions as [`tron_min_signers`]. An account without permissions is its own key: `(1, 1)`.
+pub fn tron_permission_shapes(account: &serde_json::Value) -> Option<Vec<(u32, u32)>> {
+    let obj = account.as_object()?;
+    obj.get("address")?.as_str()?;
+    let mut permissions: Vec<&serde_json::Value> = Vec::new();
+    if let Some(owner) = obj.get("owner_permission") {
+        permissions.push(owner);
+    }
+    if let Some(active) = obj.get("active_permission") {
+        permissions.extend(active.as_array()?.iter());
+    }
+    if permissions.is_empty() {
+        return Some(vec![(1, 1)]);
+    }
+    permissions
+        .into_iter()
+        .map(|p| {
+            let threshold = p.get("threshold")?.as_u64()?;
+            let mut weights =
+                p.get("keys")?.as_array()?.iter().map(|k| k.get("weight")?.as_u64()).collect::<Option<Vec<u64>>>()?;
+            weights.sort_unstable_by(|a, b| b.cmp(a));
+            let mut sum = 0u64;
+            for (i, w) in weights.iter().enumerate() {
+                sum = sum.saturating_add(*w);
+                if sum >= threshold {
+                    return Some((i as u32 + 1, weights.len() as u32));
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 /// With `--governance` every bridge chain must be audited: a FAIL row for
@@ -1281,6 +1369,13 @@ pub fn solana_rules(reads: &SolanaReads, policy: &GovernanceConfig) -> Vec<Rule>
             false,
             format!("pauser == admin == {}", b58(admin)),
         )
+    });
+    rules.push(match &reads.multisig_state {
+        Ok(ms) => admin_shape_rule(
+            Some(vec![(u32::from(ms.threshold), ms.members.len() as u32)]),
+            "Squads multisig (threshold of members)",
+        ),
+        Err(e) => rule(admin_shape_rule_name(), false, e.clone()),
     });
     rules
 }
@@ -1560,6 +1655,7 @@ mod tests {
             admin_multisig_code: vec![],
             admin_multisig_safe: SafeReads::not_asked("no admin multisig configured"),
             tron_admin_multisig_signers: None,
+            tron_admin_multisig_shapes: None,
             pauser: word(&EOA),
             pauser_code: vec![],
             pauser_safe: SafeReads::not_asked("no code"),
@@ -1577,8 +1673,9 @@ mod tests {
             roles: Ok(constructor_events()),
             admin_multisig: Some(ADMIN_SAFE),
             admin_multisig_code: proxy_130(),
-            admin_multisig_safe: safe(SAFE_130_L2, 3, 5, 0),
+            admin_multisig_safe: safe(SAFE_130_L2, 5, 6, 0),
             tron_admin_multisig_signers: None,
+            tron_admin_multisig_shapes: None,
             pauser: word(&SAFE),
             pauser_code: proxy_141(),
             pauser_safe: safe(SAFE_141, 2, 5, 0),
@@ -1587,7 +1684,8 @@ mod tests {
         }
     }
 
-    const N_EVM: usize = 14;
+    const N_EVM: usize = 15;
+    const ADMIN_SHAPE: usize = N_EVM - 1;
     // Row indices.
     const NO_PROXY: usize = 1;
     const CODE_HASH: usize = 2;
@@ -1740,6 +1838,11 @@ mod tests {
     fn only_fails(reads: &EvmReads, flavor: Flavor, index: usize) -> Vec<Rule> {
         let rules = evm_rules(reads, flavor, &policy());
         for (i, r) in rules.iter().enumerate() {
+            // The 5-of-6 row reports the same multisig the row under test may have broken;
+            // it has tests of its own below.
+            if i == ADMIN_SHAPE && index != ADMIN_SHAPE {
+                continue;
+            }
             let want_ok = i != index;
             assert_eq!(
                 r.status != Status::Fail && r.status != Status::Unknown,
@@ -1992,7 +2095,7 @@ mod tests {
             SAFE_141_L2,
         ] {
             let mut r = compliant_reads();
-            r.admin_multisig_safe = safe(singleton, 2, 2, 0);
+            r.admin_multisig_safe = safe(singleton, 5, 6, 0);
             r.pauser_safe = safe(singleton, 2, 3, 0);
             assert_eq!(failures(&evm_rules(&r, Flavor::Evm, &policy())), 0);
         }
@@ -2184,7 +2287,9 @@ mod tests {
         r.admin_code = tron_timelock_code();
         r.admin_multisig_code.clear();
         r.admin_multisig_safe = SafeReads::not_asked("not asked on Tron");
-        r.tron_admin_multisig_signers = Some(3);
+        r.tron_admin_multisig_signers = Some(5);
+        // Owner and active permission, each 5 of 6 (the owner's rule).
+        r.tron_admin_multisig_shapes = Some(vec![(5, 6), (5, 6)]);
         r.pauser_safe = SafeReads::not_asked("not asked on Tron");
         // The pause account: no code, owner 3 of 5 and active 2 of 5 need two signatures.
         r.pauser_code.clear();
@@ -2367,6 +2472,13 @@ mod tests {
         let mut ms = decode_squads_multisig(&b64(MS_5QPR)).unwrap();
         ms.time_lock = 172_800;
         assert_eq!(ms.config_authority, [0u8; 32], "the fixture is autonomous");
+        // The owner's rule: 5 of 6.
+        while ms.members.len() < 6 {
+            let m = ms.members[0].clone();
+            ms.members.push(m);
+        }
+        ms.members.truncate(6);
+        ms.threshold = 5;
         SolanaReads {
             config: BridgeConfigKeys {
                 admin: vault,
@@ -2382,7 +2494,8 @@ mod tests {
 
     fn sol_fails(r: &SolanaReads) -> Vec<usize> {
         let rules = solana_rules(r, &policy());
-        assert_eq!(rules.len(), N_SOL);
+        // The 5-of-6 row is the last one and has a test of its own.
+        assert_eq!(rules.len(), N_SOL + 1);
         (0..N_SOL)
             .filter(|i| rules[*i].status != Status::Pass)
             .collect()
@@ -2446,5 +2559,72 @@ mod tests {
         let mut r = compliant_solana();
         r.config.pending_admin = pk("DvV45t4mfWKJvUXvFLoEuYgRqzmL1m6DaHbn8ZLw77kX");
         assert_eq!(sol_fails(&r), vec![SOL_PENDING]);
+    }
+
+    // ---- the owner's rule: an admin multisig is 5 of 6 -------------------------
+
+    #[test]
+    fn an_admin_safe_that_is_not_5_of_6_is_reported_not_passed() {
+        let ok = evm_rules(&compliant_reads(), Flavor::Evm, &policy());
+        assert_eq!(ok[ADMIN_SHAPE].name, "admin multisig is 5 of 6 (owner's rule)");
+        assert_eq!(ok[ADMIN_SHAPE].status, Status::Pass);
+        assert!(ok[ADMIN_SHAPE].observed.contains("5 of 6"), "{:?}", ok[ADMIN_SHAPE]);
+        // Shapes every other rule accepts.
+        for (t, n) in [(2, 3), (3, 5), (5, 7), (6, 6), (4, 6)] {
+            let mut r = compliant_reads();
+            r.admin_multisig_safe = safe(SAFE_130_L2, t, n, 0);
+            let rules = evm_rules(&r, Flavor::Evm, &policy());
+            assert_eq!(rules[ADMIN_SHAPE].status, Status::Fail, "{t} of {n}");
+            assert!(rules[ADMIN_SHAPE].observed.contains(&format!("{t} of {n}")), "{:?}", rules[ADMIN_SHAPE]);
+            assert_eq!(failures(&rules), 1, "{t} of {n}: only this row: {rules:#?}");
+        }
+        // Unreadable is UNKNOWN, which also counts against the audit; none configured is a FAIL.
+        let mut r = compliant_reads();
+        r.admin_multisig_safe.threshold = Err("execution reverted".into());
+        assert_eq!(evm_rules(&r, Flavor::Evm, &policy())[ADMIN_SHAPE].status, Status::Unknown);
+        assert_eq!(evm_rules(&eoa_reads(), Flavor::Evm, &policy())[ADMIN_SHAPE].status, Status::Fail);
+        // The pause multisig is not held to it: 2 of 5 there still passes every row.
+        assert_eq!(failures(&ok), 0);
+    }
+
+    #[test]
+    fn a_tron_admin_account_must_be_5_of_6_on_every_permission() {
+        let shape = |shapes: Option<Vec<(u32, u32)>>| {
+            let mut r = tron_compliant();
+            r.tron_admin_multisig_shapes = shapes;
+            evm_rules(&r, Flavor::Tron, &policy())[ADMIN_SHAPE].clone()
+        };
+        assert_eq!(shape(Some(vec![(5, 6), (5, 6)])).status, Status::Pass);
+        let r = shape(Some(vec![(3, 5), (3, 5)]));
+        assert_eq!(r.status, Status::Fail);
+        assert!(r.observed.contains("3 of 5, 3 of 5"), "{r:?}");
+        assert_eq!(shape(Some(vec![(5, 6), (2, 6)])).status, Status::Fail, "a weaker active permission");
+        assert_eq!(shape(None).status, Status::Unknown);
+
+        let account: serde_json::Value = serde_json::from_str(
+            r#"{"address":"41aa",
+                "owner_permission": {"threshold": 5,"keys": [{"address":"41a1","weight": 1},{"address":"41a2","weight": 1},{"address":"41a3","weight": 1},{"address":"41a4","weight": 1},{"address":"41a5","weight": 1},{"address":"41a6","weight": 1}]},
+                "active_permission": [{"threshold": 3,"keys": [{"address":"41a1","weight": 2},{"address":"41a2","weight": 1},{"address":"41a3","weight": 1}]}]}"#,
+        )
+        .unwrap();
+        // The active permission: weights 2+1 reach 3 with two signatures, of three keys.
+        assert_eq!(tron_permission_shapes(&account), Some(vec![(5, 6), (2, 3)]));
+        assert_eq!(tron_permission_shapes(&serde_json::json!({"address": "41aa"})), Some(vec![(1, 1)]));
+        assert_eq!(tron_permission_shapes(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_squads_multisig_that_is_not_5_of_6_is_reported_not_passed() {
+        let last = |r: &SolanaReads| solana_rules(r, &policy()).last().unwrap().clone();
+        let ok = last(&compliant_solana());
+        assert_eq!((ok.name.as_str(), ok.status), ("admin multisig is 5 of 6 (owner's rule)", Status::Pass));
+        let mut r = compliant_solana();
+        r.multisig_state.as_mut().unwrap().threshold = 2;
+        r.multisig_state.as_mut().unwrap().members.truncate(3);
+        let row = last(&r);
+        assert_eq!(row.status, Status::Fail);
+        assert!(row.observed.contains("2 of 3"), "{row:?}");
+        assert_eq!(sol_fails(&r), Vec::<usize>::new(), "2 of 3 passes every older rule");
+        assert_eq!(last(&today_solana()).status, Status::Fail);
     }
 }
