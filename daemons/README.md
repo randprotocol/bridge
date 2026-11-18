@@ -52,6 +52,17 @@ relayer ◀──GET /v1/signature/{emitter_chain}/{sequence}──────�
   a guardian without the section warns at startup.
 - Persists the signature before it advances its cursor, and refuses — fatally — to sign a
   second body under an `(emitter chain, sequence)` it has already signed.
+- **Two further bounds, off unless configured** (BRG-1, `[guardian.limits]`):
+  `per_window_total` caps what the guardian signs across all tokens together, per direction, in
+  the same rolling window; without it the bound is the per-token cap times the number of tokens.
+  `delay_above` with `delay_secs` makes a transfer above that amount wait `delay_secs` on the
+  guardian's clock, counted from when it first read it, before it is signed: the time an operator
+  has to look and to `--pause-signing`. The first-read time is kept in
+  `data_dir/delayed/<chain>/<sequence>.json` under the guardian's seal; a record that is missing
+  its seal, backdated, or unreadable starts the wait again. A delayed transfer is listed with the
+  deferred ones and holds back nothing else. `rand-bridge-audit --config <file> --limits` reads the
+  bounds the chains themselves enforce (each endpoint's release caps, Rand's daily mint cap) and
+  fails when an enabled backing has none.
 - **Asks its peers before a first signature** (BR-502, `guardian.peers`): replay protection on
   the destinations is by body digest, so two bodies of one lock could each be redeemed. The
   guardian's own `signed/` record stops a second body only while it exists; a `data_dir` restored

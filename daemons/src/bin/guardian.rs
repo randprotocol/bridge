@@ -131,13 +131,28 @@ async fn main() -> Result<()> {
         .map(bridge_daemons::limits::Limits::new)
         .transpose()?;
     match &section.limits {
-        Some(l) => tracing::info!(
-            "caps: {} per transfer, {} per {} s per token and direction ({} token overrides)",
-            l.per_transfer,
-            l.per_window,
-            l.window_secs,
-            l.token.len()
-        ),
+        Some(l) => {
+            tracing::info!(
+                "caps: {} per transfer, {} per {} s per token and direction ({} token overrides)",
+                l.per_transfer,
+                l.per_window,
+                l.window_secs,
+                l.token.len()
+            );
+            match l.per_window_total {
+                Some(total) => tracing::info!(
+                    "caps: {total} per {} s across all tokens, per direction",
+                    l.window_secs
+                ),
+                None => tracing::info!("caps: no per_window_total, so each token's window is the only bound"),
+            }
+            match (l.delay_above, l.delay_secs) {
+                (Some(above), Some(secs)) => {
+                    tracing::info!("caps: a transfer above {above} is signed {secs} s after it is first read")
+                }
+                _ => tracing::info!("caps: no delay_above, so nothing waits before it is signed"),
+            }
+        }
         None => tracing::warn!(
             "no [guardian.limits]: this guardian signs without per-transfer or per-window caps (BRG-1)"
         ),

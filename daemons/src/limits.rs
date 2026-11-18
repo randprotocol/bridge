@@ -19,6 +19,20 @@
 //! signed on its own once its window has room — in sequence order per token,
 //! while the source's cursor moves on for every other transfer. The global pause (`limits/paused.json`)
 //! is never set automatically, only by `rand-guardian --pause-signing`.
+//!
+//! Two further bounds are optional, off unless configured:
+//!
+//! - `per_window_total`: a cap on what this guardian signs across **all**
+//!   tokens together, per direction, in the same rolling window. The
+//!   per-token cap bounds one token; with n tokens listed the guardian would
+//!   otherwise sign n times that. A transfer that would overrun the total is
+//!   deferred like one that overruns its token's window.
+//! - `delay_above` with `delay_secs`: a transfer above `delay_above` is signed
+//!   only once `delay_secs` have passed on this guardian's clock since it
+//!   first read it (`delayed/<chain>/<sequence>.json`, sealed by the guardian
+//!   so a planted record cannot shorten the wait). The wait is the time an
+//!   operator has to look and to pause. A delayed transfer holds back nothing
+//!   else: later transfers of its token are signed as usual.
 
 use anyhow::{anyhow, bail, Context, Result};
 use bridge_codec::{Payload, CHAIN_RAND, CHAIN_SOLANA};
@@ -39,6 +53,18 @@ pub struct LimitsConfig {
     pub per_window: u64,
     #[serde(default = "default_window_secs")]
     pub window_secs: u64,
+    /// Most signed across all tokens together, per direction, in any
+    /// `window_secs`. Absent: only the per-token windows bound it.
+    #[serde(default)]
+    pub per_window_total: Option<u64>,
+    /// A transfer above this amount waits `delay_secs` before it is signed.
+    /// Absent: nothing is delayed. Set together with `delay_secs`.
+    #[serde(default)]
+    pub delay_above: Option<u64>,
+    /// How long a transfer above `delay_above` waits, in seconds on this
+    /// guardian's clock, counted from when it first read the transfer.
+    #[serde(default)]
+    pub delay_secs: Option<u64>,
     /// Per-token overrides.
     #[serde(default)]
     pub token: Vec<TokenLimit>,
@@ -139,6 +165,34 @@ pub struct Deferral {
     /// one is never signed by a retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seal: Option<String>,
+    /// It waits out its delay (`delay_above`), not for room in a window: later transfers of
+    /// its token do not queue behind it. Left out when false, so a record written without a
+    /// delay reads the same under an older build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delay: bool,
+}
+
+/// When a transfer above `delay_above` was first read, as written to
+/// `delayed/<chain>/<sequence>.json`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Delayed {
+    /// The digest of the body the delay belongs to.
+    pub digest: String,
+    /// First read at, unix seconds on this guardian's clock.
+    pub at: u64,
+    /// This guardian's seal over `(chain, sequence, digest, at)`: a record without a valid one
+    /// did not come from this daemon and starts the delay again.
+    pub seal: String,
+}
+
+pub const DELAYED: &str = "delayed";
+
+fn delayed_seal(key: &GuardianKey, message: &Observed, at: u64) -> String {
+    let mut data = message.emitter_chain.to_be_bytes().to_vec();
+    data.extend_from_slice(&message.sequence.to_be_bytes());
+    data.extend_from_slice(&message.digest);
+    data.extend_from_slice(&at.to_be_bytes());
+    hex::encode(key.seal(b"delayed", &data))
 }
 
 /// The seal a deferred record of `message` carries under `key`.
@@ -193,6 +247,20 @@ pub fn defer(
     kind: DeferKind,
     reason: &str,
 ) -> Result<()> {
+    defer_as(store, key, message, now, kind, reason, false)
+}
+
+/// [`defer`], saying whether the transfer waits out a delay (`delay`: it holds back no later
+/// transfer of its token) or waits for room.
+pub fn defer_as(
+    store: &Store,
+    key: &GuardianKey,
+    message: &Observed,
+    now: u64,
+    kind: DeferKind,
+    reason: &str,
+    delay: bool,
+) -> Result<()> {
     store.write_message(
         DEFERRED,
         message.emitter_chain,
@@ -203,6 +271,7 @@ pub fn defer(
             kind,
             reason: reason.to_string(),
             seal: Some(deferral_seal(key, message)),
+            delay,
         },
     )
 }
@@ -294,6 +363,15 @@ impl Limits {
         if cfg.per_transfer > cfg.per_window {
             bail!("guardian.limits: per_transfer is above per_window");
         }
+        if cfg.per_window_total.is_some_and(|total| cfg.per_transfer > total) {
+            bail!("guardian.limits: per_transfer is above per_window_total");
+        }
+        match (cfg.delay_above, cfg.delay_secs) {
+            (None, None) => {}
+            (Some(_), Some(secs)) if secs > 0 => {}
+            (Some(_), Some(_)) => bail!("guardian.limits.delay_secs must be positive"),
+            _ => bail!("guardian.limits: delay_above and delay_secs are set together or not at all"),
+        }
         let mut overrides = Vec::new();
         for t in &cfg.token {
             if !(2..=5).contains(&t.chain) {
@@ -325,6 +403,84 @@ impl Limits {
 
     pub fn window_secs(&self) -> u64 {
         self.cfg.window_secs
+    }
+
+    /// `(delay_above, delay_secs)`, when a delay is configured.
+    pub fn delay_rule(&self) -> Option<(u64, u64)> {
+        self.cfg.delay_above.zip(self.cfg.delay_secs)
+    }
+
+    pub fn per_window_total(&self) -> Option<u64> {
+        self.cfg.per_window_total
+    }
+
+    /// Whether `message` must still wait out its delay at `now`: `Some(why)`
+    /// while it must, `None` when it has no delay or the delay has passed.
+    /// The first call for a transfer above `delay_above` records when this
+    /// guardian first read it; the wait is counted from that record, so a
+    /// restart does not start it again. A record that is unreadable, names
+    /// another body, lies in the future or is not sealed by `key` is replaced
+    /// and the wait starts again: a fault here delays, it never shortens.
+    pub fn delay(
+        &self,
+        store: &Store,
+        key: &GuardianKey,
+        message: &Observed,
+        now: u64,
+    ) -> Result<Option<String>> {
+        let Some((above, secs)) = self.delay_rule() else {
+            return Ok(None);
+        };
+        let Ok(Payload::Transfer(t)) = Payload::decode(&message.decoded().payload) else {
+            return Ok(None); // not a transfer: `admit` withholds it
+        };
+        let Some(amount) = t.amount_u128().and_then(|a| u64::try_from(a).ok()) else {
+            return Ok(None); // above u64: `admit` withholds it
+        };
+        if amount <= above {
+            return Ok(None);
+        }
+        let (chain, sequence) = (message.emitter_chain, message.sequence);
+        let digest = hex::encode(message.digest);
+        let known = match store.read_message::<Delayed>(DELAYED, chain, sequence) {
+            Ok(Some(d)) if d.digest == digest && d.at <= now && d.seal == delayed_seal(key, message, d.at) => Some(d.at),
+            Ok(None) => None,
+            Ok(Some(_)) => {
+                tracing::error!(
+                    "delayed/{chain}/{sequence:020}.json is not this guardian's record of this                      transfer; the delay starts again"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!("delayed/{chain}/{sequence:020}.json is unreadable ({e:#}); the delay starts again");
+                None
+            }
+        };
+        let at = match known {
+            Some(at) => at,
+            None => {
+                store.write_message(
+                    DELAYED,
+                    chain,
+                    sequence,
+                    &Delayed {
+                        digest,
+                        at: now,
+                        seal: delayed_seal(key, message, now),
+                    },
+                )?;
+                now
+            }
+        };
+        let until = at.saturating_add(secs);
+        if now < until {
+            return Ok(Some(format!(
+                "{} of {amount} is above delay_above {above}: first read at {at}, signed no earlier                  than {until} ({} s from now)",
+                Direction::of(message).label(),
+                until - now
+            )));
+        }
+        Ok(None)
     }
 
     /// Checks `message` against the caps at `now` and, when it is admitted,
@@ -381,12 +537,36 @@ impl Limits {
                 used.saturating_add(amount)
             )));
         }
-        entries.push(Entry {
+        let entry = Entry {
             at: now,
             amount,
             chain: message.emitter_chain,
             sequence: message.sequence,
-        });
+        };
+        // Every token together, per direction. Written before the token's own window: a crash
+        // in between over-counts the total, never under-counts it.
+        if let Some(cap) = self.cfg.per_window_total {
+            let name = format!("{}-total.json", direction.label());
+            let total_parts = ["limits", "window", name.as_str()];
+            let mut all: Vec<Entry> = store
+                .read(&total_parts)
+                .context("reading the all-token cap window (nothing in this direction is signed until it is repaired)")?
+                .unwrap_or_default();
+            all.retain(|e| e.at > since);
+            let used_all: u64 = all.iter().map(|e| e.amount).fold(0u64, u64::saturating_add);
+            if used_all.saturating_add(amount) > cap && !released {
+                return Ok(Verdict::Defer(format!(
+                    "{} of {amount} on {token} would bring the last {} s across all tokens to {} \
+                     (per_window_total {cap})",
+                    direction.label(),
+                    self.cfg.window_secs,
+                    used_all.saturating_add(amount)
+                )));
+            }
+            all.push(entry.clone());
+            store.write(&total_parts, &all)?;
+        }
+        entries.push(entry);
         store.write(&parts, &entries)?;
         Ok(Verdict::Admit)
     }

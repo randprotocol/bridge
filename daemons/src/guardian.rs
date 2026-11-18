@@ -241,13 +241,17 @@ pub struct Deferred {
     pub chain: u16,
     pub sequence: u64,
     pub reason: String,
+    /// It waits out its delay (`guardian.limits.delay_above`), not for room in a window, and
+    /// holds back no later transfer of its token.
+    pub delay: bool,
 }
 
 impl std::fmt::Display for Deferred {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let until = if self.delay { "its delay has passed" } else { "its window has room" };
         write!(
             f,
-            "chain {} sequence {} deferred until its window has room: {}",
+            "chain {} sequence {} deferred until {until}: {}",
             self.chain, self.sequence, self.reason
         )
     }
@@ -325,9 +329,19 @@ pub async fn step_guarded<S: Source>(
                 }
             }
             Err(e) if e.downcast_ref::<Deferred>().is_some() => {
+                let delay = e.downcast_ref::<Deferred>().is_some_and(|d| d.delay);
                 tracing::warn!("{}: {e:#}", source.name());
-                limits::defer(store, key, &message, limits::now(), limits::DeferKind::Window, &format!("{e:#}"))?;
-                if let Some(w) = limits::window_of(&message) {
+                limits::defer_as(
+                    store,
+                    key,
+                    &message,
+                    limits::now(),
+                    limits::DeferKind::Window,
+                    &format!("{e:#}"),
+                    delay,
+                )?;
+                // One that waits out its delay holds nothing back.
+                if let Some(w) = limits::window_of(&message).filter(|_| !delay) {
                     waiting.insert(w);
                 }
             }
@@ -353,8 +367,9 @@ fn deferred_windows(store: &Store) -> Result<std::collections::BTreeSet<String>>
     let mut out = std::collections::BTreeSet::new();
     for (chain, sequence) in limits::listed(store, limits::DEFERRED)? {
         if let Some(d) = store.read_message::<limits::Deferral>(limits::DEFERRED, chain, sequence)? {
-            // Whatever it waits for, later transfers of its token wait behind it.
-            if let Some(w) = limits::window_of(&d.message) {
+            // Whether it waits for room or for its peers, later transfers of its token wait
+            // behind it. One that only waits out its delay holds nothing back.
+            if let Some(w) = limits::window_of(&d.message).filter(|_| !d.delay) {
                 out.insert(w);
             }
         }
@@ -424,7 +439,13 @@ pub async fn retry_deferred(
                 limits::remove(store, limits::DEFERRED, chain, sequence)?;
             }
             Err(e) if e.downcast_ref::<Deferred>().is_some() => {
-                if let Some(w) = window {
+                let delay = e.downcast_ref::<Deferred>().is_some_and(|w| w.delay);
+                if delay != d.delay {
+                    // What it waits for changed (its delay passed and its window is full):
+                    // the record says so, so later transfers of its token queue behind it.
+                    limits::defer_as(store, key, &d.message, d.at, d.kind, &format!("{e:#}"), delay)?;
+                }
+                if let Some(w) = window.filter(|_| !delay) {
                     blocked.insert(w);
                 }
             }
@@ -593,6 +614,19 @@ fn sign_checked(
         return Ok(false);
     }
     if let Some(limits) = guards.limits {
+        // The delay first: a transfer that still waits is not counted in a window yet. An
+        // operator's release of a held transfer is a review, and skips it.
+        if !released {
+            if let Some(reason) = limits.delay(store, key, message, now)? {
+                return Err(Deferred {
+                    chain,
+                    sequence,
+                    reason,
+                    delay: true,
+                }
+                .into());
+            }
+        }
         let verdict = match limits.admit(store, message, now, released) {
             Ok(v) => v,
             // A broken window record holds back its own token only.
@@ -624,6 +658,7 @@ fn sign_checked(
                     chain,
                     sequence,
                     reason,
+                    delay: false,
                 }
                 .into())
             }
@@ -644,6 +679,10 @@ fn sign_checked(
         pq_signature,
     };
     store.write_message(SIGNED, chain, sequence, &signed)?;
+    // Its delay record, if it had one, has done its work.
+    if guards.limits.is_some_and(|l| l.delay_rule().is_some()) {
+        let _ = limits::remove(store, limits::DELAYED, chain, sequence);
+    }
     tracing::info!(chain, sequence, digest = %hex::encode(message.digest), "signed");
     Ok(true)
 }
