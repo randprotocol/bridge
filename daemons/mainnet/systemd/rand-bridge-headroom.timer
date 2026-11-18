@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the Rand bridge guardian quorum headroom every five minutes (BR-402)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

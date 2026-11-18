@@ -205,6 +205,11 @@ cancel of a pending one. Runbook: `docs/pq-rotation.md`.
 
 ## Audit
 
+`rand-bridge-audit --config <relayer config> --headroom` counts the guardians that are signing
+against the quorum, for releases and for mints, and exits non-zero without a spare (BR-402;
+`docs/guardian-hosts.md`, "Quorum headroom"). A guardian's `/v1/health` names the sha256 of the
+PQ key it co-signs with (`pq_key_sha256`) for that count.
+
 `rand-bridge-audit --config <any daemon config>` reconciles custody: for each of the seven approved
 backings it reads the endpoint's `custody`, its accrued protocol fees and the token balance it really
 holds, and — once the Rand node serves per-backing `locked` rows — what Rand says is outstanding. It

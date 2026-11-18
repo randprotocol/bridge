@@ -53,17 +53,29 @@ pub struct Health {
     /// Transfers waiting for room in their window, or for the peer check, `chain/sequence`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred: Vec<String>,
+    /// The sha256 (hex) of the Dilithium2 public key this guardian co-signs mints with;
+    /// absent when it holds none, and from a build before BR-402's headroom check. Public:
+    /// the key itself is in `rand_getBridgeState`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_key_sha256: Option<String>,
 }
 
 struct ApiState {
     store: Store,
     guardian: String,
+    pq_key_sha256: Option<String>,
 }
 
 pub fn router(store: Store, guardian: [u8; 20]) -> Router {
+    router_with_pq(store, guardian, None)
+}
+
+/// [`router`], naming in `/v1/health` the PQ public key the guardian co-signs with.
+pub fn router_with_pq(store: Store, guardian: [u8; 20], pq_public_key: Option<&[u8]>) -> Router {
     let state = Arc::new(ApiState {
         store,
         guardian: hex::encode(guardian),
+        pq_key_sha256: pq_public_key.map(crate::headroom::pq_key_id),
     });
     Router::new()
         .route("/v1/health", get(health))
@@ -89,6 +101,7 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<Health> {
         paused,
         held,
         deferred,
+        pq_key_sha256: state.pq_key_sha256.clone(),
     })
 }
 
@@ -130,6 +143,21 @@ impl GuardianClient {
 
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// `GET /v1/health`.
+    pub async fn health(&self) -> Result<Health> {
+        let url = format!("{}/v1/health", self.origin);
+        self.http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("GET {url}: not a health record"))
     }
 
     /// Whatever record this guardian serves for `(chain, sequence)`, unchecked:
