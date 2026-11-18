@@ -38,6 +38,9 @@ start_sequence = 0
 # startup that a single provider can get a message signed.
 #   rpcs = ["https://<second provider>", "https://<third provider>"]
 #   rpc_quorum = 2
+# With rpc_quorum >= 2 the providers must be different operators (by host: the last two labels of
+# a name, or host:port for an IP): a config whose quorum one operator's URLs meet does not load.
+# `rand-guardian --config <file> --check-providers` asks each which chain it serves (read-only).
 
 [[evm]]
 name = "ethereum"

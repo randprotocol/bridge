@@ -16,6 +16,12 @@ struct Cli {
     /// The TOML configuration file (see daemons/config.example.toml).
     #[arg(long, env = "RAND_BRIDGE_CONFIG")]
     config: PathBuf,
+    /// Ask every configured provider which chain it serves and exit (BR-4): 0
+    /// only when, on every watched chain, a quorum of providers from different
+    /// operators name the same chain (for Rand, the configured one). Read-only;
+    /// needs no key and no data directory.
+    #[arg(long)]
+    check_providers: bool,
     /// Pause all signing (an operator's act; nothing pauses on its own), then
     /// exit. Needs no key.
     #[arg(long, value_name = "REASON")]
@@ -65,6 +71,14 @@ async fn main() -> Result<()> {
         .guardian
         .clone()
         .ok_or_else(|| anyhow!("the config has no [guardian] section"))?;
+    if cli.check_providers {
+        let (text, ok) = bridge_daemons::providers::render(&bridge_daemons::providers::probe(&config).await);
+        print!("{text}");
+        if !ok {
+            return Err(anyhow!("at least one chain's providers do not agree on the chain they serve (BR-4)"));
+        }
+        return Ok(());
+    }
     if cli.check_config {
         mainnet_guard(&config, false)?;
         println!("config OK for Rand chain {}", chain_label(&config));
