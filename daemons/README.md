@@ -201,7 +201,9 @@ requires it, each new key's proof of possession (`--possession-seed-envs`), as `
 lines that signers on separate machines append to. `pq-rotate-submit` re-reads the chain, checks
 the quorum and the possession lines under the ledger's rules and sends the rotation through
 `rand-node bridge-gov rotate-pq|rotate-pause submit`; `pq-cancel-rotation` is the pause key's
-cancel of a pending one. Runbook: `docs/pq-rotation.md`.
+cancel of a pending one. `pq-rotate-status` reads the chain and says whether the expected keys are
+in force, pending or absent, whether any retired key remains, and whether a seed on this host is
+one the chain counts (read-only). Runbook: `docs/pq-rotation.md`.
 
 ## Audit
 
