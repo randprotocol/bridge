@@ -427,3 +427,38 @@ pub fn sign_quorum(
     }
     Ok(quorum)
 }
+
+/// Where a rotation stands on the chain, against the keys it was meant to install (BRG-14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotationOutcome {
+    /// The chain's keys are exactly the expected ones, in order.
+    InEffect,
+    /// Accepted and waiting out the delay: in force from `effective_at_secs` unless the
+    /// current pause key cancels it first.
+    Pending { effective_at_secs: u64 },
+    /// Neither in force nor pending.
+    NotRotated,
+}
+
+/// Compares what the chain serves — the keys in force and, if any, the pending rotation of
+/// the same kind — with `expected`. Order matters: a PQ key is bound to its guardian index.
+pub fn rotation_outcome(
+    in_force: &[Vec<u8>],
+    pending: Option<(&[Vec<u8>], u64)>,
+    expected: &[Vec<u8>],
+) -> RotationOutcome {
+    if in_force == expected {
+        return RotationOutcome::InEffect;
+    }
+    match pending {
+        Some((keys, effective_at_secs)) if keys == expected => RotationOutcome::Pending { effective_at_secs },
+        _ => RotationOutcome::NotRotated,
+    }
+}
+
+/// The first eight hex digits of a key's sha256: what `pq-public-key` prints, short enough
+/// to read aloud when two people compare a set.
+pub fn fingerprint(key: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(key))[..8].to_string()
+}
