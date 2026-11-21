@@ -29,9 +29,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The fullnode the daemons build against: constraint set 11 (chain 22, v0.8.7), fullnode main
-  # e79070a7 (PR #194 set-11 re-vendor, circuits 41d64acd; #197 the chain-22 fleet cutover). No
-  # fullnode release carries set 11 yet (v0.8.6 is set 9, chain 21). Set v0.8.7 at the tag.
+  # The fullnode the daemons build against: constraint set 11, the v0.8.7 release (tag bf5aabdf),
+  # which chain 22 has run since 2026-11-21 (v0.8.6 is set 9, chain 21).
   FULLNODE_REF: v0.8.7
 
 jobs:
