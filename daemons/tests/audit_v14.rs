@@ -498,6 +498,7 @@ mod br1005 {
 
     /// Chain 21's genesis hash, as the repository records it (AGENTS.md, spec/PQ-COSIGNATURE.md).
     const CHAIN21: &str = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a";
+    const CHAIN22: &str = "29d67542941f2eb6f2c1bb68c759926f5d814c9e2c7a934292806a2d98b7e9c0";
     const OTHER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
     fn cfg(url: &str, chain_id: Option<u64>, genesis: Option<&str>) -> RandConfig {
@@ -620,9 +621,10 @@ mod br1005 {
         }
     }
 
-    /// The mainnet configs in the repository carry chain 21 and its recorded genesis hash.
+    /// The mainnet configs in the repository carry the live chain (22, cut 2026-11-21) and its
+    /// recorded genesis hash.
     #[test]
-    fn br1005_the_mainnet_configs_name_chain_21_and_its_genesis_hash() {
+    fn br1005_the_mainnet_configs_name_chain_22_and_its_genesis_hash() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mainnet");
         let mut seen = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
@@ -632,7 +634,7 @@ mod br1005 {
             }
             let config = bridge_daemons::config::Config::load(&path).unwrap();
             let (chain_id, genesis) = config.rand.chain_binding().unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
-            assert_eq!((chain_id, hex::encode(genesis).as_str()), (21, CHAIN21), "{}", path.display());
+            assert_eq!((chain_id, hex::encode(genesis).as_str()), (22, CHAIN22), "{}", path.display());
             seen += 1;
         }
         assert_eq!(seen, 9, "eight guardians and the relayer");
