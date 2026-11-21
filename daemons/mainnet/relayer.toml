@@ -4,8 +4,8 @@ poll_secs = 15
 
 [rand]
 rpc = "http://127.0.0.1:8545"        # the bridged Rand chain's node, once it is cut
-chain_id = 21                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
-genesis_hash = "ca76c2766ed6090ac6ba5dad86b724dd5d2b80c0edfaed287cd8b129e663ca9a"   # chain 21 (spec/PQ-COSIGNATURE.md); with chain_id, checked against the node at start and on every poll (BR-1005) — a cut changes BOTH lines
+chain_id = 22                         # part of every PQ co-signature and governance message (spec/PQ-COSIGNATURE.md §9)
+genesis_hash = "29d67542941f2eb6f2c1bb68c759926f5d814c9e2c7a934292806a2d98b7e9c0"   # chain 22 (spec/PQ-COSIGNATURE.md); with chain_id, checked against the node at start and on every poll (BR-1005) — a cut changes BOTH lines
 emitter = "c02df6ba70c2457a7406780da97492a6acb57dc40751e6279f003a570559d15f"
 
 [[evm]]
