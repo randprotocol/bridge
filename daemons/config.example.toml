@@ -16,13 +16,15 @@ start_sequence = 0
 # what the Dilithium2 co-signature is over, so it is configured, never asked of a node.
 # At startup the node at `rpc` must answer and serve this chain, and the stored Rand
 # cursor must not be past the chain's burn_sequence (BR-401); otherwise the daemon stops.
-# chain_id = 21
+# chain_id = 22
 # The chain's genesis hash (what `rand_getGenesisHash` serves on it), from the chain's cut
 # record — not copied from the node this daemon reads. With chain_id it names the one Rand
 # chain this daemon works for (BR-1005): both are checked against every Rand node at startup
 # and again on every poll, before a burn is read and before it is handed on to be signed, so
 # a node switched to another chain yields nothing to sign. rand-guardian does NOT START
 # without both lines; rand-relayer warns. A cut to a new chain changes both.
+# TODO(chain-22 cut): chain 22's genesis hash exists only once the chain is cut (fullnode
+# deploy/cut-records/chain22.record); daemons/mainnet/cut-chain22.sh takes it as GENESIS_HASH.
 # genesis_hash = "<64 hex: the chain's genesis hash>"
 
 # ---- source endpoints ------------------------------------------------------

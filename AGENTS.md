@@ -10,6 +10,29 @@ read it before touching anything there, it is worked on by many sessions in para
   or script defaults; scripts read them from `~/.rand-bridge/mainnet-set1/hosts.txt` and
   `~/.rand-bridge/relayer-host/host.txt` (`public <ip>`, `hostkey SHA256:…`) or the environment.
 
+## State as of 2026-11-20 — chain-22 prep: fullnode e79070a7 (zkVM constraint set 11), NOT cut, NOT deployed
+
+- **Branch `feat/cs11-chain22`** builds against fullnode main `e79070a7` (PR #194's set-11 re-vendor,
+  circuits `41d64acd`; #197 `deploy/cutover-fleet-chain22.sh`). CI's `FULLNODE_REF` pins it (it was
+  an unpinned `main` checkout); set `v0.8.7` at the tag. Lockfiles: `bridge-codec` /
+  `randprotocol-core` path entries 0.8.0/0.8.2 → 0.8.6, nothing else moved.
+- **What set 11 touches here: nothing the bridge computes.** `crates/bridge-codec` and
+  `randprotocol-core/src/bridge` are byte-identical v0.8.6 → e79070a7; the daemons hash with
+  blake3/keccak/sha and sign ECDSA + Dilithium2, never Poseidon2. `vectors/attestations.json` and
+  `vectors/pq-cosignatures.json` regenerate byte for byte; the chain-21 governance vectors stay (a
+  layout pinned at a real genesis, still true). No guardian or relayer rebuild is needed for set 11.
+- **What does move, at the cut** (`daemons/mainnet/cut-chain22.sh`, selftest included):
+  `chain_id` 21 → 22 and `genesis_hash` chain 21's → chain 22's (`GENESIS_HASH`, an input: it exists
+  only once the chain is cut), the Rand cursor (`BURN_SEQ`), and the relayer's `rand` → v0.8.7
+  (`RAND_OLD_SHA` from `status`, `RAND_NEW_SHA` from v0.8.7's signed SHA256SUMS). `bridge-start` of
+  the fleet script waits for these (`BRIDGE_ON_CHAIN22=yes`). The repo's `mainnet/*.toml` stay on
+  chain 21 until the cut, as at every earlier cut: they mirror the hosts.
+- **Trap — every rand1 address changes under set 11.** `pk = H_PK(nk)` is Poseidon2, so the same
+  wallet seed has a new address and a new recipient hash on chain 22. A mint to a set-9 address
+  (a recipient registered before the cut, or a lock naming its hash) seals a note no set-11 wallet
+  can spend. Settle every lock before the cut and decide what the relayer's `recipients` table holds
+  on chain 22 (see the PR).
+
 ## State as of 2026-10-12 — bridge LIVE on Rand chain 21 (fullnode v0.8.0), cut with `daemons/mainnet/cut-chain21.sh`
 
 - **Rand chain 21** (fullnode **v0.8.0**, tag at `c0878c3f`; genesis
@@ -192,7 +215,7 @@ read it before touching anything there, it is worked on by many sessions in para
   external audit (bridge issue #4).
 - **All test suites green**: `cd evm && forge test` (51), `cd solana && cargo test` (41 incl.
   solana-program-test), fullnode `cargo test -p randprotocol-core bridge` (50),
-  `cd tools/vectors && cargo run --release -- --check` (both vector copies byte-identical).
+  `cd tools/vectors && cargo run --release --bin vectors -- --check` (both vector copies byte-identical).
 - **Progress later the same day**: fullnode issue #1 is fixed and closed (fullnode `544926c`:
   `check_bridge` now refuses a guardian set whose quorum attestation exceeds
   `MAX_ATTESTATION_BYTES` — boundary pinned at 367 accepted / 368 refused — plus the two stale

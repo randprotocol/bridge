@@ -59,8 +59,8 @@ cd solana && cargo test
 deploy/trx.sh nile --dry-run
 
 # Shared attestation vectors — regenerate, or verify the two copies match
-cd tools/vectors && cargo run --release            # regenerate vectors/attestations.json and the fullnode's copy
-cd tools/vectors && cargo run --release -- --check  # verify the two copies are byte-identical
+cd tools/vectors && cargo run --release --bin vectors            # regenerate vectors/attestations.json and the fullnode's copy
+cd tools/vectors && cargo run --release --bin vectors -- --check  # verify the two copies are byte-identical
 
 # Rehearse an EVM deployment against a local node
 anvil --port 18545 & ANVIL_RPC_URL=http://127.0.0.1:18545 deploy/evm.sh anvil --yes

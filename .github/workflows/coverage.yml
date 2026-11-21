@@ -4,7 +4,7 @@
 # What is measured: `daemons/` (the guardian, the relayer, the governance tool and the audit tool,
 # with the shared vectors) in the release profile, which is how README.md runs them. The daemons
 # crate depends on `bridge-codec` from a sibling fullnode checkout
-# (`../../fullnode/crates/bridge-codec`), so fullnode's `main` is checked out next to it. The
+# (`../../fullnode/crates/bridge-codec`), so fullnode is checked out next to it at FULLNODE_REF. The
 # Solana program under `solana/` needs the Solana toolchain and is not measured; the tests that
 # need Foundry's anvil skip themselves when it is absent.
 #
@@ -28,6 +28,11 @@ concurrency:
   group: coverage-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The fullnode the daemons build against: constraint set 11, the v0.8.7 release (tag bf5aabdf),
+  # which chain 22 has run since 2026-11-21 (v0.8.6 is set 9, chain 21).
+  FULLNODE_REF: v0.8.7
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -42,6 +47,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: randprotocol/fullnode
+          ref: ${{ env.FULLNODE_REF }}
           path: fullnode
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (branch head, 2026-10-05)
       # llvm-tools for the toolchain the checkout pins (rust-toolchain.toml, where there is one),
