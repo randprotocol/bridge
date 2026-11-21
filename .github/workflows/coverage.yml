@@ -32,7 +32,7 @@ env:
   # The fullnode the daemons build against: constraint set 11 (chain 22, v0.8.7), fullnode main
   # e79070a7 (PR #194 set-11 re-vendor, circuits 41d64acd; #197 the chain-22 fleet cutover). No
   # fullnode release carries set 11 yet (v0.8.6 is set 9, chain 21). Set v0.8.7 at the tag.
-  FULLNODE_REF: e79070a714988105c571ddae3dfeed96b4b39e93
+  FULLNODE_REF: v0.8.7
 
 jobs:
   coverage:
