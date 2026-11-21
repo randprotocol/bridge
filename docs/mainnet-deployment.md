@@ -330,3 +330,40 @@ minted at block 1664 as 0.999 zUSD to the depositor and a 0.001 zUSD fee note �
 **Open:** the v0.6.8 wallet refuses to scan it ("rebuilt deposit or mint note(s) match no leaf"),
 reported to fullnode-4c; randbridge.org routes stay off until a wallet can open such a note.
 
+
+## Round trip on chain 22 (2026-11-21)
+
+One 1 USDT round trip, Tron ↔ Rand chain 22 (fullnode v0.8.7, genesis `29d67542…e9c0`, live
+03:15Z), on the owner's authorisation. Tron was the only endpoint whose tester key held at least
+1 USDT (BSC tester 0.967, Solana tester 0.984). Depositor and release address: the Tron tester
+`TPzTGrqH7fm6j9gXLuRRDmxpwwaocmiuWW` (`RAND_BRIDGE_TESTER_TRX_PRIV_KEY`); Rand side: operator
+wallet shielded-4 (set-11 fingerprint `HQPN-MSSK-6ER2-AE79`, carried 839.998 RAND at genesis).
+
+**Recipient registration.** The relayer's set-9 store was moved aside at the cut
+(`recipients.chain21`), so the set-11 address was registered first: recipient hash
+`40403c979fc63ca7164c45c1c1695fa90b0c93289dc062eb977def4637a9cd1d`
+(`blake3("rand-shielded-recipient" ‖ pk ‖ kem_ek)` of the 1 216-byte address), `POST /v1/recipients`
+on the relayer's `127.0.0.1:7080` → 204. It is the only entry in the chain-22 store so far.
+
+| step (UTC) | what | transaction |
+|---|---|---|
+| 07:20:3x | Tron `approve(bridge, 1 000 000)`, 9.976 TRX | `a7ad37afbe42515ca0d761e1b3dd98ba66491c6c6962ce997ff9c9e385f77118` (block 88190491) |
+| 07:20:48 | Tron `lock(USDT, 1 000 000, 0x40403c97…cd1d, 0, 2211211)`, sequence 3, 13.387 TRX (`deploy/tron-ops.js lock`) | `b5f6de4902c3de4b8cf9771b45578cc5e8bff442841dbbb50e0c693a92a3af22` (block 88190511) |
+| 07:23:27 | Rand `BridgeAttest` by the relayer: amount 100 000 000, deposit 99 900 000 (0.999 zUSD) to shielded-4, fee note 0.001 zUSD, PQ signers 0–5 | block 12879, tx `0888e41655f96fd9050695f2ac2569a587c30f5894234561620ad1c42ff6e2a2` |
+| 07:25:29 | Rand `bridge-burn 1 99900000 4 <Tron USDT> <tester>`: burn seq 17, bridge fee 99 900, 99 800 100 released, fee 0.01 RAND; proof 17.3 s bundle + 1.0 s auth | block 12985, tx `a3358546a21179018f7c3c93abc9370240053eca3a55b538973f4f5da457dc8f` |
+| 07:26:00 | Tron `release` by the relayer, 0.998001 USDT to the tester, 18.219 TRX (relayer's) | `15f8e6b3f18e9bb2a4b0743cad2caa9ae137f7c475140bbe87097a33bc236f6d` (block 88190615) |
+
+Lock → mint 2 min 39 s (Tron finality 19 blocks + six droplet guardians); burn → release 31 s.
+Guardians 7/8 (laptop, `127.0.0.1:7077/7078`) were unreachable throughout; indices 0–5 met the
+6-of-8 ECDSA and 5-of-6 PQ quorums alone.
+
+Amounts: 1 USDT in, 0.998001 USDT back — two 10 bps fees, 0.001 on the mint and 0.000999 on the
+burn, both zUSD notes to `bridge-fee-recipient`. Tester 3.951 → 2.951 → 3.949001 USDT; 23.364 TRX
+spent on the lock side. Tron custody 30.039 → 31.039 → 30.040999 USDT; Rand `locked` Tron-USDT
+30 → 31 → 30.001999 zUSD (the 0.001999 is the two fee notes); custody − locked = 0.039 before and
+after (the pre-existing surplus). `burn_sequence` 17 → 18; the Tron endpoint's `sequence()` 3 → 4.
+
+The burn ran with the v0.8.7 `rand` (sha256 `4ca4f908…90f8`, Linux x86-64 only: the release has
+no macOS build) on the cut build droplet, from a scratch copy of the shielded-4 key file that
+already sat there in `/root/cut22/fullnode/wallets/` (left by the cut session); the copy was
+removed afterwards. `rand-bridge-audit` was not run (owner's exclusion).
